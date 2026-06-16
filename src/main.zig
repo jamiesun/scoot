@@ -12,6 +12,7 @@ const usage =
     \\命令:
     \\  repl                 进入交互式 REPL（默认；/exit 退出）
     \\  config               打印解析后的运行目录与后端配置
+    \\  skills               列出已发现的技能（name / 描述 / 目录）
     \\
     \\选项:
     \\  -e, --eval <prompt>  单次执行一个目标后退出
@@ -36,6 +37,7 @@ pub fn main(init: std.process.Init) !void {
 
     var eval_prompt: ?[]const u8 = null;
     var cmd_config = false;
+    var cmd_skills = false;
     var i: usize = 1; // args[0] 是程序名。
     while (i < args.len) : (i += 1) {
         const arg = args[i];
@@ -54,6 +56,8 @@ pub fn main(init: std.process.Init) !void {
             eval_prompt = args[i];
         } else if (eql(arg, "config")) {
             cmd_config = true;
+        } else if (eql(arg, "skills")) {
+            cmd_skills = true;
         } else if (eql(arg, "repl")) {
             // 默认即 REPL，显式接受该命令。
         } else {
@@ -97,11 +101,17 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    if (cmd_skills) {
+        try printSkills(out, arena, io, cfg);
+        return;
+    }
+
     if (eval_prompt) |prompt| {
         const token = try resolveToken(out, cfg, arena, io, env);
         var client = scoot.llm.Client.init(io, cfg.backend.base_url, cfg.backend.model, token);
         var sess = scoot.session.Session.init("cli");
         try sess.append(arena, .system, scoot.agent.system_prompt);
+        injectSkills(out, arena, io, cfg, &sess);
         try sess.append(arena, .user, prompt);
 
         var ag = scoot.agent.Agent.initClient(&client);
@@ -144,6 +154,56 @@ const repl_banner =
     \\
 ;
 
+/// 发现技能并把清单注入会话 system 上下文（渐进式披露：只注入 name+description+路径）。
+/// 技能是增强项——发现失败或无技能时静默跳过，绝不阻断主流程或污染 `-e` 的可脚本输出。
+/// Registry 借 `arena` 分配，随进程退出整体回收，无需单独 deinit。
+fn injectSkills(
+    out: *Io.Writer,
+    arena: std.mem.Allocator,
+    io: std.Io,
+    cfg: scoot.config.Config,
+    sess: *scoot.session.Session,
+) void {
+    if (!cfg.skills.enabled) return;
+    const paths = cfg.skillPaths(arena) catch return;
+    var reg: scoot.skill.Registry = .{};
+    reg.discoverAll(arena, io, paths) catch |err| {
+        out.print("[scoot] 技能发现失败（{s}），已跳过技能装载。\n", .{@errorName(err)}) catch {};
+        return;
+    };
+    if (reg.count() == 0) return;
+    const text = reg.manifest(arena) catch return;
+    sess.append(arena, .system, text) catch {};
+}
+
+/// `scoot skills`：列出各搜索路径下发现的技能，供用户确认技能是否被正确识别。
+fn printSkills(
+    out: *Io.Writer,
+    arena: std.mem.Allocator,
+    io: std.Io,
+    cfg: scoot.config.Config,
+) !void {
+    const paths = try cfg.skillPaths(arena);
+    try out.writeAll("技能搜索路径:\n");
+    for (paths) |p| try out.print("  {s}\n", .{p});
+
+    if (!cfg.skills.enabled) {
+        try out.writeAll("\n技能机制已在配置中禁用（skills.enabled=false）。\n");
+        return;
+    }
+
+    var reg: scoot.skill.Registry = .{};
+    try reg.discoverAll(arena, io, paths);
+    if (reg.count() == 0) {
+        try out.writeAll("\n未发现任何技能。在某搜索路径下建 <技能名>/SKILL.md（含 front-matter）即可。\n");
+        return;
+    }
+    try out.print("\n已发现 {d} 个技能:\n", .{reg.count()});
+    for (reg.skills.items) |s| {
+        try out.print("  - {s}：{s}\n    {s}\n", .{ s.name, s.description, s.dir });
+    }
+}
+
 /// 解析 API token（env > file > cmd）。本地无鉴权后端可留空。
 /// 修复静默吞咽：当用户**显式**配置了 file/cmd 来源却尚未实现时，明示告警，
 /// 不再把 NotImplemented 装作「无鉴权」悄悄吞掉。
@@ -185,6 +245,7 @@ fn runRepl(
 
     var sess = scoot.session.Session.init("repl");
     try sess.append(arena, .system, scoot.agent.system_prompt);
+    injectSkills(out, arena, io, cfg, &sess);
 
     var ag = scoot.agent.Agent.initClient(&client);
     ag.max_turns = cfg.agent.max_turns;
