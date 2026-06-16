@@ -13,9 +13,11 @@ const usage =
     \\  repl                 进入交互式 REPL（默认；/exit 退出）
     \\  config               打印解析后的运行目录与后端配置
     \\  skills               列出已发现的技能（name / 描述 / 目录）
+    \\  schedule [list|run]  列出 / 运行调度任务（无人值守，强制只读安全档）
     \\
     \\选项:
     \\  -e, --eval <prompt>  单次执行一个目标后退出
+    \\  --ticks <N>          schedule run 仅跑 N 轮后退出（默认 0=持续运行）
     \\  -h, --help           显示本帮助
     \\  -v, --version        显示版本号
     \\
@@ -38,6 +40,8 @@ pub fn main(init: std.process.Init) !void {
     var eval_prompt: ?[]const u8 = null;
     var cmd_config = false;
     var cmd_skills = false;
+    var cmd_schedule: ?[]const u8 = null; // null=未请求；否则为子动作 list/run
+    var schedule_ticks: usize = 0; // 0=持续运行
     var i: usize = 1; // args[0] 是程序名。
     while (i < args.len) : (i += 1) {
         const arg = args[i];
@@ -54,10 +58,28 @@ pub fn main(init: std.process.Init) !void {
                 die(out, 2);
             }
             eval_prompt = args[i];
+        } else if (eql(arg, "--ticks")) {
+            i += 1;
+            if (i >= args.len) {
+                try out.writeAll("error: --ticks 需要一个整数参数\n");
+                die(out, 2);
+            }
+            schedule_ticks = std.fmt.parseInt(usize, args[i], 10) catch {
+                try out.print("error: --ticks 参数不是合法整数：'{s}'\n", .{args[i]});
+                die(out, 2);
+            };
         } else if (eql(arg, "config")) {
             cmd_config = true;
         } else if (eql(arg, "skills")) {
             cmd_skills = true;
+        } else if (eql(arg, "schedule")) {
+            // 可选子动作；缺省为 list（只读、无副作用）。下一 token 若是选项则不消费。
+            if (i + 1 < args.len and !std.mem.startsWith(u8, args[i + 1], "-")) {
+                i += 1;
+                cmd_schedule = args[i];
+            } else {
+                cmd_schedule = "list";
+            }
         } else if (eql(arg, "repl")) {
             // 默认即 REPL，显式接受该命令。
         } else {
@@ -104,6 +126,19 @@ pub fn main(init: std.process.Init) !void {
     if (cmd_skills) {
         try printSkills(out, arena, io, cfg);
         return;
+    }
+
+    if (cmd_schedule) |action| {
+        if (eql(action, "list")) {
+            try printSchedule(out, cfg);
+            return;
+        } else if (eql(action, "run")) {
+            try runSchedule(out, arena, io, env, cfg, schedule_ticks);
+            return;
+        } else {
+            try out.print("error: 未知 schedule 子命令 '{s}'（可用：list / run）\n", .{action});
+            die(out, 2);
+        }
     }
 
     if (eval_prompt) |prompt| {
@@ -202,6 +237,159 @@ fn printSkills(
     for (reg.skills.items) |s| {
         try out.print("  - {s}：{s}\n    {s}\n", .{ s.name, s.description, s.dir });
     }
+}
+
+/// 把触发器渲染为人类可读描述（供 `schedule list`）。
+fn triggerLabel(buf: []u8, trig: scoot.schedule.Trigger) []const u8 {
+    return switch (trig) {
+        .every_sec => |s| std.fmt.bufPrint(buf, "每 {d}s", .{s}) catch "every",
+        .at_unix => |t| std.fmt.bufPrint(buf, "@{d}", .{t}) catch "at",
+        .cron => |c| std.fmt.bufPrint(buf, "cron '{s}'（暂不支持）", .{c}) catch "cron",
+    };
+}
+
+/// `scoot schedule list`：展示调度开关、轮询间隔与各任务（含**有效执行档**与非法标记）。
+/// 只读、无副作用——让用户在真正 `run` 前先核对安全档与触发器是否如预期。
+fn printSchedule(out: *Io.Writer, cfg: scoot.config.Config) !void {
+    const sc = cfg.schedule;
+    try out.print("调度: {s}（poll={d}ms，jobs={d}）\n", .{
+        if (sc.enabled) "已启用" else "已禁用（schedule.enabled=false）",
+        sc.poll_ms,
+        sc.jobs.len,
+    });
+    if (sc.jobs.len == 0) {
+        try out.writeAll("  （无任务。在 config.json 的 schedule.jobs 配置）\n");
+        return;
+    }
+    var tbuf: [128]u8 = undefined;
+    for (sc.jobs) |jc| {
+        if (jc.toJob()) |job| {
+            const eff = job.effectiveMode();
+            const coerced = if (eff != job.mode) "（强制矫正）" else "";
+            try out.print("  - {s}  [{s}]  执行档={s}{s}  goal={s}\n", .{
+                jc.id, triggerLabel(&tbuf, job.trigger), @tagName(eff), coerced, job.goal,
+            });
+        } else {
+            try out.print("  - {s}  ⚠ 触发器非法（须恰好设置 every_sec/at_unix/cron 之一），运行时将跳过\n", .{jc.id});
+        }
+    }
+    if (!sc.enabled) {
+        try out.writeAll("\n提示：`scoot schedule run` 需先在 config.json 设 schedule.enabled=true。\n");
+    }
+}
+
+/// 单任务运行上下文：携带跑一个 job 所需的一切 + 一个**可重置 arena**。
+/// 调度器只判到点，真正执行经 `runJob` 回调注入（解耦 agent 依赖）。
+const RunCtx = struct {
+    out: *Io.Writer,
+    io: std.Io,
+    cfg: scoot.config.Config,
+    client: *scoot.llm.Client,
+    /// 每个 job 用它分配 scratch，跑完 `reset(.retain_capacity)`——长效守护零泄漏。
+    job_arena: *std.heap.ArenaAllocator,
+
+    /// schedule.Scheduler.RunFn 回调：到点时执行单个 job。**绝不抛错**（返回 void），
+    /// 单任务失败只记审计 + 打印并继续，不拖垮守护循环。
+    fn runJob(ctx: *anyopaque, job: *scoot.schedule.Job) void {
+        const self: *RunCtx = @ptrCast(@alignCast(ctx));
+        const a = self.job_arena.allocator();
+        defer _ = self.job_arena.reset(.retain_capacity); // 本轮 scratch 回收，内存平稳
+
+        // 铁律 #1：无人值守执行强制安全档——guarded 绊线对无人值守无意义，矫正为 readonly。
+        const eff = job.effectiveMode();
+
+        const sid = std.fmt.allocPrint(a, "job-{s}", .{job.id}) catch return;
+        var sess = scoot.session.Session.init(sid);
+        sess.append(a, .system, scoot.agent.system_prompt) catch {};
+        injectSkills(self.out, a, self.io, self.cfg, &sess);
+        sess.append(a, .user, job.goal) catch {};
+
+        var ag = scoot.agent.Agent.initClient(self.client);
+        ag.max_turns = self.cfg.agent.max_turns;
+        ag.tool_timeout_ms = self.cfg.tools.timeout_ms;
+        ag.policy_mode = eff; // 强制有效安全档（结构上不可能跑在 guarded 之上）
+
+        var sink: AuditSink = .{};
+        sink.open(self.out, a, self.io, self.cfg.dirs.logs_dir);
+        ag.audit = sink.loggerPtr();
+        if (ag.audit) |lg| {
+            const marker = std.fmt.allocPrint(a, "schedule job={s} mode={s} goal={s}", .{
+                job.id, @tagName(eff), job.goal,
+            }) catch job.goal;
+            lg.log(.run, marker) catch {};
+        }
+
+        self.out.print("[scoot] ▶ 任务 {s}（{s}）：{s}\n", .{ job.id, @tagName(eff), job.goal }) catch {};
+        const reply = ag.run(a, &sess) catch |err| {
+            if (ag.audit) |lg| lg.log(.system_error, @errorName(err)) catch {};
+            finalizeRun(self.io, &sess, self.cfg.dirs.sessions_dir, &sink);
+            self.out.print("[scoot] ✗ 任务 {s} 失败：{s}（继续下一个）\n", .{ job.id, @errorName(err) }) catch {};
+            self.out.flush() catch {};
+            return;
+        };
+        finalizeRun(self.io, &sess, self.cfg.dirs.sessions_dir, &sink);
+        self.out.print("[scoot] ✓ 任务 {s}：{s}\n", .{ job.id, reply }) catch {};
+        self.out.flush() catch {}; // 长效运行下让进度即时可见
+    }
+};
+
+/// `scoot schedule run [--ticks N]`：装载合法任务，进入守护循环到点唤起 Agent。
+/// 必须显式开启 `schedule.enabled`（无人值守自主执行是高风险，默认拒绝）。
+/// `client`/`token` 在守护生命周期内只构建一次；每个 job 的 scratch 走可重置 arena。
+fn runSchedule(
+    out: *Io.Writer,
+    arena: std.mem.Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+    cfg: scoot.config.Config,
+    ticks: usize,
+) !void {
+    const sc = cfg.schedule;
+    if (!sc.enabled) {
+        try out.writeAll("[scoot] 调度未启用：请在 config.json 设 schedule.enabled=true 后再运行。\n");
+        die(out, 1);
+    }
+
+    var sch: scoot.schedule.Scheduler = .{};
+    var valid: usize = 0;
+    for (sc.jobs) |jc| {
+        const job = jc.toJob() orelse {
+            try out.print("[scoot] 跳过非法任务 '{s}'（触发器须恰好设置其一）。\n", .{jc.id});
+            continue;
+        };
+        try sch.add(arena, job); // job 内容借 cfg/arena 生命周期（>= scheduler）
+        valid += 1;
+    }
+    if (valid == 0) {
+        try out.writeAll("[scoot] 无可运行任务，退出。\n");
+        return;
+    }
+
+    const token = try resolveToken(out, cfg, arena, io, env);
+    var client = scoot.llm.Client.init(io, cfg.backend.base_url, cfg.backend.model, token);
+
+    var job_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer job_arena.deinit();
+
+    var rctx = RunCtx{
+        .out = out,
+        .io = io,
+        .cfg = cfg,
+        .client = &client,
+        .job_arena = &job_arena,
+    };
+
+    try out.print("[scoot] 调度启动：{d} 个任务，poll={d}ms，{s}（后端 {s}，model={s}）。\n", .{
+        valid,
+        sc.poll_ms,
+        if (ticks == 0) "持续运行（Ctrl-C 退出）" else "有界运行",
+        cfg.backend.base_url,
+        cfg.backend.model,
+    });
+    try out.flush();
+
+    const fired = sch.runForever(io, sc.poll_ms, ticks, &rctx, RunCtx.runJob);
+    try out.print("[scoot] 调度结束：累计触发 {d} 次。\n", .{fired});
 }
 
 /// 解析 API token（env > file > cmd）。本地无鉴权后端可留空。

@@ -4,6 +4,8 @@ const std = @import("std");
 const Environ = std.process.Environ;
 const paths = @import("paths.zig");
 const secret = @import("secret.zig");
+const schedule = @import("schedule.zig");
+const policy = @import("policy.zig");
 
 /// LLM 后端配置。仅 OpenAI 兼容协议（见 ROADMAP 非目标）。
 pub const Backend = struct {
@@ -48,6 +50,61 @@ pub const Audit = struct {
     to_file: bool = true,
 };
 
+/// 单个调度任务的可配置镜像。trigger 用三个互斥的可选字段表达（JSON 友好），
+/// 恰好设置其一才合法（见 `Schedule.toJobs` 校验）。
+pub const JobConfig = struct {
+    id: []const u8,
+    goal: []const u8 = "",
+    /// 固定间隔（秒）。
+    every_sec: ?u64 = null,
+    /// 固定时间点（Unix 秒）。
+    at_unix: ?i64 = null,
+    /// Cron 表达式（暂不支持）。
+    cron: ?[]const u8 = null,
+    /// 执行策略档：readonly（默认，无人值守安全档）/ unrestricted（自担风险，仍审计）。
+    /// guarded 在执行时会被矫正为 readonly（见 schedule.Job.effectiveMode）。
+    mode: []const u8 = "readonly",
+
+    /// 把互斥的可选触发字段收口为 schedule.Trigger；**恰好设置其一**才合法，否则 null。
+    pub fn trigger(jc: JobConfig) ?schedule.Trigger {
+        var n: usize = 0;
+        var t: schedule.Trigger = undefined;
+        if (jc.every_sec) |s| {
+            n += 1;
+            t = .{ .every_sec = s };
+        }
+        if (jc.at_unix) |a| {
+            n += 1;
+            t = .{ .at_unix = a };
+        }
+        if (jc.cron) |c| {
+            n += 1;
+            t = .{ .cron = c };
+        }
+        return if (n == 1) t else null;
+    }
+
+    /// 转为可调度的 schedule.Job；触发器非法（缺失/多重）则 null，调用方据此跳过并告警。
+    /// mode 经 policy.Mode.fromString 解析（未知值回落 guarded，再被 effectiveMode 矫正为 readonly）。
+    pub fn toJob(jc: JobConfig) ?schedule.Job {
+        const trig = jc.trigger() orelse return null;
+        return .{
+            .id = jc.id,
+            .trigger = trig,
+            .goal = jc.goal,
+            .mode = policy.Mode.fromString(jc.mode),
+        };
+    }
+};
+
+/// 调度配置（北极星方向三）。默认关闭：自主无人值守执行必须显式开启。
+pub const Schedule = struct {
+    enabled: bool = false,
+    /// 守护循环轮询间隔（毫秒）。
+    poll_ms: u64 = 1000,
+    jobs: []const JobConfig = &.{},
+};
+
 /// config.json 的可序列化镜像：仅含可落盘的配置节，不含运行目录。
 /// 每节都带默认值，缺省的节/字段自动回落默认，从而实现按节合并。
 const FileConfig = struct {
@@ -56,6 +113,7 @@ const FileConfig = struct {
     tools: Tools = .{},
     skills: Skills = .{},
     audit: Audit = .{},
+    schedule: Schedule = .{},
 };
 
 /// 配置文件大小上限：1 MiB（config.json 实际仅几 KiB，留足冗余）。
@@ -81,6 +139,7 @@ pub const Config = struct {
     tools: Tools = .{},
     skills: Skills = .{},
     audit: Audit = .{},
+    schedule: Schedule = .{},
     /// 解析出的运行目录。
     dirs: paths.Paths,
 
@@ -105,6 +164,7 @@ pub const Config = struct {
             .tools = fc.tools,
             .skills = fc.skills,
             .audit = fc.audit,
+            .schedule = fc.schedule,
             .dirs = dirs,
         };
     }
@@ -206,4 +266,57 @@ test "parseFileConfig: 畸形 JSON → InvalidConfig" {
     try std.testing.expectError(error.InvalidConfig, parseFileConfig(arena.allocator(),
         \\{ "agent": { "max_turns": "not-a-number" } }
     ));
+}
+
+test "parseFileConfig: schedule 节默认关闭" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const fc = try parseFileConfig(arena.allocator(), "{}");
+    try std.testing.expect(!fc.schedule.enabled);
+    try std.testing.expectEqual(@as(u64, 1000), fc.schedule.poll_ms);
+    try std.testing.expectEqual(@as(usize, 0), fc.schedule.jobs.len);
+}
+
+test "parseFileConfig: schedule jobs 解析" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const json =
+        \\{
+        \\  "schedule": {
+        \\    "enabled": true,
+        \\    "poll_ms": 500,
+        \\    "jobs": [
+        \\      { "id": "heartbeat", "goal": "检查磁盘", "every_sec": 60 },
+        \\      { "id": "once", "goal": "一次性", "at_unix": 99999, "mode": "unrestricted" }
+        \\    ]
+        \\  }
+        \\}
+    ;
+    const fc = try parseFileConfig(arena.allocator(), json);
+    try std.testing.expect(fc.schedule.enabled);
+    try std.testing.expectEqual(@as(u64, 500), fc.schedule.poll_ms);
+    try std.testing.expectEqual(@as(usize, 2), fc.schedule.jobs.len);
+    try std.testing.expectEqualStrings("heartbeat", fc.schedule.jobs[0].id);
+    try std.testing.expectEqualStrings("readonly", fc.schedule.jobs[0].mode); // 默认
+    try std.testing.expectEqualStrings("unrestricted", fc.schedule.jobs[1].mode);
+}
+
+test "JobConfig.toJob: 触发器校验与策略矫正" {
+    // 恰好一个触发器 → 合法
+    const ok = JobConfig{ .id = "a", .every_sec = 30 };
+    const job = ok.toJob().?;
+    try std.testing.expectEqual(policy.Mode.readonly, job.mode); // 默认 readonly
+
+    // guarded 配置经 effectiveMode 矫正为 readonly（铁律 #1）
+    const guarded = JobConfig{ .id = "g", .every_sec = 30, .mode = "guarded" };
+    try std.testing.expectEqual(policy.Mode.guarded, guarded.toJob().?.mode); // 原始保留
+    try std.testing.expectEqual(policy.Mode.readonly, guarded.toJob().?.effectiveMode()); // 执行矫正
+
+    // 零触发器 → 非法
+    const none = JobConfig{ .id = "n" };
+    try std.testing.expect(none.toJob() == null);
+
+    // 多触发器 → 非法
+    const multi = JobConfig{ .id = "m", .every_sec = 30, .at_unix = 100 };
+    try std.testing.expect(multi.toJob() == null);
 }

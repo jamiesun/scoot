@@ -70,8 +70,8 @@ Scoot 是一个运行在纯文本环境下的轻量级 AI Agent 守护进程（D
 - **🧱✅🚧 OpenAI 协议适配（API Integration）**
   仅对接 `/v1/chat/completions`；强制开启 `response_format: { type: "json_schema" }` 与 Tool Calling 的 `strict: true`，从协议层把模型输出约束成结构化数据。`src/llm.zig` 已实现真实 HTTP 往返（`std.http.Client.fetch`）、紧凑请求体构造（强制 `json_schema` + `strict:true`）与防弹响应解析（`std.json` 容错），均有单元测试守护；流式（`stream`）与 Tool Calling 字段待实现。
 
-- **🧱🚧 调度引擎（Scheduler）**
-  基于时间循环的触发器，支持 `every`（间隔）、`at`（固定时间点）、`cron`（Cron 表达式）三类调度。增删骨架已在 `src/schedule.zig`，时间循环待实现。
+- **✅ 调度引擎（Scheduler）**
+  基于时间循环的触发器，支持 `every`（间隔）、`at`（固定时间点）两类调度——`src/schedule.zig` 已实现：`dueAt` 纯函数到点判定（时间可注入，便于防弹单测）、`tick`/`runForever` 守护循环（真实单调时钟，`--ticks N` 支持有界运行）。`scoot schedule list` 列出任务与**有效执行档**，`scoot schedule run` 进入守护循环到点唤起 Agent。**安全前置（铁律 #1）**：被调度 job 是无人在场的自主执行，故默认强制 `readonly` 安全档，`guarded` 绊线一律由 `effectiveMode` 矫正为 `readonly`（结构性保证，无人值守绝不跑在 guarded 之上）；用户可显式 `unrestricted`（自担风险，仍全程审计）。每个 job 用可重置 arena 承载 scratch，跑完即回收以保长效零泄漏。`cron`（Cron 表达式）暂不支持——`dueAt` 对其恒返回 false，不半实现一个会出错的解析器（反过载）。`schedule.enabled` 默认关闭，自主无人值守必须显式开启。
 
 - **🧱✅🚧 认知流引擎（ReACT Loop）**
   经典“思考–行动–观察”（Thought–Action–Observation）闭环状态机，驱动 Agent 自主推进任务。`src/agent.zig` 已实现**多轮**闭环：每回合用强制 json_schema 让模型产出结构化步骤 `{thought, action, action_input}`（`action ∈ {bash, final}`），`bash` **先过执行护栏校验、再**经统一工具沙盒（硬超时）执行、输出作为「观察」回灌续推，`final` 即终态；非法步骤防弹捕获并回灌纠错触发重试；`max_turns` 防失控。`scoot -e` 单次执行与默认 **REPL 多轮交互**（复用会话、每轮独立审计、出错不中断、收尾落盘）均已端到端打通（含真实工具调用）。设计上不依赖后端原生 tool_calls（对本地小模型更稳健），有脚本化大脑驱动的循环测试守护。
@@ -119,7 +119,7 @@ Scoot 是一个运行在纯文本环境下的轻量级 AI Agent 守护进程（D
   - **计划模式（Plan Mode）**：Agent 先产出一份固定的执行 DAG（有向无环图），经用户确认或审计后，再严格按步骤执行——把“可审计、可干预”落到任务编排层。
 
 - **方向三：CLI 交互式的 Schedule 管理。**
-  服务于“把 AI 能力与传统定时任务融合”的取向。意图是提供类 IRC / Slack bot 风格的指令（如 `/schedule add`、`/schedule list`、`/schedule remove`），让 Scoot 成为个人的智能 Cronjob 中枢，定时唤起 Agent 处理后台任务。
+  服务于“把 AI 能力与传统定时任务融合”的取向，让 Scoot 成为个人的智能 Cronjob 中枢，定时唤起 Agent 处理后台任务。**当前已落地**声明式形态：任务在 `config.json` 的 `schedule.jobs` 声明，`scoot schedule list` 查看（含有效执行档与非法标记）、`scoot schedule run` 进入守护循环执行。交互式增删（类 IRC / Slack bot 的 `/schedule add`、`/schedule remove` 运行时改配）为后续增量——声明式配置已能覆盖核心场景，避免过早引入运行时任务 CRUD 与持久化复杂度。
 
 - **方向四：本地 Skill 机制（渐进式披露）。**
   服务于“Skill 即能力扩展”与“轻量化”两个画像。意图是让用户把"能力 + 指令集"做成 `~/.scoot/skills` 下的目录（`SKILL.md` 描述 + 可选脚本/资源），Scoot 启动时只读取 name/description 建轻量索引并注入上下文，模型选中后才加载该 skill 的正文与资源。如此既能无限扩展能力，又不会让所有 skill 的正文一次性挤爆上下文，也无需为加新能力重新编译。skill 自带脚本必须经统一沙盒执行。
