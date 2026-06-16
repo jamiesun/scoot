@@ -16,6 +16,7 @@ const llm = @import("llm.zig");
 const session = @import("session.zig");
 const tools = @import("tools/tools.zig");
 const audit = @import("audit.zig");
+const policy = @import("policy.zig");
 
 /// 双轨认知模式（见 ROADMAP 方向二）。
 pub const Mode = enum {
@@ -78,6 +79,8 @@ pub const Agent = struct {
     /// 可选审计日志：非 null 时把每步 思考/工具调用/观察/终态/错误 留痕（铁律：可审计）。
     /// 注入式，测试可挂内存 writer 验证；审计写入失败不阻断任务（最终在 flush 处暴露）。
     audit: ?*audit.Logger = null,
+    /// 执行护栏模式（铁律：未经验证的模型输出不落系统）。bash 命令执行前必过此门。
+    policy_mode: policy.Mode = .guarded,
 
     /// 用真实 LLM 后端构造 Agent。
     pub fn initClient(client: *llm.Client) Agent {
@@ -125,10 +128,24 @@ pub const Agent = struct {
                 },
                 .bash => {
                     if (self.audit) |lg| lg.log(.tool_call, step.action_input) catch {};
-                    const observation = self.runBash(arena, step.action_input) catch |err|
-                        try std.fmt.allocPrint(arena, "[观察] 工具执行失败：{s}", .{@errorName(err)});
-                    if (self.audit) |lg| lg.log(.observation, observation) catch {};
-                    try sess.append(backing, .user, observation);
+                    // 铁律：模型产出的命令必须先过执行护栏，绝不直接落到系统上。
+                    switch (policy.evaluate(arena, step.action_input, self.policy_mode)) {
+                        .deny => |reason| {
+                            const denied = try std.fmt.allocPrint(
+                                arena,
+                                "[观察] 命令被执行护栏拒绝（{s} 模式）：{s}。请改用更安全或只读的方式达成目标。",
+                                .{ @tagName(self.policy_mode), reason },
+                            );
+                            if (self.audit) |lg| lg.log(.policy_deny, denied) catch {};
+                            try sess.append(backing, .user, denied);
+                        },
+                        .allow => {
+                            const observation = self.runBash(arena, step.action_input) catch |err|
+                                try std.fmt.allocPrint(arena, "[观察] 工具执行失败：{s}", .{@errorName(err)});
+                            if (self.audit) |lg| lg.log(.observation, observation) catch {};
+                            try sess.append(backing, .user, observation);
+                        },
+                    }
                 },
             }
         }
@@ -374,6 +391,39 @@ test "run: 审计日志按序记录 thought/tool_call/observation/final 链路" 
         const v = try std.json.parseFromSlice(std.json.Value, gpa, line, .{});
         v.deinit();
     }
+}
+
+test "run: 危险命令被执行护栏拦截——不执行、留痕 policy_deny、回灌后改道收敛" {
+    const gpa = std.testing.allocator;
+    // 第一步吐危险命令（guarded 默认拦截），第二步改道给最终答复。
+    var brain = ScriptedBrain{ .steps = &.{
+        "{\"thought\":\"清理\",\"action\":\"bash\",\"action_input\":\"rm -rf /\"}",
+        "{\"thought\":\"改用安全方式\",\"action\":\"final\",\"action_input\":\"已避免危险操作\"}",
+    } };
+    var ag = testAgent(&brain, 16); // policy_mode 默认 .guarded
+
+    var logbuf: [4096]u8 = undefined;
+    var lw = std.Io.Writer.fixed(&logbuf);
+    var logger = audit.Logger.init(&lw);
+    ag.audit = &logger;
+
+    var sess = session.Session.init("t");
+    defer sess.deinit(gpa);
+    try sess.append(gpa, .user, "把磁盘清掉");
+    const reply = try ag.run(gpa, &sess);
+    defer gpa.free(reply);
+
+    try std.testing.expectEqualStrings("已避免危险操作", reply);
+
+    // 拒绝必须留痕，且会话里出现回灌的「被拒」观察，但绝无该命令的真实执行输出。
+    const log = lw.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, log, "\"kind\":\"policy_deny\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, log, "\"kind\":\"observation\"") == null);
+    var saw_denied = false;
+    for (sess.items()) |m| {
+        if (std.mem.indexOf(u8, m.content, "执行护栏拒绝") != null) saw_denied = true;
+    }
+    try std.testing.expect(saw_denied);
 }
 
 test {

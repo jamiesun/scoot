@@ -28,6 +28,9 @@ pub const Agent = struct {
 pub const Tools = struct {
     /// 工具调用硬超时（毫秒）。
     timeout_ms: u64 = 30_000,
+    /// 执行护栏模式：guarded（拦截灾难性命令，默认）/ readonly（只读白名单，
+    /// fail-closed）/ unrestricted（不设限）。见 policy.zig。无人值守场景应选 readonly。
+    policy: []const u8 = "guarded",
 };
 
 /// Skill 机制配置。

@@ -17,6 +17,7 @@ pub const session = @import("session.zig");
 pub const agent = @import("agent.zig");
 pub const schedule = @import("schedule.zig");
 pub const audit = @import("audit.zig");
+pub const policy = @import("policy.zig");
 
 test {
     std.testing.refAllDecls(@This());

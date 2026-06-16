@@ -111,6 +111,7 @@ pub fn main(init: std.process.Init) !void {
         var ag = scoot.agent.Agent.initClient(&client);
         ag.max_turns = cfg.agent.max_turns;
         ag.tool_timeout_ms = cfg.tools.timeout_ms;
+        ag.policy_mode = scoot.policy.Mode.fromString(cfg.tools.policy);
 
         // 审计留痕（铁律：可审计胜过黑盒）。审计文件打不开时降级为「明示警告 + 不留痕」，
         // 既不静默退回黑盒，也不因日志故障阻断任务。

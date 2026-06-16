@@ -49,6 +49,7 @@ src/
   agent.zig          认知流引擎：多轮 ReACT 闭环（structured step + 工具调用）+ 每回合 ArenaAllocator
   schedule.zig       调度引擎：every / at / cron 触发器
   audit.zig          审计日志：思考 / 工具调用 / 观察 留痕
+  policy.zig         执行护栏：命令落系统前的策略门（guarded / readonly / unrestricted）
   tools/             执行沙盒（均带硬超时）
     tools.zig        工具注册与统一结果类型
     bash.zig         shell 命令执行
@@ -125,10 +126,11 @@ Scoot 通过 **skill** 扩展能力，无需重新编译核心二进制。一个
 | 密钥管理 | `src/secret.zig` | 🚧 env 来源可用，文件(0600)/命令待实现 |
 | LLM 适配（OpenAI） | `src/llm.zig` | ✅ HTTP 往返 + 强制 json_schema/strict + 防弹解析（含测试）；🚧 流式/Tool Calling 待实现 |
 | Skill 机制 | `src/skill.zig` | 🚧 类型 + 注册表骨架，发现/加载待实现 |
-| 认知流引擎（ReACT / Plan） | `src/agent.zig` | ✅ 多轮 ReACT（structured step→bash 硬超时执行→观察回灌→final），防弹纠错 + max_turns 防失控（含循环测试）；🚧 plan 模式待实现 |
+| 认知流引擎（ReACT / Plan） | `src/agent.zig` | ✅ 多轮 ReACT（structured step→**执行护栏校验**→bash 硬超时执行→观察回灌→final），防弹纠错 + max_turns 防失控（含循环测试）；🚧 plan 模式待实现 |
 | 会话（短期记忆载体） | `src/session.zig` | ✅ 内存记录 + JSONL 序列化 + 追加落盘 `state/sessions/<id>.jsonl`（含测试） |
 | 调度引擎（every/at/cron） | `src/schedule.zig` | 🚧 增删可用，时间循环待实现 |
-| 审计日志 | `src/audit.zig` | ✅ JSONL 审计链路：agent 每步 `run/thought/tool_call/observation/final/system_error` 留痕，`-e` 追加落盘 `logs/audit.jsonl`（含测试） |
+| 审计日志 | `src/audit.zig` | ✅ JSONL 审计链路：agent 每步 `run/thought/tool_call/observation/policy_deny/final/system_error` 留痕，`-e` 追加落盘 `logs/audit.jsonl`（含测试） |
+| 执行护栏 | `src/policy.zig` | ✅ 命令落系统前必过策略门：`guarded`（拦截灾难性命令绊线，默认）/ `readonly`（只读白名单 fail-closed）/ `unrestricted`；被拒即审计 `policy_deny` 并回灌让模型改道（含测试） |
 | 执行沙盒（工具集） | `src/tools/` | ✅ `bash` 硬超时 + 输出上限 + cwd（含测试）；🚧 file / search / http 待实现 |
 
 ## 设计原则（节选）

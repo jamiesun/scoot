@@ -12,6 +12,8 @@ pub const EventKind = enum {
     observation,
     /// 终态答复。
     final,
+    /// 命令被执行护栏拒绝（铁律：未经验证的输出不落系统）。
+    policy_deny,
     system_error,
 };
 
