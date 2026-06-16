@@ -73,14 +73,22 @@ pub const Session = struct {
         }
     }
 
-    /// 把会话追加持久化到 `<sessions_dir>/<id>.jsonl`（不存在则创建）。
-    /// 序列化逻辑见 `writeJsonl`；此处只负责通过 Io 打开 / 追加文件。
-    /// TODO: 用 Io 打开（O_CREATE|O_APPEND）目标文件并写入 writeJsonl 的结果。
+    /// 把会话追加持久化到 `<sessions_dir>/<id>.jsonl`（不存在则创建，存在则**追加**）。
+    /// 序列化逻辑见 `writeJsonl`；此处负责通过 Io 打开文件、定位到末尾后写入。
+    /// 追加语义让同一会话的多次运行快照在一个文件里按时间累积，服务可回溯审计链路。
     pub fn persist(self: *const Session, io: std.Io, sessions_dir: []const u8) !void {
-        _ = self;
-        _ = io;
-        _ = sessions_dir;
-        return error.NotImplemented;
+        var pathbuf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = try std.fmt.bufPrint(&pathbuf, "{s}/{s}.jsonl", .{ sessions_dir, self.id });
+
+        var file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = false });
+        defer file.close(io);
+
+        const st = try file.stat(io);
+        var buf: [4096]u8 = undefined;
+        var fw = file.writer(io, &buf);
+        try fw.seekTo(st.size); // 定位到文件末尾以追加，不覆盖既有记录
+        try self.writeJsonl(&fw.interface);
+        try fw.interface.flush();
     }
 };
 
@@ -132,6 +140,36 @@ test "writeJsonl 产出可被 std.json 解析的合法行（含转义）" {
         try std.testing.expectEqualStrings(expect_content[idx], parsed.value.content);
     }
     try std.testing.expectEqual(@as(usize, 2), idx);
+}
+
+test "persist 追加写 JSONL 到 <dir>/<id>.jsonl 并可读回" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const dir = "/tmp/scoot_session_persist_test";
+    cwd.deleteTree(io, dir) catch {};
+    defer cwd.deleteTree(io, dir) catch {};
+    try cwd.createDirPath(io, dir);
+
+    var s = Session.init("conv1");
+    defer s.deinit(gpa);
+    try s.append(gpa, .user, "你好\"世界\"");
+    try s.append(gpa, .assistant, "在");
+
+    try s.persist(io, dir);
+    try s.persist(io, dir); // 再次持久化必须追加（验证不是覆盖）
+
+    const bytes = try cwd.readFileAlloc(io, dir ++ "/conv1.jsonl", gpa, .limited(1 << 16));
+    defer gpa.free(bytes);
+
+    var lines: usize = 0;
+    var it = std.mem.tokenizeScalar(u8, bytes, '\n');
+    while (it.next()) |line| : (lines += 1) {
+        const v = try std.json.parseFromSlice(std.json.Value, gpa, line, .{});
+        v.deinit(); // 每行都应是合法 JSON
+    }
+    try std.testing.expectEqual(@as(usize, 4), lines); // 2 条消息 × 2 次持久化
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "你好") != null);
 }
 
 test {

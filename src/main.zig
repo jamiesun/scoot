@@ -81,6 +81,11 @@ pub fn main(init: std.process.Init) !void {
         },
     };
 
+    cfg.dirs.ensure(io) catch |err| {
+        try out.print("error: 无法创建运行目录（{s}）：{s}\n", .{ @errorName(err), cfg.dirs.home });
+        die(out, 1);
+    };
+
     if (cmd_config) {
         try out.print("运行目录:   {s}\n", .{cfg.dirs.home});
         try out.print("  配置文件: {s}\n", .{cfg.dirs.config_file});
@@ -106,7 +111,31 @@ pub fn main(init: std.process.Init) !void {
         var ag = scoot.agent.Agent.initClient(&client);
         ag.max_turns = cfg.agent.max_turns;
         ag.tool_timeout_ms = cfg.tools.timeout_ms;
+
+        // 审计留痕（铁律：可审计胜过黑盒）。审计文件打不开时降级为「明示警告 + 不留痕」，
+        // 既不静默退回黑盒，也不因日志故障阻断任务。
+        const audit_path = try std.fmt.allocPrint(arena, "{s}/audit.jsonl", .{cfg.dirs.logs_dir});
+        var audit_buf: [4096]u8 = undefined;
+        var audit_fw: Io.File.Writer = undefined;
+        var logger: scoot.audit.Logger = undefined;
+        const audit_file: ?Io.File = blk: {
+            const f = Io.Dir.cwd().createFile(io, audit_path, .{ .truncate = false }) catch |err| {
+                try out.print("[scoot] 警告：审计日志无法写入（{s}：{s}），本次运行不留痕\n", .{ audit_path, @errorName(err) });
+                break :blk null;
+            };
+            audit_fw = f.writer(io, &audit_buf);
+            if (f.stat(io)) |st| {
+                audit_fw.seekTo(st.size) catch {}; // 追加到末尾，不覆盖历史
+            } else |_| {}
+            logger = scoot.audit.Logger.init(&audit_fw.interface);
+            ag.audit = &logger;
+            logger.log(.run, prompt) catch {}; // 运行边界标记（携带用户目标）
+            break :blk f;
+        };
+
         const reply = ag.run(arena, &sess) catch |err| {
+            if (ag.audit) |lg| lg.log(.system_error, @errorName(err)) catch {};
+            finalizeRun(io, &sess, cfg.dirs.sessions_dir, audit_file, &audit_fw);
             try out.print("[scoot] 调用后端失败：{s}\n", .{@errorName(err)});
             try out.print(
                 "        后端 {s}（model={s}）。请确认 OpenAI 兼容服务在运行，必要时设置 {s}。\n",
@@ -114,6 +143,7 @@ pub fn main(init: std.process.Init) !void {
             );
             die(out, 1);
         };
+        finalizeRun(io, &sess, cfg.dirs.sessions_dir, audit_file, &audit_fw);
         try out.print("{s}\n", .{reply});
         return;
     }
@@ -125,6 +155,22 @@ pub fn main(init: std.process.Init) !void {
 
 fn eql(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
+}
+
+/// 收尾一次运行：flush 审计缓冲、关闭审计文件，并把会话快照追加落盘。
+/// 全部为尽力而为——收尾失败不应再改变已决定的退出路径。
+fn finalizeRun(
+    io: std.Io,
+    sess: *scoot.session.Session,
+    sessions_dir: []const u8,
+    audit_file: ?Io.File,
+    audit_fw: *Io.File.Writer,
+) void {
+    if (audit_file) |f| {
+        audit_fw.interface.flush() catch {};
+        f.close(io);
+    }
+    sess.persist(io, sessions_dir) catch {};
 }
 
 /// 打印完信息后干净退出（刷新 stdout，不抛错误回溯）：用于面向用户的可预期失败。

@@ -120,15 +120,15 @@ Scoot 通过 **skill** 扩展能力，无需重新编译核心二进制。一个
 | 子系统 | 入口 | 状态 |
 | --- | --- | --- |
 | CLI / 参数解析 | `src/main.zig` | ✅ 可用（含 `config` 命令；`-e` 单次执行已端到端打通；REPL 为占位） |
-| 运行目录解析 | `src/paths.zig` | ✅ `~/.scoot` + `SCOOT_HOME` 覆盖可用；建目录待实现 |
+| 运行目录解析 | `src/paths.zig` | ✅ `~/.scoot` + `SCOOT_HOME` 覆盖；`ensure` 幂等建目录树（home/skills/logs/state/sessions，含测试）；🚧 0700/0600 权限收紧待实现 |
 | 配置加载 | `src/config.zig` | ✅ `~/.scoot/config.json` 读取 + std.json 按节合并（缺省回落默认、未知字段忽略、畸形→清晰报错，含测试）；🚧 内联密钥告警待实现 |
 | 密钥管理 | `src/secret.zig` | 🚧 env 来源可用，文件(0600)/命令待实现 |
 | LLM 适配（OpenAI） | `src/llm.zig` | ✅ HTTP 往返 + 强制 json_schema/strict + 防弹解析（含测试）；🚧 流式/Tool Calling 待实现 |
 | Skill 机制 | `src/skill.zig` | 🚧 类型 + 注册表骨架，发现/加载待实现 |
 | 认知流引擎（ReACT / Plan） | `src/agent.zig` | ✅ 多轮 ReACT（structured step→bash 硬超时执行→观察回灌→final），防弹纠错 + max_turns 防失控（含循环测试）；🚧 plan 模式待实现 |
-| 会话（短期记忆载体） | `src/session.zig` | ✅ 内存记录 + JSONL 序列化（含测试）；🚧 落盘持久化待实现 |
+| 会话（短期记忆载体） | `src/session.zig` | ✅ 内存记录 + JSONL 序列化 + 追加落盘 `state/sessions/<id>.jsonl`（含测试） |
 | 调度引擎（every/at/cron） | `src/schedule.zig` | 🚧 增删可用，时间循环待实现 |
-| 审计日志 | `src/audit.zig` | 🚧 基础写入可用 |
+| 审计日志 | `src/audit.zig` | ✅ JSONL 审计链路：agent 每步 `run/thought/tool_call/observation/final/system_error` 留痕，`-e` 追加落盘 `logs/audit.jsonl`（含测试） |
 | 执行沙盒（工具集） | `src/tools/` | ✅ `bash` 硬超时 + 输出上限 + cwd（含测试）；🚧 file / search / http 待实现 |
 
 ## 设计原则（节选）

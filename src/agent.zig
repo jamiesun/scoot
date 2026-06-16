@@ -15,6 +15,7 @@ const std = @import("std");
 const llm = @import("llm.zig");
 const session = @import("session.zig");
 const tools = @import("tools/tools.zig");
+const audit = @import("audit.zig");
 
 /// 双轨认知模式（见 ROADMAP 方向二）。
 pub const Mode = enum {
@@ -74,6 +75,9 @@ pub const Agent = struct {
     max_turns: u32 = 16,
     /// 单条工具调用的硬超时（毫秒）。
     tool_timeout_ms: u64 = 30_000,
+    /// 可选审计日志：非 null 时把每步 思考/工具调用/观察/终态/错误 留痕（铁律：可审计）。
+    /// 注入式，测试可挂内存 writer 验证；审计写入失败不阻断任务（最终在 flush 处暴露）。
+    audit: ?*audit.Logger = null,
 
     /// 用真实 LLM 后端构造 Agent。
     pub fn initClient(client: *llm.Client) Agent {
@@ -108,15 +112,22 @@ pub const Agent = struct {
 
             // 防弹解析（铁律 #4）：模型没吐合法步骤时不 panic，把错误作为观察回灌触发重试。
             const step = parseStep(arena, completion.content) catch {
+                if (self.audit) |lg| lg.log(.system_error, "模型输出不是合法步骤 JSON，已回灌纠错并重试") catch {};
                 try sess.append(backing, .user, malformed_hint);
                 continue;
             };
+            if (self.audit) |lg| lg.log(.thought, step.thought) catch {};
 
             switch (step.action) {
-                .final => return try backing.dupe(u8, step.action_input),
+                .final => {
+                    if (self.audit) |lg| lg.log(.final, step.action_input) catch {};
+                    return try backing.dupe(u8, step.action_input);
+                },
                 .bash => {
+                    if (self.audit) |lg| lg.log(.tool_call, step.action_input) catch {};
                     const observation = self.runBash(arena, step.action_input) catch |err|
                         try std.fmt.allocPrint(arena, "[观察] 工具执行失败：{s}", .{@errorName(err)});
+                    if (self.audit) |lg| lg.log(.observation, observation) catch {};
                     try sess.append(backing, .user, observation);
                 },
             }
@@ -331,6 +342,38 @@ test "run: 超过 max_turns 返回错误而非无限循环" {
 
     try std.testing.expectError(error.MaxTurnsExceeded, ag.run(gpa, &sess));
     try std.testing.expectEqual(@as(usize, 2), brain.idx); // 恰好用满 2 回合
+}
+
+test "run: 审计日志按序记录 thought/tool_call/observation/final 链路" {
+    const gpa = std.testing.allocator;
+    var brain = ScriptedBrain{ .steps = &.{
+        "{\"thought\":\"查看\",\"action\":\"bash\",\"action_input\":\"printf OK\"}",
+        "{\"thought\":\"完成\",\"action\":\"final\",\"action_input\":\"done\"}",
+    } };
+    var ag = testAgent(&brain, 16);
+
+    var logbuf: [4096]u8 = undefined;
+    var lw = std.Io.Writer.fixed(&logbuf);
+    var logger = audit.Logger.init(&lw);
+    ag.audit = &logger;
+
+    var sess = session.Session.init("t");
+    defer sess.deinit(gpa);
+    try sess.append(gpa, .user, "go");
+    const reply = try ag.run(gpa, &sess);
+    defer gpa.free(reply);
+
+    const log = lw.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, log, "\"kind\":\"thought\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, log, "\"kind\":\"tool_call\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, log, "\"kind\":\"observation\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, log, "\"kind\":\"final\"") != null);
+    // 审计行必须是逐行合法 JSON（可回放）。
+    var it = std.mem.tokenizeScalar(u8, log, '\n');
+    while (it.next()) |line| {
+        const v = try std.json.parseFromSlice(std.json.Value, gpa, line, .{});
+        v.deinit();
+    }
 }
 
 test {

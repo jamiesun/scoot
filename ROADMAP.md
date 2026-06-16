@@ -77,19 +77,19 @@ Scoot 是一个运行在纯文本环境下的轻量级 AI Agent 守护进程（D
   经典“思考–行动–观察”（Thought–Action–Observation）闭环状态机，驱动 Agent 自主推进任务。`src/agent.zig` 已实现**多轮**闭环：每回合用强制 json_schema 让模型产出结构化步骤 `{thought, action, action_input}`（`action ∈ {bash, final}`），`bash` 经统一工具沙盒（硬超时）执行、输出作为「观察」回灌续推，`final` 即终态；非法步骤防弹捕获并回灌纠错触发重试；`max_turns` 防失控。`scoot -e` 已端到端打通（含真实工具调用）。设计上不依赖后端原生 tool_calls（对本地小模型更稳健），有脚本化大脑驱动的循环测试守护。
 
 - **🧱✅🚧 会话（Session）—— 短期记忆载体**
-  一段有边界交互（REPL 对话 / `-e` 调用 / 被调度的 job）的消息流。承载在长寿命分配器上，使对话历史跨越认知回合的 per-turn arena 重置依然存活。内存记录（追加即复制副本）与 JSONL 序列化已实现并有测试（`src/session.zig`），仅落盘持久化（追加写 `state/sessions/<id>.jsonl`）待用 Io 实现。**跨会话的长期记忆不在此实现**——交由 Skill 机制（知识注入）或 `state/` 纯文本摘要 + 文件工具承载，避免引入向量库等重依赖而撞穿铁律。
+  一段有边界交互（REPL 对话 / `-e` 调用 / 被调度的 job）的消息流。承载在长寿命分配器上，使对话历史跨越认知回合的 per-turn arena 重置依然存活。内存记录（追加即复制副本）、JSONL 序列化与追加落盘（`state/sessions/<id>.jsonl`）均已实现并有测试（`src/session.zig`）。**跨会话的长期记忆不在此实现**——交由 Skill 机制（知识注入）或 `state/` 纯文本摘要 + 文件工具承载，避免引入向量库等重依赖而撞穿铁律。
 
 - **🧱🚧 Skill 机制（Skill Engine）— 必备能力**
   以目录形式挂载"能力 + 指令集"，从 `~/.scoot/skills`（及配置的额外路径）发现、按需加载。采用渐进式披露：先只读 front-matter 建索引，被选中时才加载正文。骨架在 `src/skill.zig`。
 
 - **🧱🚧 运行目录与配置（Runtime & Config）**
-  统一运行目录 `~/.scoot/`（`SCOOT_HOME` 可覆盖），含 `config.json` / `token` / `skills/` / `logs/` / `state/`。结构化配置（backend / agent / tools / skills / audit）见 `src/config.zig`；路径解析、`scoot config` 命令、`config.json` 的 std.json 按节合并加载（缺省回落默认、未知字段忽略、畸形配置清晰报错）均已可用。
+  统一运行目录 `~/.scoot/`（`SCOOT_HOME` 可覆盖），含 `config.json` / `token` / `skills/` / `logs/` / `state/`。结构化配置（backend / agent / tools / skills / audit）见 `src/config.zig`；路径解析、`scoot config` 命令、`config.json` 的 std.json 按节合并加载（缺省回落默认、未知字段忽略、畸形配置清晰报错）、启动时幂等建目录树（`paths.ensure`）均已可用；目录权限收紧（home 0700 / token 0600）待实现。
 
 - **🧱🚧 密钥安全管理（Secret）**
   token 解析优先级 env → 文件(0600) → 凭证命令，明文绝不入库、绝不进日志。骨架在 `src/secret.zig`。
 
-- **🚧 可审计日志与本地状态**
-  把每轮思考与工具调用写入审计日志，状态严格落在本地（SQLite 或纯文本）。
+- **✅🚧 可审计日志与本地状态**
+  每轮思考与工具调用以 JSONL 写入审计日志（`logs/audit.jsonl`），会话快照落 `state/sessions/`，状态严格本地、纯文本可回放（`src/audit.zig` + `src/session.zig` 已实现并有测试）。🚧 SQLite 索引 / 日志轮转 / 时间戳等增强待定。
 
 ## 非目标（铁律）
 
