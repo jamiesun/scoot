@@ -4,7 +4,7 @@
 
 Scoot 在纯文本环境下运行，作为本地算力或远程模型的执行中枢，依据**目标（Goal）**或**定时任务（Schedule）**自主调用底层系统能力（Shell、文件、网络），并把每一步思考与动作沉淀为可审计的日志。设计基调延续 C/C++ 时代的防御性编程：**轻量、无冗余、本地优先，宁可拒绝执行，也绝不盲目信任模型输出。**
 
-> ⚠️ **当前状态：早期实现（early implementation）。** 模块结构已就位、可编译可运行；第一条纵向切片已打通——`scoot -e "…"` 走真实 OpenAI 协议往返（强制 `json_schema` + 防弹解析）并端到端输出，无后端时优雅失败。其余核心能力（工具沙盒、Skill 加载、调度、配置落盘等）多数仍为 stub。完整的目标画像、边界与方向见 [`ROADMAP.md`](./ROADMAP.md)。
+> ⚠️ **当前状态：早期实现（early implementation）。** 模块结构已就位、可编译可运行；核心闭环已打通——`scoot -e "…"` 跑完整的 ReACT 循环：强制 `json_schema` 让模型产出结构化步骤，`bash` 工具经沙盒（硬超时）执行、输出回灌续推，直至给出最终答复（防弹解析，无后端时优雅失败）。其余能力（Skill 加载、调度、配置落盘、file/http 工具等）多数仍为 stub。完整的目标画像、边界与方向见 [`ROADMAP.md`](./ROADMAP.md)。
 
 ## 环境要求
 
@@ -26,7 +26,7 @@ zig build -Doptimize=ReleaseSmall   # 轻量级单体二进制（约 161K）
 ./zig-out/bin/scoot config      # 打印解析后的运行目录与后端配置
 ./zig-out/bin/scoot --version   # 显示版本
 ./zig-out/bin/scoot --help      # 显示帮助
-./zig-out/bin/scoot -e "巡检服务器健康"   # 单次执行：一次 LLM 往返后输出并退出（需后端在运行）
+./zig-out/bin/scoot -e "统计当前目录有多少个 .zig 文件"   # 单次执行：跑 ReACT 循环（可调用 bash 工具）后输出并退出（需后端在运行）
 ```
 
 ## 项目结构
@@ -46,7 +46,7 @@ src/
   jsonio.zig         共享 JSON 字符串转义（session / llm 复用）
   skill.zig          Skill 机制：发现 / 选择 / 按需加载（渐进式披露）
   session.zig        会话：跨回合存活的消息流 + JSONL 序列化（短期记忆载体）
-  agent.zig          认知流引擎：ReACT 闭环 + 每回合 ArenaAllocator
+  agent.zig          认知流引擎：多轮 ReACT 闭环（structured step + 工具调用）+ 每回合 ArenaAllocator
   schedule.zig       调度引擎：every / at / cron 触发器
   audit.zig          审计日志：思考 / 工具调用 / 观察 留痕
   tools/             执行沙盒（均带硬超时）
@@ -123,7 +123,7 @@ Scoot 通过 **skill** 扩展能力，无需重新编译核心二进制。一个
 | 密钥管理 | `src/secret.zig` | 🚧 env 来源可用，文件(0600)/命令待实现 |
 | LLM 适配（OpenAI） | `src/llm.zig` | ✅ HTTP 往返 + 强制 json_schema/strict + 防弹解析（含测试）；🚧 流式/Tool Calling 待实现 |
 | Skill 机制 | `src/skill.zig` | 🚧 类型 + 注册表骨架，发现/加载待实现 |
-| 认知流引擎（ReACT / Plan） | `src/agent.zig` | ✅ 单轮闭环（chat→防弹解析→落 Session，`-e` 端到端可用）；🚧 多轮 + 工具循环待实现 |
+| 认知流引擎（ReACT / Plan） | `src/agent.zig` | ✅ 多轮 ReACT（structured step→bash 硬超时执行→观察回灌→final），防弹纠错 + max_turns 防失控（含循环测试）；🚧 plan 模式待实现 |
 | 会话（短期记忆载体） | `src/session.zig` | ✅ 内存记录 + JSONL 序列化（含测试）；🚧 落盘持久化待实现 |
 | 调度引擎（every/at/cron） | `src/schedule.zig` | 🚧 增删可用，时间循环待实现 |
 | 审计日志 | `src/audit.zig` | 🚧 基础写入可用 |

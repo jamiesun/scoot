@@ -74,7 +74,7 @@ Scoot 是一个运行在纯文本环境下的轻量级 AI Agent 守护进程（D
   基于时间循环的触发器，支持 `every`（间隔）、`at`（固定时间点）、`cron`（Cron 表达式）三类调度。增删骨架已在 `src/schedule.zig`，时间循环待实现。
 
 - **🧱✅🚧 认知流引擎（ReACT Loop）**
-  经典“思考–行动–观察”（Thought–Action–Observation）闭环状态机，驱动 Agent 自主推进任务。`src/agent.zig` 已搭好回合制 arena 框架、围绕 `Session` 运行（历史不随回合 arena 释放），并打通**单轮**闭环：调 `llm.chat`（带 reply schema）→ 防弹解析回复 → 落 Session，`scoot -e` 已端到端可用（含优雅失败）。多轮 Thought–Action–Observation 与工具调用循环待实现。
+  经典“思考–行动–观察”（Thought–Action–Observation）闭环状态机，驱动 Agent 自主推进任务。`src/agent.zig` 已实现**多轮**闭环：每回合用强制 json_schema 让模型产出结构化步骤 `{thought, action, action_input}`（`action ∈ {bash, final}`），`bash` 经统一工具沙盒（硬超时）执行、输出作为「观察」回灌续推，`final` 即终态；非法步骤防弹捕获并回灌纠错触发重试；`max_turns` 防失控。`scoot -e` 已端到端打通（含真实工具调用）。设计上不依赖后端原生 tool_calls（对本地小模型更稳健），有脚本化大脑驱动的循环测试守护。
 
 - **🧱✅🚧 会话（Session）—— 短期记忆载体**
   一段有边界交互（REPL 对话 / `-e` 调用 / 被调度的 job）的消息流。承载在长寿命分配器上，使对话历史跨越认知回合的 per-turn arena 重置依然存活。内存记录（追加即复制副本）与 JSONL 序列化已实现并有测试（`src/session.zig`），仅落盘持久化（追加写 `state/sessions/<id>.jsonl`）待用 Io 实现。**跨会话的长期记忆不在此实现**——交由 Skill 机制（知识注入）或 `state/` 纯文本摘要 + 文件工具承载，避免引入向量库等重依赖而撞穿铁律。

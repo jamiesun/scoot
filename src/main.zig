@@ -22,11 +22,6 @@ const usage =
     \\
 ;
 
-const system_prompt =
-    \\你是 Scoot，一个严谨、简洁的命令行 AI 助手。
-    \\必须只返回与给定 JSON Schema 匹配的 JSON 对象，把回答放进 "reply" 字段，不要输出多余文本。
-;
-
 pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const io = init.io;
@@ -89,10 +84,12 @@ pub fn main(init: std.process.Init) !void {
         };
         var client = scoot.llm.Client.init(io, cfg.backend.base_url, cfg.backend.model, token);
         var sess = scoot.session.Session.init("cli");
-        try sess.append(arena, .system, system_prompt);
+        try sess.append(arena, .system, scoot.agent.system_prompt);
         try sess.append(arena, .user, prompt);
 
-        var ag = scoot.agent.Agent.init(&client);
+        var ag = scoot.agent.Agent.initClient(&client);
+        ag.max_turns = cfg.agent.max_turns;
+        ag.tool_timeout_ms = cfg.tools.timeout_ms;
         const reply = ag.run(arena, &sess) catch |err| {
             try out.print("[scoot] 调用后端失败：{s}\n", .{@errorName(err)});
             try out.print(

@@ -30,7 +30,7 @@ zig build -Doptimize=ReleaseSmall   # 校验轻量级单体二进制
 | `src/jsonio.zig` | 共享 JSON 字符串转义（session / llm 复用） |
 | `src/skill.zig` | Skill 机制：发现 / 选择 / 按需加载（渐进式披露） |
 | `src/session.zig` | 会话：跨回合存活的消息流 + JSONL 序列化（短期记忆载体） |
-| `src/agent.zig` | 认知流引擎：ReACT 闭环 + 每回合 ArenaAllocator，围绕 Session 运行 |
+| `src/agent.zig` | 认知流引擎：多轮 ReACT 闭环（structured step + bash 工具）+ 每回合 ArenaAllocator，围绕 Session 运行 |
 | `src/schedule.zig` | 调度引擎：every / at / cron |
 | `src/audit.zig` | 审计日志 |
 | `src/tools/*.zig` | 执行沙盒：bash / file / search / http |
