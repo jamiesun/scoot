@@ -74,7 +74,7 @@ Scoot 是一个运行在纯文本环境下的轻量级 AI Agent 守护进程（D
   基于时间循环的触发器，支持 `every`（间隔）、`at`（固定时间点）、`cron`（Cron 表达式）三类调度。增删骨架已在 `src/schedule.zig`，时间循环待实现。
 
 - **🧱✅🚧 认知流引擎（ReACT Loop）**
-  经典“思考–行动–观察”（Thought–Action–Observation）闭环状态机，驱动 Agent 自主推进任务。`src/agent.zig` 已实现**多轮**闭环：每回合用强制 json_schema 让模型产出结构化步骤 `{thought, action, action_input}`（`action ∈ {bash, final}`），`bash` **先过执行护栏校验、再**经统一工具沙盒（硬超时）执行、输出作为「观察」回灌续推，`final` 即终态；非法步骤防弹捕获并回灌纠错触发重试；`max_turns` 防失控。`scoot -e` 已端到端打通（含真实工具调用）。设计上不依赖后端原生 tool_calls（对本地小模型更稳健），有脚本化大脑驱动的循环测试守护。
+  经典“思考–行动–观察”（Thought–Action–Observation）闭环状态机，驱动 Agent 自主推进任务。`src/agent.zig` 已实现**多轮**闭环：每回合用强制 json_schema 让模型产出结构化步骤 `{thought, action, action_input}`（`action ∈ {bash, final}`），`bash` **先过执行护栏校验、再**经统一工具沙盒（硬超时）执行、输出作为「观察」回灌续推，`final` 即终态；非法步骤防弹捕获并回灌纠错触发重试；`max_turns` 防失控。`scoot -e` 单次执行与默认 **REPL 多轮交互**（复用会话、每轮独立审计、出错不中断、收尾落盘）均已端到端打通（含真实工具调用）。设计上不依赖后端原生 tool_calls（对本地小模型更稳健），有脚本化大脑驱动的循环测试守护。
 
 - **🧱✅🚧 执行护栏（Execution Policy）—— 兑现「安全与可控」铁律**
   模型产出的命令在落到系统前必须穿过策略门（`src/policy.zig`），绝不直接执行未经验证的输出。三档模式：`guarded`（拦截 `rm -rf /`、fork bomb、`| sh`、`mkfs`、`shutdown` 等灾难性命令绊线，交互默认）/ `readonly`（只读命令白名单 + 禁重定向/命令替换/链式，fail-closed，无人值守应选此档）/ `unrestricted`（不设限，仍被审计）。被拒命令不执行、留痕 `policy_deny`、并把拒绝理由作为「观察」回灌让模型改道。诚实边界：`guarded` 是灾难性命令**绊线**而非沙箱，真正 fail-closed 的安全原语是 `readonly` 与未来的计划模式确认。含单测 + 端到端冒烟（`rm -rf /` 被拦、审计可证未执行）。

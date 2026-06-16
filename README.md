@@ -4,7 +4,7 @@
 
 Scoot 在纯文本环境下运行，作为本地算力或远程模型的执行中枢，依据**目标（Goal）**或**定时任务（Schedule）**自主调用底层系统能力（Shell、文件、网络），并把每一步思考与动作沉淀为可审计的日志。设计基调延续 C/C++ 时代的防御性编程：**轻量、无冗余、本地优先，宁可拒绝执行，也绝不盲目信任模型输出。**
 
-> ⚠️ **当前状态：早期实现（early implementation）。** 模块结构已就位、可编译可运行；核心闭环已打通——`scoot -e "…"` 跑完整的 ReACT 循环：强制 `json_schema` 让模型产出结构化步骤，`bash` 工具经沙盒（硬超时）执行、输出回灌续推，直至给出最终答复（防弹解析，无后端时优雅失败）。其余能力（Skill 加载、调度、配置落盘、file/http 工具等）多数仍为 stub。完整的目标画像、边界与方向见 [`ROADMAP.md`](./ROADMAP.md)。
+> ⚠️ **当前状态：早期实现（early implementation）。** 模块结构已就位、可编译可运行；核心闭环已打通——`scoot -e "…"` 与默认的交互式 **REPL** 均跑完整的 ReACT 循环：强制 `json_schema` 让模型产出结构化步骤，`bash` 工具先过执行护栏、再经沙盒（硬超时）执行、输出回灌续推，直至给出最终答复（防弹解析，每步审计落盘，无后端时优雅失败）。其余能力（Skill 加载、调度、file/http 工具等）多数仍为 stub。完整的目标画像、边界与方向见 [`ROADMAP.md`](./ROADMAP.md)。
 
 ## 环境要求
 
@@ -22,7 +22,7 @@ zig build -Doptimize=ReleaseSmall   # 轻量级单体二进制（约 161K）
 直接运行已编译的二进制：
 
 ```sh
-./zig-out/bin/scoot             # 进入交互式 REPL（默认，stub）
+./zig-out/bin/scoot             # 进入交互式 REPL（默认）：多轮「思考-行动-观察」复用会话，/exit 退出（需后端在运行）
 ./zig-out/bin/scoot config      # 打印解析后的运行目录与后端配置
 ./zig-out/bin/scoot --version   # 显示版本
 ./zig-out/bin/scoot --help      # 显示帮助
@@ -120,7 +120,7 @@ Scoot 通过 **skill** 扩展能力，无需重新编译核心二进制。一个
 
 | 子系统 | 入口 | 状态 |
 | --- | --- | --- |
-| CLI / 参数解析 | `src/main.zig` | ✅ 可用（含 `config` 命令；`-e` 单次执行已端到端打通；REPL 为占位） |
+| CLI / 参数解析 | `src/main.zig` | ✅ 可用（含 `config` 命令；`-e` 单次执行与默认 **REPL 多轮交互**均已端到端打通——REPL 复用会话、每轮独立审计、收尾落盘、出错不中断；`/exit` 退出） |
 | 运行目录解析 | `src/paths.zig` | ✅ `~/.scoot` + `SCOOT_HOME` 覆盖；`ensure` 幂等建目录树（home/skills/logs/state/sessions，含测试）；🚧 0700/0600 权限收紧待实现 |
 | 配置加载 | `src/config.zig` | ✅ `~/.scoot/config.json` 读取 + std.json 按节合并（缺省回落默认、未知字段忽略、畸形→清晰报错，含测试）；🚧 内联密钥告警待实现 |
 | 密钥管理 | `src/secret.zig` | 🚧 env 来源可用，文件(0600)/命令待实现 |
