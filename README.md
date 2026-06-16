@@ -127,7 +127,7 @@ Scoot 通过 **skill** 扩展能力，无需重新编译核心二进制。一个
 | 会话（短期记忆载体） | `src/session.zig` | ✅ 内存记录 + JSONL 序列化（含测试）；🚧 落盘持久化待实现 |
 | 调度引擎（every/at/cron） | `src/schedule.zig` | 🚧 增删可用，时间循环待实现 |
 | 审计日志 | `src/audit.zig` | 🚧 基础写入可用 |
-| 执行沙盒（工具集） | `src/tools/` | 🚧 stub |
+| 执行沙盒（工具集） | `src/tools/` | ✅ `bash` 硬超时 + 输出上限 + cwd（含测试）；🚧 file / search / http 待实现 |
 
 ## 设计原则（节选）
 

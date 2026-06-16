@@ -64,8 +64,8 @@ Scoot 是一个运行在纯文本环境下的轻量级 AI Agent 守护进程（D
 
 > 现状核验：本仓库已落地**项目骨架**——可编译、可运行的 Zig 模块结构 + CLI（`zig build` / `zig build test` 通过），运行目录解析与 `config` 命令已可用；但各子系统的核心逻辑仍为 stub（多数返回 `error.NotImplemented`）。下列条目标注 🧱（骨架就位）/ 🚧（逻辑待实现）/ ✅（核心逻辑已实现并有测试守护）。
 
-- **🧱🚧 基础工具集（Core Toolset）**
-  对 `bash`、`grep`、`glob`、`file_read`、`file_write`、`file_edit`、`http_request` 的底层封装，构成 Agent 可调用的执行原语。当前为 `src/tools/` 下的类型与签名骨架。
+- **🧱✅🚧 基础工具集（Core Toolset）**
+  对 `bash`、`grep`、`glob`、`file_read`、`file_write`、`file_edit`、`http_request` 的底层封装，构成 Agent 可调用的执行原语。`bash`（`src/tools/bash.zig`）已实现：经 `/bin/sh -c` 执行、**硬超时**（绝对 deadline，超时即强制终止子进程）、stdout/stderr 输出上限与可选 cwd 沙盒，统一返回 `Result{stdout,stderr,exit_code,timed_out}`，含真实超时测试守护。其余工具（file / search / http）仍为签名骨架。
 
 - **🧱✅🚧 OpenAI 协议适配（API Integration）**
   仅对接 `/v1/chat/completions`；强制开启 `response_format: { type: "json_schema" }` 与 Tool Calling 的 `strict: true`，从协议层把模型输出约束成结构化数据。`src/llm.zig` 已实现真实 HTTP 往返（`std.http.Client.fetch`）、紧凑请求体构造（强制 `json_schema` + `strict:true`）与防弹响应解析（`std.json` 容错），均有单元测试守护；流式（`stream`）与 Tool Calling 字段待实现。
