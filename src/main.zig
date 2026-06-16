@@ -119,6 +119,8 @@ pub fn main(init: std.process.Init) !void {
         try out.print("  skills:   {s}\n", .{cfg.dirs.skills_dir});
         try out.print("  日志:     {s}\n", .{cfg.dirs.logs_dir});
         try out.print("后端:       {s} (model={s})\n", .{ cfg.backend.base_url, cfg.backend.model });
+        if (cfg.backend.ca_file) |ca| try out.print("  CA:       {s}\n", .{ca});
+        if (cfg.backend.extra_body) |eb| try out.print("  扩展参数: {f}\n", .{std.json.fmt(eb, .{})});
         try out.print("token 来源: env[{s}] > file > cmd（明文不入库）\n", .{cfg.backend.api_key_env});
         return;
     }
@@ -145,6 +147,7 @@ pub fn main(init: std.process.Init) !void {
         const token = try resolveToken(out, cfg, arena, io, env);
         var client = scoot.llm.Client.init(io, cfg.backend.base_url, cfg.backend.model, token);
         client.ca_file = cfg.backend.ca_file;
+        client.extra_body = cfg.backend.extra_body;
         var sess = scoot.session.Session.init("cli");
         try sess.append(arena, .system, scoot.agent.system_prompt);
         injectSkills(out, arena, io, cfg, &sess);
@@ -371,6 +374,7 @@ fn runSchedule(
     const token = try resolveToken(out, cfg, arena, io, env);
     var client = scoot.llm.Client.init(io, cfg.backend.base_url, cfg.backend.model, token);
     client.ca_file = cfg.backend.ca_file;
+    client.extra_body = cfg.backend.extra_body;
 
     var job_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer job_arena.deinit();
@@ -448,6 +452,7 @@ fn runRepl(
     const token = try resolveToken(out, cfg, arena, io, env);
     var client = scoot.llm.Client.init(io, cfg.backend.base_url, cfg.backend.model, token);
     client.ca_file = cfg.backend.ca_file;
+    client.extra_body = cfg.backend.extra_body;
 
     var sess = scoot.session.Session.init("repl");
     try sess.append(arena, .system, scoot.agent.system_prompt);

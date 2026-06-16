@@ -40,6 +40,9 @@ pub const Client = struct {
     api_key: []const u8 = "",
     /// 自定义 CA bundle（PEM）绝对路径；null = 系统根证书自动扫描（嵌入式可指定）。
     ca_file: ?[]const u8 = null,
+    /// 动态扩展请求体参数（透传）：原样合并进请求体顶层。见 config.Backend.extra_body。
+    /// 仅接受 JSON 对象；非对象忽略。每个成员经 std.json 序列化，故请求体始终合法。
+    extra_body: ?std.json.Value = null,
 
     pub fn init(io: std.Io, base_url: []const u8, model: []const u8, api_key: []const u8) Client {
         return .{ .io = io, .base_url = base_url, .model = model, .api_key = api_key };
@@ -53,7 +56,7 @@ pub const Client = struct {
         messages: []const Message,
         opts: ChatOptions,
     ) !Completion {
-        const body = try buildRequestBody(arena, self.model, messages, opts);
+        const body = try buildRequestBody(arena, self.model, messages, opts, self.extra_body);
         const url = try std.fmt.allocPrint(arena, "{s}/chat/completions", .{self.base_url});
 
         var http_client: std.http.Client = .{ .allocator = arena, .io = self.io };
@@ -94,11 +97,13 @@ pub const Client = struct {
 };
 
 /// 组装 OpenAI 请求体（紧凑 JSON）。提供 schema 时强制 response_format=json_schema/strict。
+/// `extra_body` 非 null 时把其对象成员透传合并进顶层（动态扩展参数，如 service_tier）。
 pub fn buildRequestBody(
     arena: std.mem.Allocator,
     model: []const u8,
     messages: []const Message,
     opts: ChatOptions,
+    extra_body: ?std.json.Value,
 ) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(arena);
     const w = &aw.writer;
@@ -127,8 +132,25 @@ pub fn buildRequestBody(
         try w.writeAll("}}");
     }
 
+    if (extra_body) |extra| try writeExtraBody(w, extra);
+
     try w.writeByte('}');
     return aw.writer.buffered();
+}
+
+/// 把用户配置的 extra_body 对象成员注入请求体顶层（动态扩展参数）。
+/// **防弹**：仅接受 JSON 对象，非对象一律忽略（坏配置不致畸形请求体）；
+/// 每个成员值经 std.json 序列化为合法 JSON，故拼出的请求体始终合法。
+/// 注入位置在末尾，故同名键由 extra_body 覆盖——配置方不应重定义 model/messages 等核心字段。
+fn writeExtraBody(w: *std.Io.Writer, extra: std.json.Value) !void {
+    if (extra != .object) return;
+    var it = extra.object.iterator();
+    while (it.next()) |entry| {
+        try w.writeByte(',');
+        try jsonio.writeString(w, entry.key_ptr.*);
+        try w.writeByte(':');
+        try w.print("{f}", .{std.json.fmt(entry.value_ptr.*, .{})});
+    }
 }
 
 /// 防弹解析 chat/completions 响应，提取首个 choice 的 message.content。
@@ -167,7 +189,7 @@ test "buildRequestBody 产出合法 JSON 且强制 json_schema/strict" {
     const body = try buildRequestBody(arena, "qwen2.5", &msgs, .{
         .json_schema = "{\"type\":\"object\"}",
         .schema_name = "scoot_reply",
-    });
+    }, null);
 
     // 必须是合法 JSON
     const v = try std.json.parseFromSlice(std.json.Value, gpa, body, .{});
@@ -177,6 +199,52 @@ test "buildRequestBody 产出合法 JSON 且强制 json_schema/strict" {
     try std.testing.expect(std.mem.indexOf(u8, body, "\"response_format\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"strict\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"model\":\"qwen2.5\"") != null);
+}
+
+test "buildRequestBody 注入 extra_body 扩展参数（动态透传）" {
+    const gpa = std.testing.allocator;
+    var parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        gpa,
+        "{\"service_tier\":\"priority\",\"reasoning_effort\":\"high\"}",
+        .{},
+    );
+    defer parsed.deinit();
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const msgs = [_]Message{.{ .role = .user, .content = "hi" }};
+    const body = try buildRequestBody(arena, "gpt-5.5", &msgs, .{}, parsed.value);
+
+    // 扩展参数已透传进请求体
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"service_tier\":\"priority\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"reasoning_effort\":\"high\"") != null);
+    // 仍是合法 JSON，核心字段未被破坏
+    const v = try std.json.parseFromSlice(std.json.Value, gpa, body, .{});
+    defer v.deinit();
+    try std.testing.expect(v.value == .object);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"model\":\"gpt-5.5\"") != null);
+}
+
+test "buildRequestBody 忽略非对象 extra_body（防弹）" {
+    const gpa = std.testing.allocator;
+    var parsed = try std.json.parseFromSlice(std.json.Value, gpa, "42", .{});
+    defer parsed.deinit();
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const msgs = [_]Message{.{ .role = .user, .content = "hi" }};
+    const body = try buildRequestBody(arena, "m", &msgs, .{}, parsed.value);
+
+    // 非对象被静默忽略：请求体仍合法，未把裸值 42 拼进去
+    const v = try std.json.parseFromSlice(std.json.Value, gpa, body, .{});
+    defer v.deinit();
+    try std.testing.expect(v.value == .object);
+    try std.testing.expect(std.mem.indexOf(u8, body, ",42") == null);
 }
 
 test "parseCompletion 提取 content（正常响应）" {

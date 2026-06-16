@@ -20,6 +20,11 @@ pub const Backend = struct {
     /// 自定义 CA bundle（PEM）绝对路径；null 表示用系统根证书自动扫描。
     /// 裁剪 / 嵌入式 Linux 上系统证书常缺失，可在此指定随固件部署的 CA。
     ca_file: ?[]const u8 = null,
+    /// 动态扩展请求体参数（透传）：原样合并进 chat/completions 顶层 JSON。
+    /// 用于后端特有 / 新增字段，无需为每个参数加 Zig 字段——
+    /// 如 Azure 的 `service_tier`、推理模型的 `reasoning_effort`、`top_p` 等。
+    /// 仅接受 JSON 对象；非对象一律忽略（防弹）。**明文密钥严禁放此处**（见铁律 #7）。
+    extra_body: ?std.json.Value = null,
 };
 
 /// 认知引擎配置。
@@ -214,6 +219,28 @@ test "parseFileConfig: 空对象回落默认" {
     const fc = try parseFileConfig(arena.allocator(), "{}");
     try std.testing.expectEqualStrings("http://127.0.0.1:11434/v1", fc.backend.base_url);
     try std.testing.expectEqualStrings("OPENAI_API_KEY", fc.backend.api_key_env);
+}
+
+test "parseFileConfig: backend.extra_body 透传任意 JSON 对象" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const json =
+        \\{ "backend": { "extra_body": { "service_tier": "priority", "reasoning_effort": "high" } } }
+    ;
+    const fc = try parseFileConfig(arena.allocator(), json);
+    try std.testing.expect(fc.backend.extra_body != null);
+    try std.testing.expect(fc.backend.extra_body.? == .object);
+    const tier = fc.backend.extra_body.?.object.get("service_tier").?;
+    try std.testing.expectEqualStrings("priority", tier.string);
+    const effort = fc.backend.extra_body.?.object.get("reasoning_effort").?;
+    try std.testing.expectEqualStrings("high", effort.string);
+}
+
+test "parseFileConfig: 未指定 extra_body → null（默认无扩展参数）" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const fc = try parseFileConfig(arena.allocator(), "{\"backend\":{\"model\":\"m\"}}");
+    try std.testing.expect(fc.backend.extra_body == null);
 }
 
 test "parseFileConfig: 按节按字段合并，未指定字段保留默认" {
