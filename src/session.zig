@@ -13,6 +13,7 @@
 //!     或 state/ 下的纯文本摘要 + 文件工具承载，避免引入向量库等重依赖而撞穿铁律。
 const std = @import("std");
 const llm = @import("llm.zig");
+const jsonio = @import("jsonio.zig");
 
 /// 一次会话。`messages` 由 Session 的分配器拥有，跨回合存活。
 pub const Session = struct {
@@ -88,27 +89,8 @@ fn writeMessageJson(w: *std.Io.Writer, m: llm.Message) !void {
     try w.writeAll("{\"role\":\"");
     try w.writeAll(@tagName(m.role));
     try w.writeAll("\",\"content\":");
-    try writeJsonString(w, m.content);
+    try jsonio.writeString(w, m.content);
     try w.writeByte('}');
-}
-
-/// 写一个合法的 JSON 字符串字面量（含两端引号），正确转义控制字符与特殊符号。
-fn writeJsonString(w: *std.Io.Writer, s: []const u8) !void {
-    try w.writeByte('"');
-    for (s) |c| switch (c) {
-        '"' => try w.writeAll("\\\""),
-        '\\' => try w.writeAll("\\\\"),
-        '\n' => try w.writeAll("\\n"),
-        '\r' => try w.writeAll("\\r"),
-        '\t' => try w.writeAll("\\t"),
-        0x08 => try w.writeAll("\\b"),
-        0x0C => try w.writeAll("\\f"),
-        else => |ch| if (ch < 0x20)
-            try w.print("\\u{x:0>4}", .{ch})
-        else
-            try w.writeByte(ch),
-    };
-    try w.writeByte('"');
 }
 
 test "append 复制内容，独立于来源缓冲" {

@@ -13,6 +13,12 @@ pub const Mode = enum {
     plan,
 };
 
+/// 阶段一的结构化输出 Schema：强制模型返回 {"reply": "..."}（铁律 #2）。
+/// 后续接入工具时，这里会扩展为 ReACT 步骤（thought / action / action_input / final）。
+const reply_schema =
+    \\{"type":"object","properties":{"reply":{"type":"string"}},"required":["reply"],"additionalProperties":false}
+;
+
 pub const Agent = struct {
     client: *llm.Client,
     mode: Mode = .goal,
@@ -22,11 +28,11 @@ pub const Agent = struct {
         return .{ .client = client };
     }
 
-    /// 围绕一个会话运行任务，直至完成或达到回合上限。
-    /// `backing` 是进程级长寿命分配器；每回合在其上派生 arena，回合末整体释放。
-    /// `sess` 持有跨回合存活的消息历史（须由调用方预先 append 初始 user 目标）；
+    /// 围绕一个会话运行任务，返回最终回复文本（由 `backing` 拥有）。
+    /// `backing` 是长寿命分配器；每回合在其上派生 arena，回合末整体释放。
+    /// `sess` 持有跨回合存活的消息历史（须由调用方预先 append 初始 system / user 消息）；
     /// 历史不放进回合 arena，因此不受每轮 `arena_state.deinit()` 影响。
-    pub fn run(self: *Agent, backing: std.mem.Allocator, sess: *session.Session) !void {
+    pub fn run(self: *Agent, backing: std.mem.Allocator, sess: *session.Session) ![]const u8 {
         var turn: u32 = 0;
         while (turn < self.max_turns) : (turn += 1) {
             var arena_state = std.heap.ArenaAllocator.init(backing);
@@ -34,20 +40,45 @@ pub const Agent = struct {
             const arena = arena_state.allocator();
 
             // 历史存活于 sess（backing 拥有），可直接喂给 LLM；本回合临时分配走 arena。
-            const completion = self.client.chat(arena, sess.items()) catch |err| {
-                // TODO: 若为脏 JSON 解析失败，包装成 System Error append 回 sess 触发重试，而非中断。
-                return err;
-            };
-            // 把模型输出落入会话历史（复制进 backing，独立于本回合 arena）。
+            const completion = try self.client.chat(arena, sess.items(), .{
+                .json_schema = reply_schema,
+                .schema_name = "scoot_reply",
+            });
+            // 原始结构化输出落入会话历史（复制进 backing，独立于本回合 arena）。
             try sess.append(backing, .assistant, completion.content);
 
-            // TODO: 1) 校验并执行工具（硬超时）2) 把观察结果 append(.tool, ...) 回灌下一回合
-            //       3) 判定任务完成则 break。
-            return error.NotImplemented;
+            // 防弹解析结构化回复；模型没吐合法 JSON 时不 panic，退回原文展示。
+            const reply = parseReply(backing, completion.content) catch
+                return try backing.dupe(u8, completion.content);
+
+            // 阶段一：无工具调用 → 首轮即终态。
+            // TODO: 接入工具后，据 tool_calls 执行工具（硬超时）并把观察 append(.tool, ...) 回灌继续循环。
+            return reply;
         }
         return error.MaxTurnsExceeded;
     }
 };
+
+/// 防弹解析 {"reply": "..."}，返回 `backing` 拥有的回复文本；非法 JSON 返回 MalformedReply。
+fn parseReply(backing: std.mem.Allocator, content: []const u8) ![]const u8 {
+    var arena_state = std.heap.ArenaAllocator.init(backing);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const Reply = struct { reply: []const u8 };
+    const v = std.json.parseFromSliceLeaky(Reply, arena, content, .{
+        .ignore_unknown_fields = true,
+    }) catch return error.MalformedReply;
+    return backing.dupe(u8, v.reply);
+}
+
+test "parseReply 防弹解析结构化回复" {
+    const gpa = std.testing.allocator;
+    const r = try parseReply(gpa, "{\"reply\":\"hi 世界\"}");
+    defer gpa.free(r);
+    try std.testing.expectEqualStrings("hi 世界", r);
+    try std.testing.expectError(error.MalformedReply, parseReply(gpa, "not json"));
+}
 
 test {
     std.testing.refAllDecls(@This());

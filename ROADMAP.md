@@ -67,14 +67,14 @@ Scoot 是一个运行在纯文本环境下的轻量级 AI Agent 守护进程（D
 - **🧱🚧 基础工具集（Core Toolset）**
   对 `bash`、`grep`、`glob`、`file_read`、`file_write`、`file_edit`、`http_request` 的底层封装，构成 Agent 可调用的执行原语。当前为 `src/tools/` 下的类型与签名骨架。
 
-- **🚧 OpenAI 协议适配（API Integration）**
-  仅对接 `/v1/chat/completions`；强制开启 `response_format: { type: "json_schema" }` 与 Tool Calling 的 `strict: true`，从协议层把模型输出约束成结构化数据。
+- **🧱✅🚧 OpenAI 协议适配（API Integration）**
+  仅对接 `/v1/chat/completions`；强制开启 `response_format: { type: "json_schema" }` 与 Tool Calling 的 `strict: true`，从协议层把模型输出约束成结构化数据。`src/llm.zig` 已实现真实 HTTP 往返（`std.http.Client.fetch`）、紧凑请求体构造（强制 `json_schema` + `strict:true`）与防弹响应解析（`std.json` 容错），均有单元测试守护；流式（`stream`）与 Tool Calling 字段待实现。
 
 - **🧱🚧 调度引擎（Scheduler）**
   基于时间循环的触发器，支持 `every`（间隔）、`at`（固定时间点）、`cron`（Cron 表达式）三类调度。增删骨架已在 `src/schedule.zig`，时间循环待实现。
 
-- **🚧 认知流引擎（ReACT Loop）**
-  经典“思考–行动–观察”（Thought–Action–Observation）闭环状态机，驱动 Agent 自主推进任务。`src/agent.zig` 已搭好回合制 arena 框架，并已改为围绕 `Session` 运行（历史不随回合 arena 释放）。
+- **🧱✅🚧 认知流引擎（ReACT Loop）**
+  经典“思考–行动–观察”（Thought–Action–Observation）闭环状态机，驱动 Agent 自主推进任务。`src/agent.zig` 已搭好回合制 arena 框架、围绕 `Session` 运行（历史不随回合 arena 释放），并打通**单轮**闭环：调 `llm.chat`（带 reply schema）→ 防弹解析回复 → 落 Session，`scoot -e` 已端到端可用（含优雅失败）。多轮 Thought–Action–Observation 与工具调用循环待实现。
 
 - **🧱✅🚧 会话（Session）—— 短期记忆载体**
   一段有边界交互（REPL 对话 / `-e` 调用 / 被调度的 job）的消息流。承载在长寿命分配器上，使对话历史跨越认知回合的 per-turn arena 重置依然存活。内存记录（追加即复制副本）与 JSONL 序列化已实现并有测试（`src/session.zig`），仅落盘持久化（追加写 `state/sessions/<id>.jsonl`）待用 Io 实现。**跨会话的长期记忆不在此实现**——交由 Skill 机制（知识注入）或 `state/` 纯文本摘要 + 文件工具承载，避免引入向量库等重依赖而撞穿铁律。

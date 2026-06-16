@@ -4,7 +4,7 @@
 
 ## 一句话项目定位
 
-Scoot 是用**纯 Zig（0.16.0+）**手搓的轻量级 AI Agent 守护进程（Daemon / CLI）。基调：轻量、无冗余、本地优先、防御性编程。当前处于**骨架阶段**，多数能力是返回 `error.NotImplemented` 的 stub。
+Scoot 是用**纯 Zig（0.16.0+）**手搓的轻量级 AI Agent 守护进程（Daemon / CLI）。基调：轻量、无冗余、本地优先、防御性编程。当前处于**早期实现阶段**：`scoot -e` 已打通 LLM 真实往返（强制 `json_schema` + 防弹解析）这条纵向切片，其余多数能力仍是返回 `error.NotImplemented` 的 stub。
 
 ## 常用命令
 
@@ -26,7 +26,8 @@ zig build -Doptimize=ReleaseSmall   # 校验轻量级单体二进制
 | `src/paths.zig` | 运行目录解析：`~/.scoot`（`SCOOT_HOME` 覆盖）及各子路径 |
 | `src/config.zig` | 结构化配置（backend / agent / tools / skills / audit） |
 | `src/secret.zig` | 密钥管理：env → 文件(0600) → 凭证命令，脱敏 |
-| `src/llm.zig` | LLM 适配（仅 OpenAI `/v1/chat/completions`） |
+| `src/llm.zig` | LLM 适配（仅 OpenAI `/v1/chat/completions`）：HTTP 往返 + 强制 json_schema/strict + 防弹解析 |
+| `src/jsonio.zig` | 共享 JSON 字符串转义（session / llm 复用） |
 | `src/skill.zig` | Skill 机制：发现 / 选择 / 按需加载（渐进式披露） |
 | `src/session.zig` | 会话：跨回合存活的消息流 + JSONL 序列化（短期记忆载体） |
 | `src/agent.zig` | 认知流引擎：ReACT 闭环 + 每回合 ArenaAllocator，围绕 Session 运行 |

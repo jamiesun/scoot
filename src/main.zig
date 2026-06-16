@@ -22,6 +22,11 @@ const usage =
     \\
 ;
 
+const system_prompt =
+    \\你是 Scoot，一个严谨、简洁的命令行 AI 助手。
+    \\必须只返回与给定 JSON Schema 匹配的 JSON 对象，把回答放进 "reply" 字段，不要输出多余文本。
+;
+
 pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const io = init.io;
@@ -49,7 +54,7 @@ pub fn main(init: std.process.Init) !void {
             i += 1;
             if (i >= args.len) {
                 try out.writeAll("error: -e/--eval 需要一个 prompt 参数\n");
-                return error.MissingArgument;
+                die(out, 2);
             }
             eval_prompt = args[i];
         } else if (eql(arg, "config")) {
@@ -59,7 +64,7 @@ pub fn main(init: std.process.Init) !void {
         } else {
             try out.print("error: 未知参数 '{s}'\n\n", .{arg});
             try out.writeAll(usage);
-            return error.UnknownArgument;
+            die(out, 2);
         }
     }
 
@@ -77,8 +82,26 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (eval_prompt) |prompt| {
-        try out.print("[scoot] 单次执行模式（stub），目标: {s}\n", .{prompt});
-        try out.writeAll("[scoot] 认知引擎尚未实现，详见 ROADMAP.md。\n");
+        // token 可选：本地无鉴权后端（如 Ollama）留空即可。
+        const token: []const u8 = blk: {
+            const s = cfg.resolveToken(arena, io, env) catch break :blk "";
+            break :blk s.value;
+        };
+        var client = scoot.llm.Client.init(io, cfg.backend.base_url, cfg.backend.model, token);
+        var sess = scoot.session.Session.init("cli");
+        try sess.append(arena, .system, system_prompt);
+        try sess.append(arena, .user, prompt);
+
+        var ag = scoot.agent.Agent.init(&client);
+        const reply = ag.run(arena, &sess) catch |err| {
+            try out.print("[scoot] 调用后端失败：{s}\n", .{@errorName(err)});
+            try out.print(
+                "        后端 {s}（model={s}）。请确认 OpenAI 兼容服务在运行，必要时设置 {s}。\n",
+                .{ cfg.backend.base_url, cfg.backend.model, cfg.backend.api_key_env },
+            );
+            die(out, 1);
+        };
+        try out.print("{s}\n", .{reply});
         return;
     }
 
@@ -89,6 +112,12 @@ pub fn main(init: std.process.Init) !void {
 
 fn eql(a: []const u8, b: []const u8) bool {
     return std.mem.eql(u8, a, b);
+}
+
+/// 打印完信息后干净退出（刷新 stdout，不抛错误回溯）：用于面向用户的可预期失败。
+fn die(out: *std.Io.Writer, code: u8) noreturn {
+    out.flush() catch {};
+    std.process.exit(code);
 }
 
 test {
