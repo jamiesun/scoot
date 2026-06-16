@@ -29,7 +29,7 @@ pub const Mode = enum {
 /// 每回合的结构化输出 Schema（铁律 #2）：强制模型只产出一个 ReACT 步骤。
 /// `action` 用 enum 收口到已知动作，`additionalProperties:false` + 全 required 满足 strict。
 const react_schema =
-    \\{"type":"object","properties":{"thought":{"type":"string"},"action":{"type":"string","enum":["bash","final"]},"action_input":{"type":"string"}},"required":["thought","action","action_input"],"additionalProperties":false}
+    \\{"type":"object","properties":{"thought":{"type":"string"},"action":{"type":"string","enum":["bash","file_read","file_write","file_edit","final"]},"action_input":{"type":"string"}},"required":["thought","action","action_input"],"additionalProperties":false}
 ;
 
 /// 注入会话的系统提示：向模型讲清 ReACT 协议与工具约束。
@@ -38,18 +38,26 @@ pub const system_prompt =
     \\
     \\每一步都只输出一个 JSON 对象，严格匹配给定 schema，包含三个字段：
     \\  - "thought"：一句话说明你的推理。
-    \\  - "action"："bash" 或 "final"。
-    \\  - "action_input"：当 action 为 "bash" 时是要执行的 shell 命令；为 "final" 时是给用户的最终答复。
+    \\  - "action"：下列动作之一。
+    \\  - "action_input"：该动作的输入，格式见下。
+    \\
+    \\可用动作：
+    \\  - "bash"：执行一条 shell 命令；action_input 是命令字符串。命令在 POSIX sh（/bin/sh）的带硬超时沙盒里执行，其输出作为下一条「观察」返回。只用可移植的 POSIX 语法，避免 bash 专有写法（如 [[ ]]、数组、{1..10} 花括号展开、$'...'）。
+    \\  - "file_read"：读取文件内容；action_input 是 JSON 对象 {"path":"文件路径"}。
+    \\  - "file_write"：覆盖写入文件（不存在则创建）；action_input 是 JSON 对象 {"path":"文件路径","content":"完整新内容"}。
+    \\  - "file_edit"：精确替换文件中的一段文本；action_input 是 JSON 对象 {"path":"文件路径","old":"要替换的确切文本（须在文件中唯一出现）","new":"替换成的文本"}。
+    \\  - "final"：给出最终答复；action_input 是给用户的答复文本。
     \\
     \\工作方式：
-    \\  - 需要查看系统、读文件或运行命令时，用 action="bash"；命令会在带硬超时的沙盒里执行，其输出会作为下一条「观察」返回给你。
-    \\  - 只使用非交互、会自行结束的命令；不要执行危险或破坏性操作。
-    \\  - 收集到足够信息后，用 action="final" 给出简洁、直接的答复。
+    \\  - 读写文件优先用 file_read / file_write / file_edit —— 它们不依赖外部命令，在任何环境（含裁剪 / 嵌入式 Linux）都可靠一致。
+    \\  - 其他系统操作用 bash；只使用非交互、会自行结束的命令，不要执行危险或破坏性操作。
+    \\  - file_edit 的 old 必须在文件中唯一出现；若不确定，先用 file_read 看清确切内容。
+    \\  - 收集到足够信息后，用 "final" 给出简洁、直接的答复。
     \\  - 除这个 JSON 对象外，不要输出任何额外文本。
 ;
 
 /// 模型可选的动作。
-pub const Action = enum { bash, final };
+pub const Action = enum { bash, file_read, file_write, file_edit, final };
 
 /// 一个解析后的 ReACT 步骤。
 pub const Step = struct {
@@ -57,6 +65,21 @@ pub const Step = struct {
     action: Action,
     action_input: []const u8,
 };
+
+/// 多参数内建工具的 action_input 承载一个 JSON 对象字符串，按工具二次解析。
+/// 单参数工具（如 file_read）同样走 JSON（{"path":...}），统一「文件类工具 = JSON 参数」
+/// 这条规则，降低小模型「何时裸串、何时 JSON」的认知负担。bash / final 仍是裸文本。
+const FileReadArgs = struct { path: []const u8 };
+const FileWriteArgs = struct { path: []const u8, content: []const u8 };
+const FileEditArgs = struct { path: []const u8, old: []const u8, new: []const u8 };
+
+/// 防弹解析工具参数 JSON：失败统一收口为 error.MalformedArgs，由调用处回灌纠错
+/// （铁律 #4：绝不信任模型输出，畸形参数不 panic 而是反馈让模型重试）。
+fn parseToolArgs(comptime T: type, arena: std.mem.Allocator, input: []const u8) !T {
+    return std.json.parseFromSliceLeaky(T, arena, input, .{
+        .ignore_unknown_fields = true,
+    }) catch error.MalformedArgs;
+}
 
 /// 获取下一条补全的抽象（测试可注入脚本化大脑，无需真实后端）。
 /// 默认实现 `clientComplete` 直接转调 `llm.Client.chat`。
@@ -126,22 +149,23 @@ pub const Agent = struct {
                     if (self.audit) |lg| lg.log(.final, step.action_input) catch {};
                     return try backing.dupe(u8, step.action_input);
                 },
-                .bash => {
+                // 其余皆为工具类动作（bash + 内建 file_*）：统一「留痕 → 执行护栏 → 执行/回灌」。
+                else => {
                     if (self.audit) |lg| lg.log(.tool_call, step.action_input) catch {};
-                    // 铁律：模型产出的命令必须先过执行护栏，绝不直接落到系统上。
-                    switch (policy.evaluate(arena, step.action_input, self.policy_mode)) {
+                    // 铁律：模型产出的动作必须先过执行护栏，绝不直接落到系统上。
+                    switch (self.guard(arena, step.action, step.action_input)) {
                         .deny => |reason| {
                             const denied = try std.fmt.allocPrint(
                                 arena,
-                                "[观察] 命令被执行护栏拒绝（{s} 模式）：{s}。请改用更安全或只读的方式达成目标。",
+                                "[观察] 动作被执行护栏拒绝（{s} 模式）：{s}。请改用更安全或只读的方式达成目标。",
                                 .{ @tagName(self.policy_mode), reason },
                             );
                             if (self.audit) |lg| lg.log(.policy_deny, denied) catch {};
                             try sess.append(backing, .user, denied);
                         },
                         .allow => {
-                            const observation = self.runBash(arena, step.action_input) catch |err|
-                                try std.fmt.allocPrint(arena, "[观察] 工具执行失败：{s}", .{@errorName(err)});
+                            const observation = self.execTool(arena, step.action, step.action_input) catch |err|
+                                try toolErrorObservation(arena, err);
                             if (self.audit) |lg| lg.log(.observation, observation) catch {};
                             try sess.append(backing, .user, observation);
                         },
@@ -150,6 +174,54 @@ pub const Agent = struct {
             }
         }
         return error.MaxTurnsExceeded;
+    }
+
+    /// 按动作类别选择执行护栏：bash 解析命令字符串（可经 shell 任意执行，须逐串审查）；
+    /// 内建工具的读/写/网络语义静态已知，按能力分类判定（见 policy.evaluateTool）。
+    fn guard(self: *Agent, arena: std.mem.Allocator, action: Action, input: []const u8) policy.Decision {
+        return switch (action) {
+            .bash => policy.evaluate(arena, input, self.policy_mode),
+            .file_read => policy.evaluateTool(.read, self.policy_mode),
+            .file_write, .file_edit => policy.evaluateTool(.write, self.policy_mode),
+            .final => unreachable,
+        };
+    }
+
+    /// 执行一个已过护栏的工具动作，返回回灌给模型的「观察」文本（arena 拥有）。
+    /// 任何失败（参数畸形 / IO 错误 / 超时）都以 error 上抛，由调用处转成观察回灌，
+    /// 全程不 panic（铁律 #4）。
+    fn execTool(self: *Agent, arena: std.mem.Allocator, action: Action, input: []const u8) ![]const u8 {
+        return switch (action) {
+            .bash => try self.runBash(arena, input),
+            .file_read => blk: {
+                const args = try parseToolArgs(FileReadArgs, arena, input);
+                const content = try tools.file.read(arena, self.io, args.path, tools.file.default_read_limit);
+                break :blk try std.fmt.allocPrint(
+                    arena,
+                    "[观察] 读取 {s}（{d} 字节）：\n{s}",
+                    .{ args.path, content.len, try clipTo(arena, content, file_read_observation_cap) },
+                );
+            },
+            .file_write => blk: {
+                const args = try parseToolArgs(FileWriteArgs, arena, input);
+                try tools.file.write(self.io, args.path, args.content);
+                break :blk try std.fmt.allocPrint(
+                    arena,
+                    "[观察] 已写入 {s}（{d} 字节）。",
+                    .{ args.path, args.content.len },
+                );
+            },
+            .file_edit => blk: {
+                const args = try parseToolArgs(FileEditArgs, arena, input);
+                const out = try tools.file.edit(arena, self.io, args.path, args.old, args.new, tools.file.default_read_limit);
+                break :blk try std.fmt.allocPrint(
+                    arena,
+                    "[观察] 已编辑 {s}：替换 1 处，文件现 {d} 字节。",
+                    .{ args.path, out.len },
+                );
+            },
+            .final => unreachable,
+        };
     }
 
     /// 执行一条 bash 命令（带硬超时）并格式化成「观察」文本（arena 拥有）。
@@ -176,6 +248,10 @@ const malformed_hint = "[观察] 你上一条输出不是合法的步骤 JSON。
 /// 单条流的输出在观察里的最大字节数，超出截断，避免脏/海量输出挤爆上下文。
 const observation_stream_cap = 2000;
 
+/// file_read 观察的截断上限：比 bash 输出更宽（文件内容是模型主动读取、相对结构化，
+/// 给更大窗口便于后续 file_edit 看清确切文本），但仍设上限挡住超大文件撑爆上下文。
+const file_read_observation_cap = 8000;
+
 /// 防弹解析一个 ReACT 步骤。非法 JSON → MalformedStep；未知 action → UnknownAction。
 pub fn parseStep(arena: std.mem.Allocator, content: []const u8) !Step {
     const Raw = struct {
@@ -187,14 +263,25 @@ pub fn parseStep(arena: std.mem.Allocator, content: []const u8) !Step {
         .ignore_unknown_fields = true,
     }) catch return error.MalformedStep;
 
-    const action: Action = if (std.mem.eql(u8, v.action, "bash"))
-        .bash
-    else if (std.mem.eql(u8, v.action, "final"))
-        .final
-    else
-        return error.UnknownAction;
-
+    // 按 enum tag 名映射动作；新增动作只需扩 Action enum，无需改这里（反过载）。
+    const action = std.meta.stringToEnum(Action, v.action) orelse return error.UnknownAction;
     return .{ .thought = v.thought, .action = action, .action_input = v.action_input };
+}
+
+/// 把工具执行 / 参数解析的错误转成回灌给模型的「观察」文本（arena 拥有）。
+/// 对常见错误给出可操作的纠正提示，引导模型自我修复（铁律 #4：失败即反馈而非中断）。
+fn toolErrorObservation(arena: std.mem.Allocator, err: anyerror) ![]u8 {
+    const hint = switch (err) {
+        error.MalformedArgs => "action_input 不是合法的参数 JSON。file_read 用 {\"path\":\"...\"}；file_write 用 {\"path\":\"...\",\"content\":\"...\"}；file_edit 用 {\"path\":\"...\",\"old\":\"...\",\"new\":\"...\"}。",
+        error.PatternNotFound => "file_edit 的 old 文本未在文件中找到。请先用 file_read 读出确切文本再编辑。",
+        error.AmbiguousMatch => "file_edit 的 old 文本在文件中出现多次。请提供更长、唯一的上下文片段以定位。",
+        error.EmptyPattern => "file_edit 的 old 不能为空。",
+        error.FileNotFound => "目标文件不存在。请确认路径，或先用 file_write 创建它。",
+        error.AccessDenied => "对目标路径没有访问权限。",
+        error.IsDir => "目标路径是目录而非文件。",
+        else => @errorName(err),
+    };
+    return std.fmt.allocPrint(arena, "[观察] 工具执行失败：{s}", .{hint});
 }
 
 /// 把工具执行结果格式化成回灌给模型的「观察」文本（arena 拥有）。
@@ -213,11 +300,16 @@ fn formatObservation(arena: std.mem.Allocator, r: tools.Result) ![]u8 {
 
 /// 截断过长的输出流，超出时附带说明（arena 拥有；不超长则原样返回）。
 fn clip(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
-    if (s.len <= observation_stream_cap) return s;
+    return clipTo(arena, s, observation_stream_cap);
+}
+
+/// 按给定上限截断输出（arena 拥有；不超长则原样返回）。
+fn clipTo(arena: std.mem.Allocator, s: []const u8, cap: usize) ![]const u8 {
+    if (s.len <= cap) return s;
     return std.fmt.allocPrint(
         arena,
         "{s}\n…（输出已截断，共 {d} 字节）",
-        .{ s[0..observation_stream_cap], s.len },
+        .{ s[0..cap], s.len },
     );
 }
 
@@ -424,6 +516,134 @@ test "run: 危险命令被执行护栏拦截——不执行、留痕 policy_deny
         if (std.mem.indexOf(u8, m.content, "执行护栏拒绝") != null) saw_denied = true;
     }
     try std.testing.expect(saw_denied);
+}
+
+test "run: file_write→file_read→file_edit 全链路（guarded 放行写，磁盘可验证）" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const dir = "/tmp/scoot_agent_file_flow";
+    cwd.deleteTree(io, dir) catch {};
+    defer cwd.deleteTree(io, dir) catch {};
+    try cwd.createDirPath(io, dir);
+
+    // 用 Zig 多行字符串字面量承载 JSON（含转义引号）：action_input 本身是一段 JSON 对象字符串。
+    const s_write =
+        \\{"thought":"写文件","action":"file_write","action_input":"{\"path\":\"/tmp/scoot_agent_file_flow/note.txt\",\"content\":\"hello world\"}"}
+    ;
+    const s_read =
+        \\{"thought":"读回确认","action":"file_read","action_input":"{\"path\":\"/tmp/scoot_agent_file_flow/note.txt\"}"}
+    ;
+    const s_edit =
+        \\{"thought":"改一处","action":"file_edit","action_input":"{\"path\":\"/tmp/scoot_agent_file_flow/note.txt\",\"old\":\"world\",\"new\":\"scoot\"}"}
+    ;
+    const s_final =
+        \\{"thought":"完成","action":"final","action_input":"done"}
+    ;
+    var brain = ScriptedBrain{ .steps = &.{ s_write, s_read, s_edit, s_final } };
+    var ag = testAgent(&brain, 16); // 默认 guarded：内建写工具放行
+
+    var sess = session.Session.init("t");
+    defer sess.deinit(gpa);
+    try sess.append(gpa, .user, "建并改文件");
+    const reply = try ag.run(gpa, &sess);
+    defer gpa.free(reply);
+    try std.testing.expectEqualStrings("done", reply);
+
+    // 磁盘上文件应被精确编辑为 "hello scoot"。
+    const final_bytes = try cwd.readFileAlloc(io, dir ++ "/note.txt", gpa, .limited(1 << 16));
+    defer gpa.free(final_bytes);
+    try std.testing.expectEqualStrings("hello scoot", final_bytes);
+
+    // file_read 的观察里应回灌写入内容，供后续编辑定位。
+    var saw_read = false;
+    for (sess.items()) |m| {
+        if (std.mem.indexOf(u8, m.content, "hello world") != null and
+            std.mem.indexOf(u8, m.content, "字节") != null) saw_read = true;
+    }
+    try std.testing.expect(saw_read);
+}
+
+test "run: readonly 安全档下 file_write 被护栏拒绝（不落盘、留痕 policy_deny、无 observation）" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const dir = "/tmp/scoot_agent_file_ro";
+    cwd.deleteTree(io, dir) catch {};
+    defer cwd.deleteTree(io, dir) catch {};
+    try cwd.createDirPath(io, dir);
+
+    const s_write =
+        \\{"thought":"尝试写","action":"file_write","action_input":"{\"path\":\"/tmp/scoot_agent_file_ro/evil.txt\",\"content\":\"x\"}"}
+    ;
+    const s_final =
+        \\{"thought":"改道","action":"final","action_input":"只读模式无法写"}
+    ;
+    var brain = ScriptedBrain{ .steps = &.{ s_write, s_final } };
+    var ag = testAgent(&brain, 16);
+    ag.policy_mode = .readonly; // 模拟无人值守强制安全档
+
+    var logbuf: [4096]u8 = undefined;
+    var lw = std.Io.Writer.fixed(&logbuf);
+    var logger = audit.Logger.init(&lw);
+    ag.audit = &logger;
+
+    var sess = session.Session.init("t");
+    defer sess.deinit(gpa);
+    try sess.append(gpa, .user, "写个文件");
+    const reply = try ag.run(gpa, &sess);
+    defer gpa.free(reply);
+    try std.testing.expectEqualStrings("只读模式无法写", reply);
+
+    // 文件绝不应被创建（内建写工具不可绕过 readonly）。
+    try std.testing.expectError(error.FileNotFound, cwd.readFileAlloc(io, dir ++ "/evil.txt", gpa, .limited(64)));
+
+    // 留痕 policy_deny，且因写被拒、命令从未执行 → 无该步 observation。
+    const log = lw.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, log, "\"kind\":\"policy_deny\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, log, "\"kind\":\"observation\"") == null);
+}
+
+test "run: file 工具参数畸形→回灌纠错提示后以正确参数收敛（防弹重试）" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const dir = "/tmp/scoot_agent_file_malformed";
+    cwd.deleteTree(io, dir) catch {};
+    defer cwd.deleteTree(io, dir) catch {};
+    try cwd.createDirPath(io, dir);
+
+    // 第一步 action_input 不是合法参数 JSON；过护栏后在执行处失败，转纠错观察回灌。
+    const s_bad =
+        \\{"thought":"写","action":"file_write","action_input":"not a json object"}
+    ;
+    const s_good =
+        \\{"thought":"按格式重来","action":"file_write","action_input":"{\"path\":\"/tmp/scoot_agent_file_malformed/ok.txt\",\"content\":\"fixed\"}"}
+    ;
+    const s_final =
+        \\{"thought":"完成","action":"final","action_input":"done"}
+    ;
+    var brain = ScriptedBrain{ .steps = &.{ s_bad, s_good, s_final } };
+    var ag = testAgent(&brain, 16);
+
+    var sess = session.Session.init("t");
+    defer sess.deinit(gpa);
+    try sess.append(gpa, .user, "写文件");
+    const reply = try ag.run(gpa, &sess);
+    defer gpa.free(reply);
+    try std.testing.expectEqualStrings("done", reply);
+
+    // 回灌里应出现针对参数格式的纠错提示。
+    var saw_hint = false;
+    for (sess.items()) |m| {
+        if (std.mem.indexOf(u8, m.content, "不是合法的参数 JSON") != null) saw_hint = true;
+    }
+    try std.testing.expect(saw_hint);
+
+    // 模型按提示用正确参数重试，最终成功写盘。
+    const bytes = try cwd.readFileAlloc(io, dir ++ "/ok.txt", gpa, .limited(64));
+    defer gpa.free(bytes);
+    try std.testing.expectEqualStrings("fixed", bytes);
 }
 
 test {
