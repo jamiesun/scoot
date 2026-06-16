@@ -4,7 +4,7 @@
 
 Scoot 在纯文本环境下运行，作为本地算力或远程模型的执行中枢，依据**目标（Goal）**或**定时任务（Schedule）**自主调用底层系统能力（Shell、文件、网络），并把每一步思考与动作沉淀为可审计的日志。设计基调延续 C/C++ 时代的防御性编程：**轻量、无冗余、本地优先，宁可拒绝执行，也绝不盲目信任模型输出。**
 
-> ⚠️ **当前状态：早期实现（early implementation）。** 模块结构已就位、可编译可运行；核心闭环已打通——`scoot -e "…"` 与默认的交互式 **REPL** 均跑完整的 ReACT 循环：强制 `json_schema` 让模型产出结构化步骤，`bash` 与内建 `file_read`/`file_write`/`file_edit` 工具先过执行护栏、再执行、输出回灌续推，直至给出最终答复（防弹解析，每步审计落盘，无后端时优雅失败）。**文件工具已上线**——进程内自包含读写，不依赖 `cat`/`sed`，裁剪/嵌入式 Linux 亦可用，写类操作受 `readonly` 安全档结构性约束。**调度引擎已上线**——`scoot schedule run` 按 `every`/`at` 触发器到点唤起 Agent，无人值守强制 `readonly` 安全档。其余能力（grep/glob/http 工具、密钥文件/命令来源、cron 调度等）多数仍为 stub。完整的目标画像、边界与方向见 [`ROADMAP.md`](./ROADMAP.md)。
+> ⚠️ **当前状态：早期实现（early implementation）。** 模块结构已就位、可编译可运行；核心闭环已打通——`scoot -e "…"` 与默认的交互式 **REPL** 均跑完整的 ReACT 循环：强制 `json_schema` 让模型产出结构化步骤，`bash` 与内建 `file_read`/`file_write`/`file_edit`/`grep`/`glob` 工具先过执行护栏、再执行、输出回灌续推，直至给出最终答复（防弹解析，每步审计落盘，无后端时优雅失败）。**文件与搜索工具已上线**——进程内自包含读写与搜索，不依赖 `cat`/`sed`/`grep`/`find`（grep 用自研 ReDoS 免疫正则），裁剪/嵌入式 Linux 亦可用，写类操作受 `readonly` 安全档结构性约束。**调度引擎已上线**——`scoot schedule run` 按 `every`/`at` 触发器到点唤起 Agent，无人值守强制 `readonly` 安全档。其余能力（http 工具、密钥文件/命令来源、cron 调度等）仍为 stub。完整的目标画像、边界与方向见 [`ROADMAP.md`](./ROADMAP.md)。
 
 ## 环境要求
 
@@ -51,13 +51,14 @@ src/
   session.zig        会话：跨回合存活的消息流 + JSONL 序列化（短期记忆载体）
   agent.zig          认知流引擎：多轮 ReACT 闭环（structured step + 工具调用）+ 每回合 ArenaAllocator
   schedule.zig       调度引擎：every / at / cron 触发器
+  regex.zig          自研 Thompson NFA 正则引擎（线性时间，ReDoS 免疫；供 grep 复用）
   audit.zig          审计日志：思考 / 工具调用 / 观察 留痕
   policy.zig         执行护栏：命令落系统前的策略门（guarded / readonly / unrestricted）
   tools/             执行沙盒（均带硬超时）
     tools.zig        工具注册与统一结果类型
     bash.zig         shell 命令执行
     file.zig         file_read / file_write / file_edit
-    search.zig       grep（内容）/ glob（路径）
+    search.zig       grep（内容，走自研正则）/ glob（路径，std.fs 遍历）
     http.zig         http_request
 ```
 
@@ -139,12 +140,12 @@ Scoot 通过 **skill** 扩展能力，无需重新编译核心二进制。一个
 | 密钥管理 | `src/secret.zig` | 🚧 env 来源可用，文件(0600)/命令待实现 |
 | LLM 适配（OpenAI） | `src/llm.zig` | ✅ HTTP 往返 + 强制 json_schema/strict + 防弹解析（含测试）；🚧 流式/Tool Calling 待实现 |
 | Skill 机制 | `src/skill.zig` | ✅ 渐进式披露：发现各路径下 `<skill>/SKILL.md`、防弹解析 front-matter、按名去重建索引；清单（name+描述+路径）注入 system 上下文，模型按需用 bash 读取正文激活；`scoot skills` 可列出（含测试） |
-| 认知流引擎（ReACT / Plan） | `src/agent.zig` | ✅ 多轮 ReACT（structured step→**执行护栏校验**→工具执行→观察回灌→final）；动作集 `bash`/`file_read`/`file_write`/`file_edit`/`final`，多参数工具的 `action_input` 走 JSON 对象（防弹解析，畸形则回灌纠错重试）；max_turns 防失控（含循环测试）；🚧 plan 模式待实现 |
+| 认知流引擎（ReACT / Plan） | `src/agent.zig` | ✅ 多轮 ReACT（structured step→**执行护栏校验**→工具执行→观察回灌→final）；动作集 `bash`/`file_read`/`file_write`/`file_edit`/`grep`/`glob`/`final`，多参数工具的 `action_input` 走 JSON 对象（防弹解析，畸形则回灌纠错重试）；max_turns 防失控（含循环测试）；🚧 plan 模式待实现 |
 | 会话（短期记忆载体） | `src/session.zig` | ✅ 内存记录 + JSONL 序列化 + 追加落盘 `state/sessions/<id>.jsonl`（含测试） |
 | 调度引擎（every/at/cron） | `src/schedule.zig` | ✅ 时间循环已实现：`every`（间隔）/`at`（固定时间点）触发器到点唤起 Agent，**无人值守强制 readonly 安全档**（guarded 自动矫正），per-job 可重置 arena 保长效零泄漏；`scoot schedule list/run [--ticks N]` 可用（含测试）；🚧 `cron` 暂不支持（恒不触发，不半实现） |
 | 审计日志 | `src/audit.zig` | ✅ JSONL 审计链路：agent 每步 `run/thought/tool_call/observation/policy_deny/final/system_error` 留痕，`-e` 追加落盘 `logs/audit.jsonl`（含测试） |
 | 执行护栏 | `src/policy.zig` | ✅ 命令落系统前必过策略门：`guarded`（拦截灾难性命令绊线，默认）/ `readonly`（只读白名单 fail-closed）/ `unrestricted`；被拒即审计 `policy_deny` 并回灌让模型改道。内建工具另有能力护栏 `evaluateTool`（read/write/net_read/net_write 按类判定，readonly fail-closed），保证 file/grep/http 等内建工具**不可绕过只读档**（含测试） |
-| 执行沙盒（工具集） | `src/tools/` | ✅ `bash` 硬超时 + 输出上限 + cwd；✅ `file_read`/`file_write`/`file_edit` 进程内自包含文件读写（不依赖 cat/sed，裁剪/嵌入式 Linux 可用；edit 强制唯一匹配防误改；写类前置过 `evaluateTool(.write)` 护栏）（含测试）；🚧 search（grep/glob）/ http 待实现 |
+| 执行沙盒（工具集） | `src/tools/` | ✅ `bash` 硬超时 + 输出上限 + cwd；✅ `file_read`/`file_write`/`file_edit` 进程内自包含文件读写（不依赖 cat/sed，裁剪/嵌入式 Linux 可用；edit 强制唯一匹配防误改；写类前置过 `evaluateTool(.write)` 护栏）；✅ `grep`/`glob` 进程内搜索——grep 用自研 **Thompson NFA 正则**（线性时间，ReDoS 免疫，不依赖系统 grep），glob 用 `std.fs` 遍历（`* ? [] **`，不依赖 find），均按 `.read` 能力过护栏（含测试）；🚧 http 待实现 |
 
 ## 设计原则（节选）
 
