@@ -406,21 +406,34 @@ fn resolveToken(
     io: std.Io,
     env: *const std.process.Environ.Map,
 ) ![]const u8 {
-    const token: []const u8 = blk: {
-        const s = cfg.resolveToken(arena, io, env) catch |err| switch (err) {
-            error.OutOfMemory => return error.OutOfMemory,
-            else => break :blk "", // NotImplemented / NoApiKey：降级为空 token
-        };
-        break :blk s.value;
+    const explicit_source = cfg.backend.api_key_file != null or cfg.backend.api_key_cmd != null;
+    const s = cfg.resolveToken(arena, io, env) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        // token 文件存在但权限过宽：明示告警（指导 chmod 600），降级为空 token 续跑。
+        // 绝不读取世界可读的密钥（密钥零泄漏铁律）；本地无须密钥的后端不受影响。
+        error.InsecurePermissions => {
+            try out.print(
+                "[scoot] 警告：token 文件权限过宽（group/other 可读），已拒绝读取。\n" ++
+                    "        请执行 `chmod 600 {s}` 收紧后重试。\n",
+                .{cfg.backend.api_key_file orelse cfg.dirs.token_file},
+            );
+            return "";
+        },
+        // 所有来源均落空：本地 Ollama 等无须密钥，静默以空 token 续跑；
+        // 仅当用户**显式**配置了 file/cmd 来源却仍落空时才提示（配置未生效是值得知道的）。
+        error.NoApiKey => {
+            if (explicit_source) {
+                try out.print(
+                    "[scoot] 警告：已配置 token 文件/命令来源，但均未取得有效 token，将以空 token 继续。\n" ++
+                        "        请检查文件是否存在且非空，或凭证命令是否成功输出。\n",
+                    .{},
+                );
+            }
+            return "";
+        },
+        else => return err,
     };
-    if (token.len == 0 and (cfg.backend.api_key_file != null or cfg.backend.api_key_cmd != null)) {
-        try out.print(
-            "[scoot] 警告：已配置 token 文件/命令来源，但该来源尚未实现，将以空 token 继续。\n" ++
-                "        远程后端请改用环境变量 {s}。\n",
-            .{cfg.backend.api_key_env},
-        );
-    }
-    return token;
+    return s.value;
 }
 
 /// 交互式 REPL：在单一会话里跨多轮复用 ReACT 闭环。人在场监督，
