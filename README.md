@@ -4,7 +4,7 @@
 
 Scoot 在纯文本环境下运行，作为本地算力或远程模型的执行中枢，依据**目标（Goal）**或**定时任务（Schedule）**自主调用底层系统能力（Shell、文件、网络），并把每一步思考与动作沉淀为可审计的日志。设计基调延续 C/C++ 时代的防御性编程：**轻量、无冗余、本地优先，宁可拒绝执行，也绝不盲目信任模型输出。**
 
-> ⚠️ **当前状态：早期实现（early implementation）。** 模块结构已就位、可编译可运行；核心闭环已打通——`scoot -e "…"` 与默认的交互式 **REPL** 均跑完整的 ReACT 循环：强制 `json_schema` 让模型产出结构化步骤，`bash` 与内建 `file_read`/`file_write`/`file_edit`/`grep`/`glob`/`http_request` 工具先过执行护栏、再执行、输出回灌续推，直至给出最终答复（防弹解析，每步审计落盘，无后端时优雅失败）。**内建工具集已齐备**——文件读写、搜索（grep 用自研 ReDoS 免疫正则、glob）、HTTP/HTTPS（硬超时 + 可配 CA）全部进程内自包含，不依赖 `cat`/`sed`/`grep`/`find`/`curl`，裁剪/嵌入式 Linux 亦可用，写类与网络写操作受 `readonly` 安全档结构性约束。**调度引擎已上线**——`scoot schedule run` 按 `every`/`at` 触发器到点唤起 Agent，无人值守强制 `readonly` 安全档。其余能力（密钥文件/命令来源、cron 调度等）仍为 stub。完整的目标画像、边界与方向见 [`ROADMAP.md`](./ROADMAP.md)。
+> ✅ **当前状态：核心可用（北极星五支柱已落地，112 测试守护）。** 模块结构已就位、可编译可运行；核心闭环已打通——`scoot -e "…"` 与默认的交互式 **REPL** 均跑完整的 ReACT 循环：强制 `json_schema` 让模型产出结构化步骤，`bash` 与内建 `file_read`/`file_write`/`file_edit`/`grep`/`glob`/`http_request` 工具先过执行护栏、再执行、输出回灌续推，直至给出最终答复（防弹解析，每步审计落盘，无后端时优雅失败）。**内建工具集已齐备**——文件读写、搜索（grep 用自研 ReDoS 免疫正则、glob）、HTTP/HTTPS（硬超时 + 可配 CA）全部进程内自包含，不依赖 `cat`/`sed`/`grep`/`find`/`curl`，裁剪/嵌入式 Linux 亦可用，写类与网络写操作受 `readonly` 安全档结构性约束。**调度引擎已上线**——`scoot schedule run` 按 `every`/`at` 触发器到点唤起 Agent，无人值守强制 `readonly` 安全档。**密钥三来源**（env / 文件 0600 / 凭证命令）已落地，权限过宽拒读、明文绝不入库。少数项仍刻意暂缓（cron 表达式调度、plan 模式、目录权限硬化）。完整的目标画像、边界与方向见 [`ROADMAP.md`](./ROADMAP.md)。
 
 ## 环境要求
 
@@ -140,9 +140,9 @@ Scoot 通过 **skill** 扩展能力，无需重新编译核心二进制。一个
 | --- | --- | --- |
 | CLI / 参数解析 | `src/main.zig` | ✅ 可用（含 `config` 命令；`-e` 单次执行与默认 **REPL 多轮交互**均已端到端打通——REPL 复用会话、每轮独立审计、收尾落盘、出错不中断；`/exit` 退出） |
 | 运行目录解析 | `src/paths.zig` | ✅ `~/.scoot` + `SCOOT_HOME` 覆盖；`ensure` 幂等建目录树（home/skills/logs/state/sessions，含测试）；🚧 0700/0600 权限收紧待实现 |
-| 配置加载 | `src/config.zig` | ✅ `~/.scoot/config.json` 读取 + std.json 按节合并（缺省回落默认、未知字段忽略、畸形→清晰报错，含测试）；🚧 内联密钥告警待实现 |
-| 密钥管理 | `src/secret.zig` | 🚧 env 来源可用，文件(0600)/命令待实现 |
-| LLM 适配（OpenAI） | `src/llm.zig` | ✅ HTTP 往返 + 强制 json_schema/strict + 防弹解析（含测试）；🚧 流式/Tool Calling 待实现 |
+| 配置加载 | `src/config.zig` | ✅ `~/.scoot/config.json` 读取 + std.json 按节合并（缺省回落默认、未知字段忽略、畸形→清晰报错，含测试）；内联明文密钥字段**刻意不提供**（杜绝随仓库提交） |
+| 密钥管理 | `src/secret.zig` | ✅ 三来源 env → 文件(0600，`assertPrivate` 权限过宽拒读) → 凭证命令(10s 硬超时)，逐源解析、`redact` 脱敏（含测试 + 二进制冒烟） |
+| LLM 适配（OpenAI） | `src/llm.zig` | ✅ HTTP 往返 + 强制 json_schema/strict + 防弹解析 + 可配 CA（含测试）；流式/原生 Tool Calling **刻意不做**（非目标，ReACT 走 response_format 更稳健） |
 | Skill 机制 | `src/skill.zig` | ✅ 渐进式披露：发现各路径下 `<skill>/SKILL.md`、防弹解析 front-matter、按名去重建索引；清单（name+描述+路径）注入 system 上下文，模型按需用 bash 读取正文激活；`scoot skills` 可列出（含测试） |
 | 认知流引擎（ReACT / Plan） | `src/agent.zig` | ✅ 多轮 ReACT（structured step→**执行护栏校验**→工具执行→观察回灌→final）；动作集 `bash`/`file_read`/`file_write`/`file_edit`/`grep`/`glob`/`http_request`/`final`，多参数工具的 `action_input` 走 JSON 对象（防弹解析，畸形则回灌纠错重试）；max_turns 防失控（含循环测试）；🚧 plan 模式待实现 |
 | 会话（短期记忆载体） | `src/session.zig` | ✅ 内存记录 + JSONL 序列化 + 追加落盘 `state/sessions/<id>.jsonl`（含测试） |
