@@ -63,7 +63,23 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    const cfg = try scoot.config.Config.load(arena, io, env);
+    const dirs = scoot.paths.Paths.resolve(arena, env) catch |err| switch (err) {
+        error.NoHomeDir => {
+            try out.writeAll("error: 无法确定运行目录：请设置 HOME 或 SCOOT_HOME\n");
+            die(out, 1);
+        },
+        else => return err,
+    };
+    const cfg = scoot.config.Config.loadFromDirs(arena, io, dirs) catch |err| switch (err) {
+        error.InvalidConfig => {
+            try out.print("error: 配置文件不是合法 JSON：{s}\n", .{dirs.config_file});
+            die(out, 1);
+        },
+        else => {
+            try out.print("error: 读取配置失败（{s}）：{s}\n", .{ @errorName(err), dirs.config_file });
+            die(out, 1);
+        },
+    };
 
     if (cmd_config) {
         try out.print("运行目录:   {s}\n", .{cfg.dirs.home});
