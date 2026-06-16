@@ -144,6 +144,7 @@ pub fn main(init: std.process.Init) !void {
     if (eval_prompt) |prompt| {
         const token = try resolveToken(out, cfg, arena, io, env);
         var client = scoot.llm.Client.init(io, cfg.backend.base_url, cfg.backend.model, token);
+        client.ca_file = cfg.backend.ca_file;
         var sess = scoot.session.Session.init("cli");
         try sess.append(arena, .system, scoot.agent.system_prompt);
         injectSkills(out, arena, io, cfg, &sess);
@@ -153,6 +154,7 @@ pub fn main(init: std.process.Init) !void {
         ag.max_turns = cfg.agent.max_turns;
         ag.tool_timeout_ms = cfg.tools.timeout_ms;
         ag.policy_mode = scoot.policy.Mode.fromString(cfg.tools.policy);
+        ag.ca_file = cfg.backend.ca_file;
 
         // 审计留痕（铁律：可审计胜过黑盒）。打不开则降级为「明示警告 + 不留痕」。
         var sink: AuditSink = .{};
@@ -308,6 +310,7 @@ const RunCtx = struct {
         ag.max_turns = self.cfg.agent.max_turns;
         ag.tool_timeout_ms = self.cfg.tools.timeout_ms;
         ag.policy_mode = eff; // 强制有效安全档（结构上不可能跑在 guarded 之上）
+        ag.ca_file = self.cfg.backend.ca_file;
 
         var sink: AuditSink = .{};
         sink.open(self.out, a, self.io, self.cfg.dirs.logs_dir);
@@ -367,6 +370,7 @@ fn runSchedule(
 
     const token = try resolveToken(out, cfg, arena, io, env);
     var client = scoot.llm.Client.init(io, cfg.backend.base_url, cfg.backend.model, token);
+    client.ca_file = cfg.backend.ca_file;
 
     var job_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer job_arena.deinit();
@@ -430,6 +434,7 @@ fn runRepl(
 ) !void {
     const token = try resolveToken(out, cfg, arena, io, env);
     var client = scoot.llm.Client.init(io, cfg.backend.base_url, cfg.backend.model, token);
+    client.ca_file = cfg.backend.ca_file;
 
     var sess = scoot.session.Session.init("repl");
     try sess.append(arena, .system, scoot.agent.system_prompt);
@@ -439,6 +444,7 @@ fn runRepl(
     ag.max_turns = cfg.agent.max_turns;
     ag.tool_timeout_ms = cfg.tools.timeout_ms;
     ag.policy_mode = scoot.policy.Mode.fromString(cfg.tools.policy);
+    ag.ca_file = cfg.backend.ca_file;
 
     var sink: AuditSink = .{};
     sink.open(out, arena, io, cfg.dirs.logs_dir);

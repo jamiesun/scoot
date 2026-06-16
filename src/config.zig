@@ -17,6 +17,9 @@ pub const Backend = struct {
     api_key_file: ?[]const u8 = null,
     /// 凭证命令（如 `pass show openai`）；null 表示不用。
     api_key_cmd: ?[]const u8 = null,
+    /// 自定义 CA bundle（PEM）绝对路径；null 表示用系统根证书自动扫描。
+    /// 裁剪 / 嵌入式 Linux 上系统证书常缺失，可在此指定随固件部署的 CA。
+    ca_file: ?[]const u8 = null,
 };
 
 /// 认知引擎配置。

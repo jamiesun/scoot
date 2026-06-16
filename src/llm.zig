@@ -38,6 +38,8 @@ pub const Client = struct {
     model: []const u8,
     /// API token；空串表示不带 Authorization（本地无鉴权后端）。明文仅在内存短暂存活。
     api_key: []const u8 = "",
+    /// 自定义 CA bundle（PEM）绝对路径；null = 系统根证书自动扫描（嵌入式可指定）。
+    ca_file: ?[]const u8 = null,
 
     pub fn init(io: std.Io, base_url: []const u8, model: []const u8, api_key: []const u8) Client {
         return .{ .io = io, .base_url = base_url, .model = model, .api_key = api_key };
@@ -56,6 +58,14 @@ pub const Client = struct {
 
         var http_client: std.http.Client = .{ .allocator = arena, .io = self.io };
         defer http_client.deinit();
+
+        // 自定义 CA：预填 bundle 并置 now 抑制系统扫描覆盖（嵌入式 HTTPS 后端）。
+        if (self.ca_file) |path| {
+            const ca_now = std.Io.Clock.real.now(self.io);
+            http_client.ca_bundle.addCertsFromFilePathAbsolute(arena, self.io, ca_now, path) catch
+                return error.CertificateBundleLoadFailure;
+            http_client.now = ca_now;
+        }
 
         var resp: std.Io.Writer.Allocating = .init(arena);
         const has_key = self.api_key.len > 0;
