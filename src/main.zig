@@ -98,11 +98,17 @@ pub fn main(init: std.process.Init) !void {
     };
     const cfg = scoot.config.Config.loadFromDirs(arena, io, dirs) catch |err| switch (err) {
         error.InvalidConfig => {
-            try out.print("error: 配置文件不是合法 JSON：{s}\n", .{dirs.config_file});
+            try out.print(
+                "error: 配置文件解析失败（TOML/JSON 语法或字段类型不符）。请检查 {s} 或 {s}\n",
+                .{ dirs.config_toml_file, dirs.config_file },
+            );
             die(out, 1);
         },
         else => {
-            try out.print("error: 读取配置失败（{s}）：{s}\n", .{ @errorName(err), dirs.config_file });
+            try out.print(
+                "error: 读取配置失败（{s}）。涉及 {s} 或 {s}\n",
+                .{ @errorName(err), dirs.config_toml_file, dirs.config_file },
+            );
             die(out, 1);
         },
     };
@@ -114,7 +120,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (cmd_config) {
         try out.print("运行目录:   {s}\n", .{cfg.dirs.home});
-        try out.print("  配置文件: {s}\n", .{cfg.dirs.config_file});
+        try out.print("  配置文件: {s}\n", .{cfg.active_config_file});
         try out.print("  token:    {s}\n", .{cfg.dirs.token_file});
         try out.print("  skills:   {s}\n", .{cfg.dirs.skills_dir});
         try out.print("  日志:     {s}\n", .{cfg.dirs.logs_dir});
@@ -263,7 +269,7 @@ fn printSchedule(out: *Io.Writer, cfg: scoot.config.Config) !void {
         sc.jobs.len,
     });
     if (sc.jobs.len == 0) {
-        try out.writeAll("  （无任务。在 config.json 的 schedule.jobs 配置）\n");
+        try out.writeAll("  （无任务。在配置文件的 schedule.jobs 配置）\n");
         return;
     }
     var tbuf: [128]u8 = undefined;
@@ -279,7 +285,7 @@ fn printSchedule(out: *Io.Writer, cfg: scoot.config.Config) !void {
         }
     }
     if (!sc.enabled) {
-        try out.writeAll("\n提示：`scoot schedule run` 需先在 config.json 设 schedule.enabled=true。\n");
+        try out.writeAll("\n提示：`scoot schedule run` 需先在配置文件设 schedule.enabled=true。\n");
     }
 }
 
@@ -352,7 +358,7 @@ fn runSchedule(
 ) !void {
     const sc = cfg.schedule;
     if (!sc.enabled) {
-        try out.writeAll("[scoot] 调度未启用：请在 config.json 设 schedule.enabled=true 后再运行。\n");
+        try out.writeAll("[scoot] 调度未启用：请在配置文件设 schedule.enabled=true 后再运行。\n");
         die(out, 1);
     }
 

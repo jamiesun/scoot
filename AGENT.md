@@ -27,7 +27,8 @@ zig build -Doptimize=ReleaseSafe    # 嵌入式 / 生产部署推荐档（见下
 | `src/main.zig` | CLI 入口：参数解析 → REPL / 单次执行 / 守护 / `config` |
 | `src/root.zig` | `scoot` 库模块根，再导出各子系统命名空间 |
 | `src/paths.zig` | 运行目录解析：`~/.scoot`（`SCOOT_HOME` 覆盖）及各子路径 |
-| `src/config.zig` | 结构化配置（backend / agent / tools / skills / audit） |
+| `src/config.zig` | 结构化配置（backend / agent / tools / skills / audit）；TOML 优先 / JSON 回落 |
+| `src/toml.zig` | 自研零依赖 TOML 子集解析器（→ `std.json.Value`，复用 JSON 类型映射） |
 | `src/secret.zig` | 密钥管理：env → 文件(0600) → 凭证命令，脱敏 |
 | `src/llm.zig` | LLM 适配（仅 OpenAI `/v1/chat/completions`）：HTTP 往返 + 强制 json_schema/strict + 防弹解析 |
 | `src/jsonio.zig` | 共享 JSON 字符串转义（session / llm 复用） |
@@ -81,7 +82,7 @@ zig build -Doptimize=ReleaseSafe    # 嵌入式 / 生产部署推荐档（见下
 
 ## 运行目录 / 配置 / 密钥 / Skill 约定
 
-- **运行目录**：一切配置、密钥、技能、状态收敛在 `~/.scoot/`（`SCOOT_HOME` 可覆盖）。解析逻辑在 `src/paths.zig`；新写盘的东西放对应子目录（`config.json` / `token` / `skills/` / `logs/` / `state/`），不要散落到别处或 `$HOME` 根下。`scoot config` 可打印解析结果。
+- **运行目录**：一切配置、密钥、技能、状态收敛在 `~/.scoot/`（`SCOOT_HOME` 可覆盖）。解析逻辑在 `src/paths.zig`；新写盘的东西放对应子目录（`config.toml`（或 `config.json`）/ `token` / `skills/` / `logs/` / `state/`），不要散落到别处或 `$HOME` 根下。`scoot config` 可打印解析结果。
 - **配置**：结构化分节（backend / agent / tools / skills / audit）在 `src/config.zig`，默认值即可用；加 JSON 加载时用 `std.json` 并与默认值合并，**不要**改默认值的含义。
 - **密钥**：解析在 `src/secret.zig`，优先级 env → 文件(0600) → 凭证命令。实现文件分支时**必须**先 `assertPrivate` 校验 0600，权限过宽要拒绝。任何日志 / 错误 / 审计输出 token 前先过 `secret.redact`。
 - **Skill**：机制在 `src/skill.zig`。坚持渐进式披露——发现阶段只读 front-matter（name+description），正文按需在 `activate` 时加载。skill 携带的脚本必须经 `src/tools/` 沙盒执行（带硬超时），不得新开绕过沙盒的执行路径。

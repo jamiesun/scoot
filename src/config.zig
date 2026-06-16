@@ -6,6 +6,7 @@ const paths = @import("paths.zig");
 const secret = @import("secret.zig");
 const schedule = @import("schedule.zig");
 const policy = @import("policy.zig");
+const tomlmod = @import("toml.zig");
 
 /// LLM 后端配置。仅 OpenAI 兼容协议（见 ROADMAP 非目标）。
 pub const Backend = struct {
@@ -141,6 +142,25 @@ fn parseFileConfig(arena: std.mem.Allocator, bytes: []const u8) !FileConfig {
     };
 }
 
+/// 解析 config.toml 文本为 FileConfig。
+/// 先用自研 TOML 子集解析器产出 std.json.Value 树，再交 std.json.parseFromValueLeaky
+/// 复用与 JSON 完全相同的类型映射 / 默认值 / 按节合并 / extra_body 透传。
+/// 空白内容回落默认；畸形 TOML / 字段类型不符 → error.InvalidConfig（坏配置可见）。
+fn parseTomlConfig(arena: std.mem.Allocator, bytes: []const u8) !FileConfig {
+    const trimmed = std.mem.trim(u8, bytes, " \t\r\n");
+    if (trimmed.len == 0) return .{};
+    const value = tomlmod.parse(arena, bytes) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.InvalidToml => return error.InvalidConfig,
+    };
+    return std.json.parseFromValueLeaky(FileConfig, arena, value, .{
+        .ignore_unknown_fields = true,
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidConfig,
+    };
+}
+
 pub const Config = struct {
     backend: Backend = .{},
     agent: Agent = .{},
@@ -150,8 +170,11 @@ pub const Config = struct {
     schedule: Schedule = .{},
     /// 解析出的运行目录。
     dirs: paths.Paths,
+    /// 实际加载的配置文件路径（config.toml 优先于 config.json）。
+    /// 两者皆缺失时为推荐路径（config.toml）。仅用于 `scoot config` 展示。
+    active_config_file: []const u8 = "",
 
-    /// 从 ~/.scoot/config.json 加载配置；文件不存在则用默认值。
+    /// 从 ~/.scoot/ 加载配置：优先 config.toml，否则 config.json，皆缺失则用默认值。
     /// `io` 用于读取配置文件，`env` 用于解析运行目录。
     /// 文件缺失 → 静默回落默认；存在但畸形 → error.InvalidConfig（让坏配置可见）。
     pub fn load(arena: std.mem.Allocator, io: std.Io, env: *const Environ.Map) !Config {
@@ -160,12 +183,30 @@ pub const Config = struct {
     }
 
     /// 在运行目录已解析后加载配置。供 CLI 先解析目录、再针对配置文件单独报错。
+    /// 加载优先级：config.toml（可读性更好）> config.json（向后兼容）。
     pub fn loadFromDirs(arena: std.mem.Allocator, io: std.Io, dirs: paths.Paths) !Config {
-        const bytes = std.Io.Dir.cwd().readFileAlloc(io, dirs.config_file, arena, config_read_limit) catch |err| switch (err) {
-            error.FileNotFound => return .{ .dirs = dirs },
+        const cwd = std.Io.Dir.cwd();
+        // ① 优先 TOML
+        if (cwd.readFileAlloc(io, dirs.config_toml_file, arena, config_read_limit)) |bytes| {
+            const fc = try parseTomlConfig(arena, bytes);
+            return fromFile(fc, dirs, dirs.config_toml_file);
+        } else |err| switch (err) {
+            error.FileNotFound => {},
             else => return err,
-        };
-        const fc = try parseFileConfig(arena, bytes);
+        }
+        // ② 回落 JSON
+        if (cwd.readFileAlloc(io, dirs.config_file, arena, config_read_limit)) |bytes| {
+            const fc = try parseFileConfig(arena, bytes);
+            return fromFile(fc, dirs, dirs.config_file);
+        } else |err| switch (err) {
+            error.FileNotFound => {},
+            else => return err,
+        }
+        // ③ 皆缺失：默认值；active 指向推荐的 TOML 路径
+        return .{ .dirs = dirs, .active_config_file = dirs.config_toml_file };
+    }
+
+    fn fromFile(fc: FileConfig, dirs: paths.Paths, active: []const u8) Config {
         return .{
             .backend = fc.backend,
             .agent = fc.agent,
@@ -174,6 +215,7 @@ pub const Config = struct {
             .audit = fc.audit,
             .schedule = fc.schedule,
             .dirs = dirs,
+            .active_config_file = active,
         };
     }
 
@@ -202,6 +244,64 @@ pub const Config = struct {
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "parseTomlConfig: TOML → FileConfig（含 extra_body 透传 + 按节合并）" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const src =
+        \\# Scoot 配置（TOML，可读性更好）
+        \\[backend]
+        \\base_url = "https://x.azure.com/openai/v1"
+        \\model = "gpt-5.5"
+        \\api_key_env = "WJT_AZURE_OPENAI_API_KEY"
+        \\
+        \\[backend.extra_body]
+        \\service_tier = "priority"
+        \\reasoning_effort = "high"
+        \\
+        \\[tools]
+        \\policy = "guarded"
+    ;
+    const fc = try parseTomlConfig(arena.allocator(), src);
+    try std.testing.expectEqualStrings("https://x.azure.com/openai/v1", fc.backend.base_url);
+    try std.testing.expectEqualStrings("gpt-5.5", fc.backend.model);
+    try std.testing.expectEqualStrings("WJT_AZURE_OPENAI_API_KEY", fc.backend.api_key_env);
+    try std.testing.expectEqualStrings("guarded", fc.tools.policy);
+    // 未指定的节回落默认
+    try std.testing.expectEqual(@as(u32, 32), fc.agent.max_turns);
+    // extra_body 透传为 std.json.Value 对象
+    try std.testing.expect(fc.backend.extra_body != null);
+    const eb = fc.backend.extra_body.?.object;
+    try std.testing.expectEqualStrings("priority", eb.get("service_tier").?.string);
+    try std.testing.expectEqualStrings("high", eb.get("reasoning_effort").?.string);
+}
+
+test "parseTomlConfig: 表数组 schedule.jobs 正确映射" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const src =
+        \\[schedule]
+        \\enabled = true
+        \\
+        \\[[schedule.jobs]]
+        \\id = "disk"
+        \\goal = "巡检磁盘"
+        \\every_sec = 300
+    ;
+    const fc = try parseTomlConfig(arena.allocator(), src);
+    try std.testing.expectEqual(true, fc.schedule.enabled);
+    try std.testing.expectEqual(@as(usize, 1), fc.schedule.jobs.len);
+    try std.testing.expectEqualStrings("disk", fc.schedule.jobs[0].id);
+    try std.testing.expectEqual(@as(?u64, 300), fc.schedule.jobs[0].every_sec);
+}
+
+test "parseTomlConfig: 空白回落默认；畸形 → InvalidConfig" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const fc = try parseTomlConfig(arena.allocator(), "\n# 仅注释\n");
+    try std.testing.expectEqualStrings("qwen2.5", fc.backend.model);
+    try std.testing.expectError(error.InvalidConfig, parseTomlConfig(arena.allocator(), "a = 2020-01-01"));
 }
 
 test "parseFileConfig: 空白内容回落默认" {

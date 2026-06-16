@@ -38,7 +38,7 @@ Scoot 是一个运行在纯文本环境下的轻量级 AI Agent 守护进程（D
  +-------------------------------+    +-------------------------------+
 
  运行目录 ~/.scoot/（环境变量 SCOOT_HOME 可覆盖）:
-   config.json · token (0600) · skills/ · logs/ · state/
+   config.toml（或 config.json）· token (0600) · skills/ · logs/ · state/
 ```
 
 ## 项目画像（目标状态）
@@ -86,7 +86,7 @@ Scoot 是一个运行在纯文本环境下的轻量级 AI Agent 守护进程（D
   以目录形式挂载"能力 + 指令集"，从 `~/.scoot/skills`（及配置的额外路径）发现、按需加载。`src/skill.zig` 已实现渐进式披露：遍历各路径子目录、**防弹解析** `SKILL.md` 的 YAML front-matter（name/description，任意截断/畸形输入只得 null 绝不 panic）、按名去重建轻量索引；清单（name+描述+路径）注入 system 上下文，模型判断相关时**用既有 bash 工具读取正文激活**（正文绝不预注入，上下文恒定轻量），脚本经统一沙盒执行不获特权。`scoot skills` 可列出已发现技能。含单测 + 端到端冒烟（清单进入请求体、cat 激活取回正文 sentinel）。🚧 per-skill `allowed_tools` 白名单为预留格式字段，待按需启用 `allowsTool`。
 
 - **🧱🚧 运行目录与配置（Runtime & Config）**
-  统一运行目录 `~/.scoot/`（`SCOOT_HOME` 可覆盖），含 `config.json` / `token` / `skills/` / `logs/` / `state/`。结构化配置（backend / agent / tools / skills / audit / schedule）见 `src/config.zig`；路径解析、`scoot config` 命令、`config.json` 的 std.json 按节合并加载（缺省回落默认、未知字段忽略、畸形配置清晰报错）、启动时幂等建目录树（`paths.ensure`）均已可用。🚧 目录权限收紧（home 0700 / token 0600 的 mkdir 强制）仍用系统默认权限，待硬化（非阻断）。
+  统一运行目录 `~/.scoot/`（`SCOOT_HOME` 可覆盖），含 `config.toml`（或 `config.json`）/ `token` / `skills/` / `logs/` / `state/`。结构化配置（backend / agent / tools / skills / audit / schedule）见 `src/config.zig`；路径解析、`scoot config` 命令、配置文件加载（**TOML 优先、JSON 回落**：自研零依赖 TOML 子集解析→`std.json.Value`，复用 std.json 按节合并——缺省回落默认、未知字段忽略、畸形配置清晰报错）、启动时幂等建目录树（`paths.ensure`）均已可用。🚧 目录权限收紧（home 0700 / token 0600 的 mkdir 强制）仍用系统默认权限，待硬化（非阻断）。
 
 - **✅ 密钥安全管理（Secret）**
   token 解析优先级 env → 文件(0600) → 凭证命令，明文绝不入库、绝不进日志。`src/secret.zig` 已实现逐源解析：env（非空）→ token 文件（`assertPrivate` 仿 SSH 私钥，`mode & 0o077 != 0` 即拒读，**读文件前先校验**绝不把世界可读密钥读进内存）→ 凭证命令（复用 bash 沙盒，**10s 硬超时**，stdout 即 token）。权限过宽明示提示 `chmod 600`，`redact` 脱敏，config 刻意不暴露内联明文字段。含 7 项单测 + 二进制四例冒烟守护。
@@ -119,7 +119,7 @@ Scoot 是一个运行在纯文本环境下的轻量级 AI Agent 守护进程（D
   - **计划模式（Plan Mode）**：Agent 先产出一份固定的执行 DAG（有向无环图），经用户确认或审计后，再严格按步骤执行——把“可审计、可干预”落到任务编排层。
 
 - **方向三：CLI 交互式的 Schedule 管理。**
-  服务于“把 AI 能力与传统定时任务融合”的取向，让 Scoot 成为个人的智能 Cronjob 中枢，定时唤起 Agent 处理后台任务。**当前已落地**声明式形态：任务在 `config.json` 的 `schedule.jobs` 声明，`scoot schedule list` 查看（含有效执行档与非法标记）、`scoot schedule run` 进入守护循环执行。交互式增删（类 IRC / Slack bot 的 `/schedule add`、`/schedule remove` 运行时改配）为后续增量——声明式配置已能覆盖核心场景，避免过早引入运行时任务 CRUD 与持久化复杂度。
+  服务于“把 AI 能力与传统定时任务融合”的取向，让 Scoot 成为个人的智能 Cronjob 中枢，定时唤起 Agent 处理后台任务。**当前已落地**声明式形态：任务在配置文件（`config.toml` / `config.json`）的 `schedule.jobs` 声明，`scoot schedule list` 查看（含有效执行档与非法标记）、`scoot schedule run` 进入守护循环执行。交互式增删（类 IRC / Slack bot 的 `/schedule add`、`/schedule remove` 运行时改配）为后续增量——声明式配置已能覆盖核心场景，避免过早引入运行时任务 CRUD 与持久化复杂度。
 
 - **方向四：本地 Skill 机制（渐进式披露）。**
   服务于“Skill 即能力扩展”与“轻量化”两个画像。意图是让用户把"能力 + 指令集"做成 `~/.scoot/skills` 下的目录（`SKILL.md` 描述 + 可选脚本/资源），Scoot 启动时只读取 name/description 建轻量索引并注入上下文，模型选中后才加载该 skill 的正文与资源。如此既能无限扩展能力，又不会让所有 skill 的正文一次性挤爆上下文，也无需为加新能力重新编译。skill 自带脚本必须经统一沙盒执行。

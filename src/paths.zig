@@ -9,6 +9,8 @@ pub const Paths = struct {
     home: []const u8,
     /// 主配置文件：<home>/config.json
     config_file: []const u8,
+    /// TOML 配置文件：<home>/config.toml（优先于 config.json）
+    config_toml_file: []const u8,
     /// 默认 token 文件：<home>/token（要求 0600）
     token_file: []const u8,
     /// 用户级 skill 目录：<home>/skills
@@ -30,6 +32,7 @@ pub const Paths = struct {
         return .{
             .home = home,
             .config_file = try std.fs.path.join(arena, &.{ home, "config.json" }),
+            .config_toml_file = try std.fs.path.join(arena, &.{ home, "config.toml" }),
             .token_file = try std.fs.path.join(arena, &.{ home, "token" }),
             .skills_dir = try std.fs.path.join(arena, &.{ home, "skills" }),
             .logs_dir = try std.fs.path.join(arena, &.{ home, "logs" }),
@@ -66,6 +69,7 @@ test "ensure: 在临时目录下创建运行目录树且幂等" {
     const p: Paths = .{
         .home = home,
         .config_file = home ++ "/config.json",
+        .config_toml_file = home ++ "/config.toml",
         .token_file = home ++ "/token",
         .skills_dir = home ++ "/skills",
         .logs_dir = home ++ "/logs",
