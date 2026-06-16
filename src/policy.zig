@@ -104,6 +104,39 @@ pub fn evaluate(arena: std.mem.Allocator, command: []const u8, mode: Mode) Decis
     return .allow;
 }
 
+/// 内建工具的能力分类。与 shell 不同：内建工具（file/grep/glob/http）不经 `/bin/sh`，
+/// 其读/写/网络语义是**静态已知**的，无需解析命令字符串。护栏据此按能力类别判定，
+/// 复杂度不随工具个数膨胀——新增同类工具复用同一条判定，不必逐个扩 denylist。
+pub const Capability = enum {
+    /// 只读本地状态：读文件、搜索内容、列目录。不改变本地或远端。
+    read,
+    /// 写本地状态：创建 / 修改 / 删除文件等。
+    write,
+    /// 网络只读：HTTP GET / HEAD 等幂等、无副作用的远端读取。
+    net_read,
+    /// 网络写：HTTP POST / PUT / DELETE / PATCH 等可能变更远端状态的请求。
+    net_write,
+};
+
+/// 校验一个**内建工具**（能力已分类）是否准许在该模式下执行。
+/// 与 `evaluate`（分析 shell 命令字符串）互补：二者共用同一套 `Mode` 语义——
+///   - unrestricted：全放行（仍审计）；
+///   - guarded：人在场绊线，只拦灾难性 *shell* 命令；内建工具无"删全盘"等价物，
+///     其边界由工具自身把关（路径范围 / 大小上限 / 硬超时），故此处放行；
+///   - readonly：fail-closed，只放行读类（本地读 + 网络只读），拒绝一切写。
+/// 这保证内建工具**不可能绕过 readonly 安全档**（无人值守 schedule 的结构性前提）。
+pub fn evaluateTool(cap: Capability, mode: Mode) Decision {
+    return switch (mode) {
+        .unrestricted => .allow,
+        .guarded => .allow,
+        .readonly => switch (cap) {
+            .read, .net_read => .allow,
+            .write => .{ .deny = "只读模式禁止写文件 / 修改本地状态" },
+            .net_write => .{ .deny = "只读模式禁止可变更远端状态的网络请求（仅允许 GET/HEAD）" },
+        },
+    };
+}
+
 /// 空白折叠为单空格并转小写。命令长度上限防止 DoS（远超任何合法命令）。
 fn normalize(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
     if (s.len > 1 << 16) return error.TooLong;
@@ -237,6 +270,28 @@ test "unrestricted：除空命令外一律放行（但调用方仍会审计）" 
     switch (evaluate(a, "   ", .unrestricted)) {
         .deny => {},
         .allow => return error.ShouldHaveDenied,
+    }
+}
+
+test "evaluateTool：readonly 只放行读类，拒一切写（内建工具不可绕过安全档）" {
+    // readonly：本地读 + 网络只读放行；写 / 网络写拒绝（fail-closed）。
+    try testing.expectEqual(Decision.allow, evaluateTool(.read, .readonly));
+    try testing.expectEqual(Decision.allow, evaluateTool(.net_read, .readonly));
+    switch (evaluateTool(.write, .readonly)) {
+        .deny => {},
+        .allow => return error.ShouldHaveDenied,
+    }
+    switch (evaluateTool(.net_write, .readonly)) {
+        .deny => {},
+        .allow => return error.ShouldHaveDenied,
+    }
+}
+
+test "evaluateTool：guarded / unrestricted 放行各类内建工具" {
+    inline for (.{ Mode.guarded, Mode.unrestricted }) |m| {
+        inline for (.{ Capability.read, Capability.write, Capability.net_read, Capability.net_write }) |c| {
+            try testing.expectEqual(Decision.allow, evaluateTool(c, m));
+        }
     }
 }
 
