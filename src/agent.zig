@@ -18,19 +18,31 @@ const tools = @import("tools/tools.zig");
 const audit = @import("audit.zig");
 const policy = @import("policy.zig");
 
-/// 双轨认知模式（见 ROADMAP 方向二）。
-pub const Mode = enum {
-    /// 目标模式：宏大指令 + 自主探索纠错（ReACT）。
-    goal,
-    /// 计划模式：先产出执行 DAG，经审计后严格按步执行。
-    plan,
-};
+// 双轨认知模式（goal / plan，见 ROADMAP 方向二）暂未实现：plan 模式的执行 DAG
+// 尚未落地，故此处不保留「定义却从不读取」的死字段（曾经的 Mode 枚举 + Agent.mode），
+// 以免误导读者以为切到 plan 会改变执行。待真正实现计划模式时再引入并接通该字段。
 
 /// 每回合的结构化输出 Schema（铁律 #2）：强制模型只产出一个 ReACT 步骤。
 /// `action` 用 enum 收口到已知动作，`additionalProperties:false` + 全 required 满足 strict。
-const react_schema =
-    \\{"type":"object","properties":{"thought":{"type":"string"},"action":{"type":"string","enum":["bash","file_read","file_write","file_edit","grep","glob","http_request","parallel","final"]},"action_input":{"type":"string"}},"required":["thought","action","action_input"],"additionalProperties":false}
-;
+/// action 的枚举数组在 comptime 由 `Action` 派生（见 `actionEnumArrayJson`），使 enum
+/// 成为唯一真相源：新增/改名动作只改 `Action`，schema 自动同步，杜绝手工漂移（issue #27）。
+const react_schema = "{\"type\":\"object\",\"properties\":{\"thought\":{\"type\":\"string\"}," ++
+    "\"action\":{\"type\":\"string\",\"enum\":" ++ actionEnumArrayJson() ++ "}," ++
+    "\"action_input\":{\"type\":\"string\"}}," ++
+    "\"required\":[\"thought\",\"action\",\"action_input\"],\"additionalProperties\":false}";
+
+/// 在 comptime 把 `Action` 的成员名拼成 JSON 字符串数组（如 `["bash",...,"final"]`）。
+/// react_schema 据此生成，让 `Action` enum 成为动作集合的唯一真相源（issue #27）。
+fn actionEnumArrayJson() []const u8 {
+    comptime {
+        var s: []const u8 = "[";
+        for (@typeInfo(Action).@"enum".fields, 0..) |f, i| {
+            if (i != 0) s = s ++ ",";
+            s = s ++ "\"" ++ f.name ++ "\"";
+        }
+        return s ++ "]";
+    }
+}
 
 /// 注入会话的系统提示：向模型讲清 ReACT 协议与工具约束。
 pub const system_prompt =
@@ -109,7 +121,6 @@ pub const Agent = struct {
     io: std.Io,
     complete_ctx: *anyopaque,
     complete_fn: CompleteFn,
-    mode: Mode = .goal,
     /// 回合上限：防止模型陷入工具调用死循环拖垮守护进程。
     max_turns: u32 = 16,
     /// 单条工具调用的硬超时（毫秒）。
@@ -719,6 +730,16 @@ test "parseStep 防弹：非法 JSON 与未知动作" {
     try std.testing.expectError(error.MalformedStep, parseStep(arena, "not json"));
     try std.testing.expectError(error.MalformedStep, parseStep(arena, "{\"action\":}"));
     try std.testing.expectError(error.UnknownAction, parseStep(arena, "{\"action\":\"rmrf\",\"action_input\":\"x\"}"));
+}
+
+test "动作集合唯一真相源：schema 与 system_prompt 覆盖每个 Action（防漂移，issue #27）" {
+    // schema 的 enum 由 Action 在 comptime 生成，必然逐一覆盖；这里再断言一次，
+    // 并强制 system_prompt 也提到每个动作名——新增 Action 却忘了写进提示词即测试失败。
+    inline for (@typeInfo(Action).@"enum".fields) |f| {
+        const quoted = "\"" ++ f.name ++ "\"";
+        try std.testing.expect(std.mem.indexOf(u8, react_schema, quoted) != null);
+        try std.testing.expect(std.mem.indexOf(u8, system_prompt, quoted) != null);
+    }
 }
 
 test "formatObservation 正常 / 超时 / 截断" {
