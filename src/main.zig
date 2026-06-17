@@ -3,6 +3,8 @@ const std = @import("std");
 const Io = std.Io;
 const scoot = @import("scoot");
 
+var daemon_stop_requested = std.atomic.Value(bool).init(false);
+
 const usage =
     \\Scoot — 轻量级 AI Agent 守护进程 (Daemon / CLI)
     \\
@@ -22,13 +24,15 @@ const usage =
     \\  wasm-tools check <dir>
     \\                       校验本地 Wasm 工具包边界（manifest / policy / schema；不执行 Wasm）
     \\  schedule [list|run]  列出 / 运行调度任务（无人值守，强制只读安全档）
+    \\  daemon [run|status|stop]
+    \\                       前台守护调度任务，记录 pid/state，并支持 SIGTERM 停止
     \\
     \\选项:
     \\  -e, --eval <prompt>  单次执行一个目标后退出
     \\  --retries <N>        -e 模式下后端临时错误重试次数（默认 2，0=不重试）
     \\  --scoot-home <dir>   覆盖运行目录（优先于 SCOOT_HOME，便于测试隔离）
     \\  --trace              在 -e/--eval 模式下把执行轨迹打印到 stderr
-    \\  --ticks <N>          schedule run 仅跑 N 轮后退出（默认 0=持续运行）
+    \\  --ticks <N>          schedule run / daemon run 仅跑 N 轮后退出（默认 0=持续运行）
     \\  -h, --help           显示本帮助
     \\  -v, --version        显示版本号
     \\
@@ -64,6 +68,7 @@ pub fn main(init: std.process.Init) !void {
     var cmd_skills: ?SkillsCommand = null;
     var cmd_wasm_tools: ?WasmToolsCommand = null;
     var cmd_schedule: ?[]const u8 = null; // null=未请求；否则为子动作 list/run
+    var cmd_daemon: ?[]const u8 = null; // null=未请求；否则为子动作 run/status/stop
     var schedule_ticks: usize = 0; // 0=持续运行
     var i: usize = 1; // args[0] 是程序名。
     while (i < args.len) : (i += 1) {
@@ -172,6 +177,13 @@ pub fn main(init: std.process.Init) !void {
             } else {
                 cmd_schedule = "list";
             }
+        } else if (eql(arg, "daemon")) {
+            if (i + 1 < args.len and !std.mem.startsWith(u8, args[i + 1], "-")) {
+                i += 1;
+                cmd_daemon = args[i];
+            } else {
+                cmd_daemon = "status";
+            }
         } else if (eql(arg, "repl")) {
             // 默认即 REPL，显式接受该命令。
         } else {
@@ -270,6 +282,22 @@ pub fn main(init: std.process.Init) !void {
             return;
         } else {
             try out.print("error: 未知 schedule 子命令 '{s}'（可用：list / run）\n", .{action});
+            die(out, 2);
+        }
+    }
+
+    if (cmd_daemon) |action| {
+        if (eql(action, "run")) {
+            try runDaemon(out, arena, io, env, cfg, schedule_ticks);
+            return;
+        } else if (eql(action, "status")) {
+            try printDaemonStatus(out, arena, io, cfg);
+            return;
+        } else if (eql(action, "stop")) {
+            try stopDaemon(out, arena, io, cfg);
+            return;
+        } else {
+            try out.print("error: 未知 daemon 子命令 '{s}'（可用：run / status / stop）\n", .{action});
             die(out, 2);
         }
     }
@@ -1272,6 +1300,52 @@ const RunCtx = struct {
     }
 };
 
+const ScheduleLoad = struct {
+    scheduler: scoot.schedule.Scheduler,
+    valid: usize,
+};
+
+fn loadSchedule(out: *Io.Writer, arena: std.mem.Allocator, cfg: scoot.config.Config) !ScheduleLoad {
+    var sch: scoot.schedule.Scheduler = .{};
+    var valid: usize = 0;
+    for (cfg.schedule.jobs) |jc| {
+        const job = jc.toJob() orelse {
+            try out.print("[scoot] 跳过非法任务 '{s}'（触发器须恰好设置其一）。\n", .{jc.id});
+            continue;
+        };
+        try sch.add(arena, job); // job 内容借 cfg/arena 生命周期（>= scheduler）
+        valid += 1;
+    }
+    return .{ .scheduler = sch, .valid = valid };
+}
+
+fn runSchedulerLoop(
+    io: std.Io,
+    scheduler: *scoot.schedule.Scheduler,
+    poll_ms: u64,
+    max_ticks: usize,
+    stop_flag: ?*std.atomic.Value(bool),
+    ctx: *anyopaque,
+    runFn: scoot.schedule.Scheduler.RunFn,
+) usize {
+    var total: usize = 0;
+    var ticks: usize = 0;
+    while (max_ticks == 0 or ticks < max_ticks) : (ticks += 1) {
+        if (isStopRequested(stop_flag)) break;
+        const now_unix = std.Io.Timestamp.now(io, .real).toSeconds();
+        total += scheduler.tick(now_unix, ctx, runFn);
+        if (isStopRequested(stop_flag)) break;
+        if (max_ticks != 0 and ticks + 1 >= max_ticks) break;
+        io.sleep(std.Io.Duration.fromMilliseconds(@intCast(poll_ms)), .awake) catch break;
+    }
+    return total;
+}
+
+fn isStopRequested(stop_flag: ?*std.atomic.Value(bool)) bool {
+    const flag = stop_flag orelse return false;
+    return flag.load(.acquire);
+}
+
 /// `scoot schedule run [--ticks N]`：装载合法任务，进入守护循环到点唤起 Agent。
 /// 必须显式开启 `schedule.enabled`（无人值守自主执行是高风险，默认拒绝）。
 /// `client`/`token` 在守护生命周期内只构建一次；每个 job 的 scratch 走可重置 arena。
@@ -1289,16 +1363,8 @@ fn runSchedule(
         die(out, 1);
     }
 
-    var sch: scoot.schedule.Scheduler = .{};
-    var valid: usize = 0;
-    for (sc.jobs) |jc| {
-        const job = jc.toJob() orelse {
-            try out.print("[scoot] 跳过非法任务 '{s}'（触发器须恰好设置其一）。\n", .{jc.id});
-            continue;
-        };
-        try sch.add(arena, job); // job 内容借 cfg/arena 生命周期（>= scheduler）
-        valid += 1;
-    }
+    var loaded = try loadSchedule(out, arena, cfg);
+    const valid = loaded.valid;
     if (valid == 0) {
         try out.writeAll("[scoot] 无可运行任务，退出。\n");
         return;
@@ -1329,8 +1395,196 @@ fn runSchedule(
     });
     try out.flush();
 
-    const fired = sch.runForever(io, sc.poll_ms, ticks, &rctx, RunCtx.runJob);
+    const fired = runSchedulerLoop(io, &loaded.scheduler, sc.poll_ms, ticks, null, &rctx, RunCtx.runJob);
     try out.print("[scoot] 调度结束：累计触发 {d} 次。\n", .{fired});
+}
+
+fn runDaemon(
+    out: *Io.Writer,
+    arena: std.mem.Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+    cfg: scoot.config.Config,
+    ticks: usize,
+) !void {
+    const sc = cfg.schedule;
+    if (!sc.enabled) {
+        try out.writeAll("[scoot] daemon 依赖调度配置：请先设置 schedule.enabled=true。\n");
+        die(out, 1);
+    }
+
+    const previous_state = scoot.daemon.readState(arena, io, cfg.dirs.state_dir) catch |err| blk: {
+        try out.print("[scoot] 警告：无法读取 daemon 状态文件（{s}），将覆盖为新状态。\n", .{@errorName(err)});
+        break :blk null;
+    };
+    if (scoot.daemon.previousRunWasUnclean(previous_state)) {
+        const prev = previous_state.?;
+        try out.print(
+            "[scoot] 检测到上次 daemon 未记录正常停止：pid={d} started_at={d}。按重启恢复语义继续。\n",
+            .{ prev.pid, prev.started_at_unix },
+        );
+    }
+
+    var loaded = try loadSchedule(out, arena, cfg);
+    const valid = loaded.valid;
+    if (valid == 0) {
+        try out.writeAll("[scoot] 无可运行任务，daemon 退出。\n");
+        return;
+    }
+
+    const token = try resolveToken(out, cfg, arena, io, env);
+    var client = scoot.llm.Client.init(io, cfg.backend.base_url, cfg.backend.model, token);
+    client.ca_file = cfg.backend.ca_file;
+    client.extra_body = cfg.backend.extra_body;
+
+    var job_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer job_arena.deinit();
+
+    var rctx = RunCtx{
+        .out = out,
+        .io = io,
+        .cfg = cfg,
+        .client = &client,
+        .job_arena = &job_arena,
+    };
+
+    daemon_stop_requested.store(false, .release);
+    installDaemonSignalHandlers();
+
+    const pid = currentPid();
+    const started_at = std.Io.Timestamp.now(io, .real).toSeconds();
+    try scoot.daemon.writePid(arena, io, cfg.dirs.state_dir, pid);
+    try scoot.daemon.writeState(arena, io, cfg.dirs.state_dir, .{
+        .status = "running",
+        .pid = pid,
+        .started_at_unix = started_at,
+        .updated_at_unix = started_at,
+        .schedule_enabled = sc.enabled,
+        .jobs = valid,
+        .poll_ms = sc.poll_ms,
+    });
+
+    try out.print("[scoot] daemon 启动：pid={d} jobs={d} poll={d}ms，{s}。\n", .{
+        pid,
+        valid,
+        sc.poll_ms,
+        if (ticks == 0) "持续运行（daemon stop 或 Ctrl-C 停止）" else "有界运行",
+    });
+    try out.flush();
+
+    const fired = runSchedulerLoop(io, &loaded.scheduler, sc.poll_ms, ticks, &daemon_stop_requested, &rctx, RunCtx.runJob);
+    const stopped_at = std.Io.Timestamp.now(io, .real).toSeconds();
+    const reason = if (daemon_stop_requested.load(.acquire)) "signal" else if (ticks != 0) "ticks" else "loop_end";
+    try scoot.daemon.writeState(arena, io, cfg.dirs.state_dir, .{
+        .status = "stopped",
+        .pid = pid,
+        .started_at_unix = started_at,
+        .updated_at_unix = stopped_at,
+        .stopped_at_unix = stopped_at,
+        .stop_reason = reason,
+        .schedule_enabled = sc.enabled,
+        .jobs = valid,
+        .poll_ms = sc.poll_ms,
+    });
+    scoot.daemon.clearPid(arena, io, cfg.dirs.state_dir);
+    try out.print("[scoot] daemon 停止：reason={s} fired={d}。\n", .{ reason, fired });
+}
+
+fn printDaemonStatus(
+    out: *Io.Writer,
+    arena: std.mem.Allocator,
+    io: std.Io,
+    cfg: scoot.config.Config,
+) !void {
+    const state = try scoot.daemon.readState(arena, io, cfg.dirs.state_dir);
+    const pid = try scoot.daemon.readPid(arena, io, cfg.dirs.state_dir);
+    const state_path = try scoot.daemon.statePath(arena, cfg.dirs.state_dir);
+    const pid_path = try scoot.daemon.pidPath(arena, cfg.dirs.state_dir);
+
+    if (state) |s| {
+        try out.print("daemon status={s} pid={d} jobs={d} poll_ms={d}\n", .{ s.status, s.pid, s.jobs, s.poll_ms });
+        try out.print("started_at={d} updated_at={d}\n", .{ s.started_at_unix, s.updated_at_unix });
+        if (s.stopped_at_unix) |t| try out.print("stopped_at={d}\n", .{t});
+        if (s.stop_reason) |reason| try out.print("stop_reason={s}\n", .{reason});
+    } else {
+        try out.writeAll("daemon status=unknown（尚无 daemon 状态文件）\n");
+    }
+    if (pid) |p| {
+        try out.print("pid_file={s} pid={d}\n", .{ pid_path, p });
+    } else {
+        try out.print("pid_file={s} missing\n", .{pid_path});
+    }
+    try out.print("state_file={s}\n", .{state_path});
+    try out.writeAll("liveness=not_probed（status 反映 Scoot 写入的生命周期状态）\n");
+}
+
+fn stopDaemon(
+    out: *Io.Writer,
+    arena: std.mem.Allocator,
+    io: std.Io,
+    cfg: scoot.config.Config,
+) !void {
+    const pid = (try scoot.daemon.readPid(arena, io, cfg.dirs.state_dir)) orelse {
+        try out.writeAll("[scoot] 没有 daemon pid 文件；daemon 可能未运行。\n");
+        return;
+    };
+    if (pid <= 0) {
+        try out.print("[scoot] daemon pid 非法：{d}\n", .{pid});
+        die(out, 1);
+    }
+    std.posix.kill(@intCast(pid), .TERM) catch |err| switch (err) {
+        error.ProcessNotFound => {
+            try out.print("[scoot] pid={d} 不存在；清理过期 pid 文件。\n", .{pid});
+            scoot.daemon.clearPid(arena, io, cfg.dirs.state_dir);
+            try writeDaemonStoppedAfterFailedStop(arena, io, cfg, pid, "process_not_found");
+            return;
+        },
+        error.PermissionDenied => {
+            try out.print("[scoot] 无权限停止 daemon pid={d}。\n", .{pid});
+            die(out, 1);
+        },
+        else => return err,
+    };
+    try out.print("[scoot] 已向 daemon pid={d} 发送 SIGTERM。\n", .{pid});
+}
+
+fn writeDaemonStoppedAfterFailedStop(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    cfg: scoot.config.Config,
+    pid: i64,
+    reason: []const u8,
+) !void {
+    const now = std.Io.Timestamp.now(io, .real).toSeconds();
+    try scoot.daemon.writeState(arena, io, cfg.dirs.state_dir, .{
+        .status = "stopped",
+        .pid = pid,
+        .started_at_unix = now,
+        .updated_at_unix = now,
+        .stopped_at_unix = now,
+        .stop_reason = reason,
+        .schedule_enabled = cfg.schedule.enabled,
+        .jobs = cfg.schedule.jobs.len,
+        .poll_ms = cfg.schedule.poll_ms,
+    });
+}
+
+fn installDaemonSignalHandlers() void {
+    const action = std.posix.Sigaction{
+        .handler = .{ .handler = handleDaemonSignal },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(.TERM, &action, null);
+    std.posix.sigaction(.INT, &action, null);
+}
+
+fn handleDaemonSignal(_: std.posix.SIG) callconv(.c) void {
+    daemon_stop_requested.store(true, .release);
+}
+
+fn currentPid() i64 {
+    return @intCast(std.posix.system.getpid());
 }
 
 /// 解析 API token（env > file > cmd）。本地无鉴权后端可留空。

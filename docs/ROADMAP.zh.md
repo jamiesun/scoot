@@ -88,6 +88,9 @@ Scoot 是一个运行在纯文本环境下的轻量级 AI Agent 守护进程（D
 - **🧱🚧 运行目录与配置（Runtime & Config）**
   统一运行目录 `~/.scoot/`（`SCOOT_HOME` 可覆盖），含 `config.toml`（或 `config.json`）/ `token` / `skills/` / `logs/` / `state/`。结构化配置（backend / agent / tools / skills / audit / schedule）见 `src/config.zig`；路径解析、`scoot config` 命令、配置文件加载（**TOML 优先、JSON 回落**：自研零依赖 TOML 子集解析→`std.json.Value`，复用 std.json 按节合并——缺省回落默认、未知字段忽略、畸形配置清晰报错）、启动时幂等建目录树（`paths.ensure`）均已可用。🚧 目录权限收紧（home 0700 / token 0600 的 mkdir 强制）仍用系统默认权限，待硬化（非阻断）。
 
+- **✅ Daemon 生命周期（Daemon Lifecycle）**
+  `scoot daemon run` 是 scheduled job 的前台长运行模式：复用 schedule 循环，写入 `state/daemon.json` / `state/daemon.pid`，安装 SIGTERM/SIGINT 处理器，正常停止时记录 stopped 状态并清理 pid 文件。`daemon status` 报告 Scoot 最近写入的生命周期状态，`daemon stop` 向 pid 文件记录的进程发送 SIGTERM。若上次状态仍是 `running`，新的 `daemon run` 会打印未干净停止的重启恢复提示并覆盖状态。恢复策略保守：已完成 session/audit 保留，执行到一半的模型回合不做恢复，job 列表仍以 config 为事实来源。
+
 - **✅ 密钥安全管理（Secret）**
   token 解析优先级 env → 文件(0600) → 凭证命令，明文绝不入库、绝不进日志。`src/secret.zig` 已实现逐源解析：env（非空）→ token 文件（`assertPrivate` 仿 SSH 私钥，`mode & 0o077 != 0` 即拒读，**读文件前先校验**绝不把世界可读密钥读进内存）→ 凭证命令（复用 bash 沙盒，**10s 硬超时**，stdout 即 token）。权限过宽明示提示 `chmod 600`，`redact` 脱敏，config 刻意不暴露内联明文字段。含 7 项单测 + 二进制四例冒烟守护。
 

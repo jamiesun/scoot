@@ -129,6 +129,10 @@ Implemented triggers:
 
 `cron` is intentionally not implemented yet. It is recognized as a shape but does not fire.
 
+### Daemon Lifecycle
+
+`scoot daemon run` is the foreground long-running mode for scheduled jobs. It records `state/daemon.json` and `state/daemon.pid`, handles SIGTERM/SIGINT, and treats a stale `running` state on restart as evidence of an unclean previous stop. `daemon status` reports Scoot's last recorded lifecycle state, and `daemon stop` sends SIGTERM to the recorded pid.
+
 ### Sessions And Audit
 
 Sessions are persisted as JSONL under `state/sessions`. Audit logs are persisted as JSONL under `logs`.
