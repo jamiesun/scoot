@@ -1,5 +1,44 @@
 # Zig build artifacts
-.zig-cache/
-zig-out/
-localtest
-site/
+/.zig-cache/
+/zig-cache/
+/zig-out/
+
+# Compiled objects and binaries
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.pdb
+
+# Coverage / profiling output
+*.profraw
+*.profdata
+/coverage/
+/kcov-output/
+
+# Generated documentation site
+/site/
+
+# Local configuration and test state
+/config.toml
+/localtest/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+
+# Editor / IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db

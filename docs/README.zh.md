@@ -109,4 +109,4 @@ book/zh/             中文 mdBook 站点
 
 ## 许可证
 
-待定。
+MIT。详见 [LICENSE](../LICENSE)。
