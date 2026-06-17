@@ -15,7 +15,7 @@ overridden with `--scoot-home` or `SCOOT_HOME`.
 | `-e, --eval <prompt>` | Run a single goal to completion, print the answer, and exit. |
 | `--retries <N>` | Retries for transient backend errors in `-e` mode (default `2`, `0` disables). |
 | `--scoot-home <dir>` | Override the runtime directory. Wins over `SCOOT_HOME`. |
-| `--trace` | In `-e` mode, print the ReACT execution trace to **stderr** (answer stays on stdout). |
+| `--trace` | Print the ReACT execution trace to **stderr** (answer/conversation stays on stdout). Works in `-e` and interactive REPL mode. |
 | `--ticks <N>` | For `schedule run` / `daemon run`: run `N` poll cycles then exit (default `0` = run forever). |
 | `-h, --help` | Show usage. |
 | `-v, --version` | Show the version. |
@@ -30,7 +30,12 @@ scoot              # or: scoot repl
 
 Starts an interactive Read-Eval-Print loop. Type a goal, watch the agent work,
 get an answer, repeat. Type `/exit` to leave. Each prompt runs the full ReACT
-loop under the configured policy.
+loop under the configured policy. Add `--trace` to stream each turn's ReACT
+trace to **stderr** while the conversation stays on stdout:
+
+```sh
+scoot --trace            # interactive REPL with execution trace on stderr
+```
 
 ### `-e, --eval` — one-shot
 
