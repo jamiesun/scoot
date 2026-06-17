@@ -53,6 +53,7 @@ zig build run -- --version
 ./zig-out/bin/scoot skills check
 ./zig-out/bin/scoot skills check docs/examples/skills/minimal
 ./zig-out/bin/scoot skills pack docs/examples/skills/minimal minimal.scoot-skill.tar
+./zig-out/bin/scoot wasm-tools check path/to/tool
 ./zig-out/bin/scoot schedule list
 ./zig-out/bin/scoot -e "统计当前仓库中的 Zig 源文件数量"
 ./zig-out/bin/scoot --retries 4 -e "统计当前仓库中的 Zig 源文件数量"
@@ -68,6 +69,8 @@ zig build run -- --version
 `skills pack <dir> [out.tar]` 会先校验 skill，再导出带 `.scoot-skill.json` 审查清单的 tar 包。它只包含非隐藏普通文件，拒绝符号链接等不支持的文件类型，也不会执行脚本或绕过 policy。
 
 最小模板见 [docs/examples/skills/minimal/SKILL.md](examples/skills/minimal/SKILL.md)。
+
+`wasm-tools check <dir>` 校验本地 Wasm 工具包边界，包括 `manifest.toml`、`policy.toml`、引用的 JSON schema 和安全相对路径。它只做静态校验，不会加载或执行 Wasm。
 
 Agent 也可以使用有界 `parallel` 动作一次执行 1-4 个彼此独立的只读工具调用。观察结果按输入顺序返回，shell、写操作和嵌套 parallel 会被拒绝，每个子调用仍然经过正常 policy gate。
 
@@ -93,6 +96,8 @@ Agent 也可以使用有界 `parallel` 动作一次执行 1-4 个彼此独立的
 - 中文路线图：[ROADMAP.zh.md](ROADMAP.zh.md)
 - 英文 Agent 指南：[AGENT.md](../AGENT.md)
 - 中文 Agent 指南：[AGENT.zh.md](AGENT.zh.md)
+- 英文 Wasm 工具包：[WASM_TOOLS.md](WASM_TOOLS.md)
+- 中文 Wasm 工具包：[WASM_TOOLS.zh.md](WASM_TOOLS.zh.md)
 - mdBook 源码：[book/](../book/)
 
 本地构建文档：

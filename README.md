@@ -53,6 +53,7 @@ Run the built binary:
 ./zig-out/bin/scoot skills check
 ./zig-out/bin/scoot skills check docs/examples/skills/minimal
 ./zig-out/bin/scoot skills pack docs/examples/skills/minimal minimal.scoot-skill.tar
+./zig-out/bin/scoot wasm-tools check path/to/tool
 ./zig-out/bin/scoot schedule list
 ./zig-out/bin/scoot -e "count Zig source files in this repository"
 ./zig-out/bin/scoot --retries 4 -e "count Zig source files in this repository"
@@ -68,6 +69,8 @@ Run the built binary:
 `skills pack <dir> [out.tar]` validates a skill and exports a tar package with a `.scoot-skill.json` review manifest. It includes regular non-hidden files, rejects unsupported file types such as symlinks, and does not execute scripts or grant policy bypasses.
 
 A minimal template is available at [docs/examples/skills/minimal/SKILL.md](docs/examples/skills/minimal/SKILL.md).
+
+`wasm-tools check <dir>` validates a local Wasm tool package boundary: `manifest.toml`, `policy.toml`, referenced JSON schemas, and safe relative paths. It is static validation only and never loads or executes Wasm.
 
 The agent can also use a bounded `parallel` action for 1-4 independent read-only tool calls. It preserves observation order, rejects shell/write/nested calls, and still routes every child call through the normal policy gate.
 
@@ -93,6 +96,8 @@ Start from [config.example.toml](config.example.toml).
 - Chinese roadmap: [docs/ROADMAP.zh.md](docs/ROADMAP.zh.md)
 - English agent guide: [AGENT.md](AGENT.md)
 - Chinese agent guide: [docs/AGENT.zh.md](docs/AGENT.zh.md)
+- English Wasm tool packages: [docs/WASM_TOOLS.md](docs/WASM_TOOLS.md)
+- Chinese Wasm tool packages: [docs/WASM_TOOLS.zh.md](docs/WASM_TOOLS.zh.md)
 - mdBook source: [book/](book/)
 
 Build the docs locally:

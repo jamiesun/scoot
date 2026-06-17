@@ -14,6 +14,7 @@ pub const jsonio = @import("jsonio.zig");
 pub const llm = @import("llm.zig");
 pub const tools = @import("tools/tools.zig");
 pub const skill = @import("skill.zig");
+pub const wasm_tool = @import("wasm_tool.zig");
 pub const session = @import("session.zig");
 pub const agent = @import("agent.zig");
 pub const schedule = @import("schedule.zig");

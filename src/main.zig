@@ -19,6 +19,8 @@ const usage =
     \\  skills check [dir]   校验本地 skill 目录；缺省扫描配置的 skill 搜索路径
     \\  skills pack <dir> [out.tar]
     \\                       校验并导出 skill tar 包，包内带 .scoot-skill.json 审查清单
+    \\  wasm-tools check <dir>
+    \\                       校验本地 Wasm 工具包边界（manifest / policy / schema；不执行 Wasm）
     \\  schedule [list|run]  列出 / 运行调度任务（无人值守，强制只读安全档）
     \\
     \\选项:
@@ -60,6 +62,7 @@ pub fn main(init: std.process.Init) !void {
     var cmd_doctor = false;
     var cmd_policy_check: ?PolicyCheckCommand = null;
     var cmd_skills: ?SkillsCommand = null;
+    var cmd_wasm_tools: ?WasmToolsCommand = null;
     var cmd_schedule: ?[]const u8 = null; // null=未请求；否则为子动作 list/run
     var schedule_ticks: usize = 0; // 0=持续运行
     var i: usize = 1; // args[0] 是程序名。
@@ -143,6 +146,23 @@ pub fn main(init: std.process.Init) !void {
                 }
             } else {
                 cmd_skills = .list;
+            }
+        } else if (eql(arg, "wasm-tools")) {
+            if (i + 1 >= args.len or std.mem.startsWith(u8, args[i + 1], "-")) {
+                try out.writeAll("error: wasm-tools 仅支持子命令：check <dir>\n");
+                die(out, 2);
+            }
+            i += 1;
+            if (eql(args[i], "check")) {
+                if (i + 1 >= args.len or std.mem.startsWith(u8, args[i + 1], "-")) {
+                    try out.writeAll("error: wasm-tools check 需要工具包目录参数\n");
+                    die(out, 2);
+                }
+                i += 1;
+                cmd_wasm_tools = .{ .check = args[i] };
+            } else {
+                try out.print("error: 未知 wasm-tools 子命令 '{s}'（可用：check）\n", .{args[i]});
+                die(out, 2);
             }
         } else if (eql(arg, "schedule")) {
             // 可选子动作；缺省为 list（只读、无副作用）。下一 token 若是选项则不消费。
@@ -230,6 +250,13 @@ pub fn main(init: std.process.Init) !void {
             .list => try printSkills(out, arena, io, cfg),
             .check => |target| try checkSkills(out, arena, io, cfg, target),
             .pack => |sp| try packSkillCommand(out, arena, io, sp),
+        }
+        return;
+    }
+
+    if (cmd_wasm_tools) |cmd| {
+        switch (cmd) {
+            .check => |dir| try checkWasmToolPackage(out, arena, io, dir),
         }
         return;
     }
@@ -386,6 +413,10 @@ const SkillsCommand = union(enum) {
 const SkillPackCommand = struct {
     dir: []const u8,
     output: ?[]const u8 = null,
+};
+
+const WasmToolsCommand = union(enum) {
+    check: []const u8,
 };
 
 fn parsePolicyCommand(out: *Io.Writer, args: []const []const u8, i: *usize) PolicyCheckCommand {
@@ -912,6 +943,41 @@ fn checkOneSkill(
             summary.failures += 1;
             try out.print("FAIL {s}: {s}\n", .{ dir, msg });
         },
+    }
+}
+
+/// `scoot wasm-tools check <dir>`：只读校验 Wasm 工具包边界，不加载或执行 Wasm。
+fn checkWasmToolPackage(
+    out: *Io.Writer,
+    arena: std.mem.Allocator,
+    io: std.Io,
+    dir: []const u8,
+) !void {
+    const res = try scoot.wasm_tool.validatePackage(arena, io, dir);
+    switch (res) {
+        .valid => |summary| {
+            try out.print("OK {s} name={s} entry={s}\n", .{ dir, summary.name, summary.entry });
+            try out.print("description={s}\n", .{summary.description});
+            try out.print("component={s}\n", .{summary.component});
+            try out.print("input_schema={s}\n", .{summary.input_schema});
+            try out.print("output_schema={s}\n", .{summary.output_schema});
+            try out.writeAll("capabilities=");
+            try printList(out, summary.capabilities);
+            try out.writeAll("\npolicy_capabilities=");
+            try printList(out, summary.policy_capabilities);
+            try out.writeAll("\n");
+        },
+        .invalid => |msg| {
+            try out.print("FAIL {s}: {s}\n", .{ dir, msg });
+            die(out, 1);
+        },
+    }
+}
+
+fn printList(out: *Io.Writer, items: []const []const u8) !void {
+    for (items, 0..) |item, idx| {
+        if (idx != 0) try out.writeAll(",");
+        try out.writeAll(item);
     }
 }
 
