@@ -47,6 +47,12 @@ pub const Tools = struct {
     /// 执行护栏模式：guarded（拦截灾难性命令，默认）/ readonly（只读白名单，
     /// fail-closed）/ unrestricted（不设限）。见 policy.zig。无人值守场景应选 readonly。
     policy: []const u8 = "guarded",
+    /// opt-in 加固（默认关闭，仅 guarded 生效）：把 file_write/file_edit 收口到项目根内，
+    /// 拒绝绝对路径 / `..` 逃逸 / shell 展开（issue #32）。readonly 已 fail-closed 拒写。
+    confine_writes: bool = false,
+    /// opt-in 加固（默认关闭，仅 guarded 生效）：拒绝 http_request 访问环回 / 内网 /
+    /// 链路本地 / 云元数据地址，收窄 SSRF / 外带面（issue #32）。readonly 已默认拒网。
+    block_internal_http: bool = false,
 };
 
 /// Skill 机制配置。

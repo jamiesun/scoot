@@ -66,6 +66,17 @@ timeout_ms = 30000
 # Alias: "yolo" is parsed as unrestricted. Unknown values fall back to guarded.
 policy = "guarded"
 
+# Opt-in hardening (both default false, effective only in guarded mode; issue #32).
+# readonly already fail-closes writes and network, so these matter for guarded only.
+# confine_writes: keep file_write/file_edit inside the project root; reject absolute
+#   paths, ".." escapes, and shell-style expansion (~ / $VAR).
+confine_writes = false
+# block_internal_http: reject http_request to loopback / private / link-local / cloud
+#   metadata hosts (SSRF guard). Heuristic on literal IPs + known internal names; it
+#   does NOT resolve DNS, so DNS-rebinding can still bypass — use readonly for real
+#   isolation.
+block_internal_http = false
+
 [skills]
 # Enable local Skill discovery.
 enabled = true
