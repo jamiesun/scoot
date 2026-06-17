@@ -15,6 +15,9 @@ pub const Paths = struct {
     token_file: []const u8,
     /// 用户级 skill 目录：<home>/skills
     skills_dir: []const u8,
+    /// 跨 agent 用户级技能目录：$HOME/.agents/skills（独立于 SCOOT_HOME）。
+    /// 无法确定 $HOME 时为 null。仅 `resolve` 填充；`fromHome`（显式 home / 测试）置 null。
+    agents_skills_dir: ?[]const u8 = null,
     /// 审计 / 运行日志目录：<home>/logs
     logs_dir: []const u8,
     /// 本地状态目录（调度任务、会话等）：<home>/state
@@ -24,11 +27,17 @@ pub const Paths = struct {
 
     /// 解析运行目录。所有字符串由 `arena` 拥有（进程级生命周期即可）。
     pub fn resolve(arena: std.mem.Allocator, env: *const Environ.Map) !Paths {
+        // 真实 $HOME 与 SCOOT_HOME 解耦：跨 agent 的 ~/.agents/skills 始终相对真实家目录，
+        // 即便用户用 SCOOT_HOME 把 Scoot 运行目录搬到别处也不受影响。
+        const user_home = env.get("HOME");
         const home = env.get("SCOOT_HOME") orelse blk: {
-            const h = env.get("HOME") orelse return error.NoHomeDir;
+            const h = user_home orelse return error.NoHomeDir;
             break :blk try std.fs.path.join(arena, &.{ h, ".scoot" });
         };
-        return fromHome(arena, home);
+        var p = try fromHome(arena, home);
+        if (user_home) |h|
+            p.agents_skills_dir = try std.fs.path.join(arena, &.{ h, ".agents", "skills" });
+        return p;
     }
 
     /// 从显式 home 目录派生完整运行目录树。供 CLI override 与测试共用。

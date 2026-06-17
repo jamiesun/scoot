@@ -15,7 +15,7 @@ The recommended starting point is:
 - `[backend]`: OpenAI-compatible endpoint, model, API key source, CA bundle, extra request fields.
 - `[agent]`: turn limit, default mode, and context budget (`context_budget_bytes`, 0 = off).
 - `[tools]`: timeout, execution policy, and opt-in guarded-mode hardening (`confine_writes`, `block_internal_http`).
-- `[skills]`: skill discovery.
+- `[skills]`: skill discovery. Search order: `<cwd>/.agents/skills` > `~/.agents/skills` > `~/.scoot/skills` > `extra_paths`. Reading a skill is native and not policy-gated (works in `readonly`); skill execution is.
 - `[audit]`: audit log behavior.
 - `[schedule]`: scheduled jobs.
 

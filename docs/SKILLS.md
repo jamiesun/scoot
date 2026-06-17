@@ -15,6 +15,31 @@ my-skill/
 Only `SKILL.md` is required. `scripts/` and `references/` are optional and are
 still subject to the normal tool policy gates when used.
 
+## Search Paths
+
+Skills are discovered from these locations, in priority order (earlier wins on
+name collision):
+
+1. `<cwd>/.agents/skills` — project-local, travels with the repository.
+2. `~/.agents/skills` — cross-agent user-level skills (independent of `SCOOT_HOME`).
+3. `~/.scoot/skills` — Scoot's own user-level skill directory.
+4. Any `extra_paths` declared in `[skills]` of the config.
+
+`scoot skills` prints the resolved search paths and everything discovered.
+
+## Activation
+
+Discovery injects only each skill's `name` + `description` (progressive
+disclosure keeps the context small). When a skill is relevant, the model reads
+its `SKILL.md` with the native **`skill` action** — `{"name":"<skill>"}` (or
+`{"name":"<skill>","path":"references/x.md"}` for other resources in the skill
+directory).
+
+Reading a skill is a native, read-only agent capability and is **not** subject
+to the execution policy: it works even in `readonly` mode (which otherwise
+blocks `bash`). Reads are confined to the skill's own directory (absolute paths
+and `..` escapes are rejected) and are still audited as tool calls.
+
 ## Front Matter
 
 `SKILL.md` starts with YAML-style front matter:
@@ -73,5 +98,10 @@ scripts do not bypass Scoot policy gates.
 ## Policy Boundary
 
 Skill metadata is declarative. `allowed_tools` describes expected tool use for
-reviewers; it does not grant permissions. Runtime execution still goes through
-the same global policy checks as ordinary model tool calls.
+reviewers; it does not grant permissions.
+
+Reading a skill's instructions and resources is a native, read-only capability
+and bypasses the policy gate by design (so skills remain usable in `readonly`).
+Everything a skill then tells the model to *do* — `bash`, file writes, network
+requests, running `scripts/` — still goes through the same global policy checks
+as ordinary model tool calls. Reading the skill is free; acting on it is gated.

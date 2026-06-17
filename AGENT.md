@@ -109,8 +109,8 @@ Long-running stability matters more than feature count.
 - Config files are `config.toml` first, `config.json` second.
 - Never add inline plaintext API keys to config.
 - Secret priority is env, then 0600 token file, then credential command.
-- Skill directories contain `SKILL.md` with front matter. Discovery reads only name and description; full instructions are loaded only when relevant.
-- Skill scripts do not get special privileges. They must run through the same tool sandbox and policy gates as normal actions.
+- Skill directories contain `SKILL.md` with front matter. Discovery reads only name and description; full instructions are loaded only when relevant. Search order: `<cwd>/.agents/skills` > `~/.agents/skills` > `~/.scoot/skills` > configured `extra_paths`.
+- Reading a skill's instructions/resources is a native, read-only capability (the `skill` action), confined to the skill directory and audited, and is intentionally not policy-gated — so skills stay usable in `readonly`. Skill *scripts and commands* get no special privileges: they run through the same tool sandbox and policy gates as normal actions.
 - Sessions are short-term memory only. Do not introduce vector databases or long-term semantic memory without first revisiting the roadmap.
 
 ## Hard Rules
@@ -124,7 +124,7 @@ Changing these boundaries requires an explicit roadmap-level decision.
 5. Do not trade the small single-binary design for feature count.
 6. Every subprocess and network path must have a hard timeout.
 7. Secrets must never be compiled in, committed, printed, or written to audit logs.
-8. Skills must not bypass the registered tool sandbox.
+8. Skill *execution* must not bypass the registered tool sandbox. (Reading a skill's instructions/resources is a native read-only capability, confined to the skill directory and audited, and is intentionally outside the policy gate.)
 9. Documentation changes must be bilingual.
 
 ## Extension Workflow

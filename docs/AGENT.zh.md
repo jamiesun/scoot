@@ -96,7 +96,7 @@ zig build -Doptimize=ReleaseSafe    # 嵌入式 / 生产部署推荐档（见下
 - **运行目录**：一切配置、密钥、技能、状态收敛在 `~/.scoot/`（`SCOOT_HOME` 可覆盖）。解析逻辑在 `src/paths.zig`；新写盘的东西放对应子目录（`config.toml`（或 `config.json`）/ `token` / `skills/` / `logs/` / `state/`），不要散落到别处或 `$HOME` 根下。`scoot config` 可打印解析结果。
 - **配置**：结构化分节（backend / agent / tools / skills / audit）在 `src/config.zig`，默认值即可用；加 JSON 加载时用 `std.json` 并与默认值合并，**不要**改默认值的含义。
 - **密钥**：解析在 `src/secret.zig`，优先级 env → 文件(0600) → 凭证命令。实现文件分支时**必须**先 `assertPrivate` 校验 0600，权限过宽要拒绝。任何日志 / 错误 / 审计输出 token 前先过 `secret.redact`。
-- **Skill**：机制在 `src/skill.zig`。坚持渐进式披露——发现阶段只读 front-matter（name+description），正文按需在 `activate` 时加载。skill 携带的脚本必须经 `src/tools/` 沙盒执行（带硬超时），不得新开绕过沙盒的执行路径。
+- **Skill**：机制在 `src/skill.zig`。坚持渐进式披露——发现阶段只读 front-matter（name+description），正文按需在 `activate` 时加载（搜索优先级：`<cwd>/.agents/skills` > `~/.agents/skills` > `~/.scoot/skills` > 配置的 `extra_paths`）。读取技能指令/资源是原生只读能力（`skill` 动作），收口在技能目录内、照常审计，刻意不受策略门控制——故 `readonly` 下技能仍可激活。但 skill 携带的**脚本/命令**必须经 `src/tools/` 沙盒执行（带硬超时），不得新开绕过沙盒的执行路径。
 - **会话 / 记忆**：`src/session.zig` 持有单次交互的消息流，**用 backing/gpa 拥有**（追加时复制内容），使其跨回合存活——绝不把对话历史放进会被 `deinit` 的 per-turn arena。持久化用 JSONL 追加写到 `state/sessions/<id>.jsonl`（纯文本、可回溯）。**跨会话长期记忆不做成子系统**：用 Skill 注入知识或 `state/` 摘要文件 + 文件工具承载，不引入向量库 / embedding（撞「单体简洁」铁律）。
 
 ## 红线（铁律，不得违反）
@@ -110,7 +110,7 @@ zig build -Doptimize=ReleaseSafe    # 嵌入式 / 生产部署推荐档（见下
 5. **不为功能数量牺牲单体简洁**：不堆重型运行时、不做需要动态链接 / 加载原生代码的二进制插件体系。新增依赖前先问：它会破坏“单文件、零臃肿依赖”吗？（Skill 加载的是指令 + 数据 + 沙盒脚本，不是原生插件，不在此列。）
 6. **工具必须有硬超时**：任何子进程 / 网络调用超时即猎杀（SIGKILL 或等效）并记录，绝不让单个任务卡死拖垮主循环。
 7. **密钥零泄漏**：token 绝不编译进二进制、绝不内联进随仓库提交的配置、绝不打印进日志 / 审计 / 报错。不强依赖特定 OS 钥匙串；安全存储通过外部凭证命令接入。
-8. **Skill 不越权**：skill 不得绕过工具沙盒、不得自动联网拉取远程代码执行、不得获得超出已注册工具的能力。
+8. **Skill 执行不越权**：skill 的**脚本/命令执行**不得绕过工具沙盒、不得自动联网拉取远程代码执行、不得获得超出已注册工具的能力。（读取技能指令/资源是原生只读能力，收口在技能目录内、照常审计，刻意置于策略门之外，使技能在 `readonly` 下仍可用。）
 
 ## 新增 / 扩展一个能力的推荐流程
 

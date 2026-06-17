@@ -81,7 +81,14 @@ block_internal_http = false
 # Enable local Skill discovery.
 enabled = true
 
-# Extra Skill search paths. ~/.scoot/skills is always included automatically.
+# Extra Skill search paths, appended after the built-in ones. Skills are
+# discovered in priority order (earlier wins on name collision):
+#   1. <cwd>/.agents/skills  (project-local)
+#   2. ~/.agents/skills      (cross-agent user-level)
+#   3. ~/.scoot/skills       (Scoot's own user-level dir)
+#   4. these extra_paths
+# Reading a skill's SKILL.md is a native, read-only capability and works even in
+# readonly mode; what a skill then tells the model to run is still policy-gated.
 extra_paths = []
 # extra_paths = ["/opt/scoot/skills", "./skills"]
 

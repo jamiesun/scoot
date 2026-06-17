@@ -244,9 +244,16 @@ pub const Config = struct {
         return secret.resolve(arena, io, env, srcs.items);
     }
 
-    /// 全部 skill 搜索路径：默认 ~/.scoot/skills 叠加 config 中的额外路径。
+    /// 全部 skill 搜索路径，按优先级排列（先者胜：`Registry.discover` 同名去重，
+    /// 越靠前越优先）。约定与其它 agent 工具兼容：
+    ///   ① `<cwd>/.agents/skills` —— 项目本地、随仓库携带，最高优先（相对路径，按进程 cwd 解析）；
+    ///   ② `~/.agents/skills`     —— 跨 agent 的用户级目录（独立于 SCOOT_HOME）；
+    ///   ③ `~/.scoot/skills`      —— Scoot 自有用户级目录；
+    ///   ④ config 中显式声明的 `extra_paths`。
     pub fn skillPaths(self: Config, arena: std.mem.Allocator) ![]const []const u8 {
         var list: std.ArrayList([]const u8) = .empty;
+        try list.append(arena, ".agents/skills");
+        if (self.dirs.agents_skills_dir) |d| try list.append(arena, d);
         try list.append(arena, self.dirs.skills_dir);
         for (self.skills.extra_paths) |p| try list.append(arena, p);
         return list.items;
@@ -255,6 +262,30 @@ pub const Config = struct {
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "skillPaths：按优先级 cwd/.agents > ~/.agents > ~/.scoot > extra（先者胜）" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // ① 含 ~/.agents/skills 的完整四级顺序。
+    var dirs = try paths.Paths.fromHome(arena, "/home/u/.scoot");
+    dirs.agents_skills_dir = "/home/u/.agents/skills";
+    const cfg: Config = .{ .dirs = dirs, .skills = .{ .enabled = true, .extra_paths = &.{"/opt/extra/skills"} } };
+    const got = try cfg.skillPaths(arena);
+    try std.testing.expectEqual(@as(usize, 4), got.len);
+    try std.testing.expectEqualStrings(".agents/skills", got[0]);
+    try std.testing.expectEqualStrings("/home/u/.agents/skills", got[1]);
+    try std.testing.expectEqualStrings("/home/u/.scoot/skills", got[2]);
+    try std.testing.expectEqualStrings("/opt/extra/skills", got[3]);
+
+    // ② 无法确定 $HOME（agents_skills_dir == null）：跳过该级，cwd 仍最优先。
+    const cfg2: Config = .{ .dirs = try paths.Paths.fromHome(arena, "/home/u/.scoot"), .skills = .{} };
+    const got2 = try cfg2.skillPaths(arena);
+    try std.testing.expectEqual(@as(usize, 2), got2.len);
+    try std.testing.expectEqualStrings(".agents/skills", got2[0]);
+    try std.testing.expectEqualStrings("/home/u/.scoot/skills", got2[1]);
 }
 
 test "parseTomlConfig: TOML → FileConfig（含 extra_body 透传 + 按节合并）" {

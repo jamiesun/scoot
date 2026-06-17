@@ -533,6 +533,7 @@ fn policyDecisionForAction(
             break :blk scoot.policy.evaluateTool(if (scoot.tools.http.isWrite(method)) .net_write else .net_read, mode);
         },
         .parallel => policyDecisionForParallel(arena, mode, input),
+        .skill => .allow, // 原生只读能力，刻意不受执行策略约束（与 agent.guard 对齐）。
         .final => .{ .deny = "final 不是可执行工具动作" },
     };
 }
@@ -565,6 +566,7 @@ fn policyDecisionForParallel(
             },
             .bash => return .{ .deny = "parallel 禁止 bash；请使用结构化只读工具" },
             .file_write, .file_edit => return .{ .deny = "parallel 禁止写文件或编辑文件" },
+            .skill => return .{ .deny = "parallel 禁止 skill；请用独立的 skill 动作读取技能指令" },
             .parallel => return .{ .deny = "parallel 禁止嵌套 parallel" },
             .final => return .{ .deny = "parallel 子调用不能是 final" },
         }
@@ -835,17 +837,22 @@ fn injectSkills(
     io: std.Io,
     cfg: scoot.config.Config,
     sess: *scoot.session.Session,
-) void {
-    if (!cfg.skills.enabled) return;
-    const paths = cfg.skillPaths(arena) catch return;
+) []const scoot.agent.SkillRef {
+    if (!cfg.skills.enabled) return &.{};
+    const paths = cfg.skillPaths(arena) catch return &.{};
     var reg: scoot.skill.Registry = .{};
     reg.discoverAll(arena, io, paths) catch |err| {
         warn.print("[scoot] 技能发现失败（{s}），已跳过技能装载。\n", .{@errorName(err)}) catch {};
-        return;
+        return &.{};
     };
-    if (reg.count() == 0) return;
-    const text = reg.manifest(arena) catch return;
+    if (reg.count() == 0) return &.{};
+    const text = reg.manifest(arena) catch return &.{};
     sess.append(arena, .system, text) catch {};
+    // 把已发现技能映射为 agent 的 name→dir 句柄表，供原生 `skill` 动作按名只读其指令/资源。
+    // reg 的字符串均由 arena 分配（discover 以 arena 为 gpa），生命周期=本次运行，故不 deinit。
+    const refs = arena.alloc(scoot.agent.SkillRef, reg.count()) catch return &.{};
+    for (reg.skills.items, 0..) |s, i| refs[i] = .{ .name = s.name, .dir = s.dir };
+    return refs;
 }
 
 /// `scoot skills`：列出各搜索路径下发现的技能，供用户确认技能是否被正确识别。
@@ -1171,7 +1178,7 @@ const SkillPackManifest = struct {
     file_count: usize,
     total_bytes: u64,
     skipped_hidden: usize,
-    policy_note: []const u8 = "Skill instructions and scripts do not bypass Scoot policy gates.",
+    policy_note: []const u8 = "Skill scripts and commands do not bypass Scoot policy gates; reading a skill's instructions is a native, audited read-only capability confined to the skill directory.",
 };
 
 fn skillPackManifest(
@@ -1665,7 +1672,7 @@ fn setupRun(
 ) !RunSetup {
     var sess = scoot.session.Session.init(session_id);
     try sess.append(arena, .system, scoot.agent.system_prompt);
-    injectSkills(warn, arena, io, cfg, &sess);
+    const skills = injectSkills(warn, arena, io, cfg, &sess);
 
     var ag = scoot.agent.Agent.initClient(client);
     ag.max_turns = cfg.agent.max_turns;
@@ -1675,6 +1682,7 @@ fn setupRun(
     ag.context_budget_bytes = cfg.agent.context_budget_bytes;
     ag.confine_writes = cfg.tools.confine_writes;
     ag.block_internal_http = cfg.tools.block_internal_http;
+    ag.skills = skills;
 
     sink.open(warn, arena, io, cfg.dirs.logs_dir);
     ag.audit = sink.loggerPtr();

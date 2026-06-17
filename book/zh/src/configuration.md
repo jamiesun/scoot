@@ -15,7 +15,7 @@ Scoot 从运行目录加载配置：
 - `[backend]`：OpenAI 兼容端点、模型、API key 来源、CA bundle、额外请求字段。
 - `[agent]`：回合上限、默认模式与上下文预算（`context_budget_bytes`，0 = 关闭）。
 - `[tools]`：超时、执行策略，以及 guarded 模式下的 opt-in 加固（`confine_writes`、`block_internal_http`）。
-- `[skills]`：skill 发现。
+- `[skills]`：skill 发现。搜索优先级：`<cwd>/.agents/skills` > `~/.agents/skills` > `~/.scoot/skills` > `extra_paths`。读取技能是原生能力、不受策略门控制（`readonly` 下也可用）；技能的执行则受控。
 - `[audit]`：审计日志行为。
 - `[schedule]`：调度任务。
 
