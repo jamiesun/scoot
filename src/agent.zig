@@ -211,7 +211,10 @@ pub const Agent = struct {
             .file_write, .file_edit => policy.evaluateTool(.write, self.policy_mode),
             .http_request => self.guardHttp(arena, input),
             .parallel => self.guardParallel(arena, input),
-            .final => unreachable,
+            // 调用方契约：`run` 在调用 guard 前已就地处理 .final（终态不过护栏）。
+            // 这里**不 panic**而是降级为 deny（防弹/铁律 #4）：未来若某调用方误把
+            // .final 路由到此，退化为一条可回灌的拒绝观察，而非进程级 panic。
+            .final => .{ .deny = "final 是终态答复，不是可执行工具动作（不应到达护栏）" },
         };
     }
 
@@ -240,7 +243,9 @@ pub const Agent = struct {
                 if (root_decision != .allow) break :blk root_decision;
                 break :blk policy.evaluateReadPath(args.pattern, self.policy_mode);
             },
-            else => unreachable,
+            // 调用方契约：guardLocalRead 只对本地读动作（file_read/grep/glob）调用。
+            // 降级为 deny 而非 unreachable：契约被未来重构破坏时退化为可回灌的拒绝，不 panic。
+            else => .{ .deny = "guardLocalRead 收到非本地读动作（内部不应到达），已拒绝" },
         };
     }
 
@@ -346,7 +351,9 @@ pub const Agent = struct {
                 break :blk try formatHttpResponse(arena, args.url, resp);
             },
             .parallel => try self.execParallel(arena, input),
-            .final => unreachable,
+            // 调用方契约：`run` 在调用 execTool 前已就地处理 .final。降级为 error 而非
+            // unreachable：契约被破坏时 run 会把它转成「工具执行失败」观察回灌，不 panic。
+            .final => error.UnexpectedAction,
         };
     }
 
@@ -382,6 +389,10 @@ pub const Agent = struct {
             spawned += 1;
         }
         for (threads[0..spawned]) |t| t.join();
+        // 线程已全部 join：把 spawned 归零让上面的 spawn 阶段 errdefer 失活，
+        // 否则它会与下面的 defer 重叠——在结果组装失败（OOM）时对同一批 worker
+        // 二次 join 线程、二次 deinit arena（双重 free / 重复 join，均为未定义行为）。
+        spawned = 0;
         defer for (workers) |*w| w.arena_state.deinit();
 
         var buf: std.ArrayList(u8) = .empty;
@@ -532,6 +543,7 @@ fn toolErrorObservation(arena: std.mem.Allocator, err: anyerror) ![]u8 {
         error.FileNotFound => "目标文件不存在。请确认路径，或先用 file_write 创建它。",
         error.AccessDenied => "对目标路径没有访问权限。",
         error.IsDir => "目标路径是目录而非文件。",
+        error.UnexpectedAction => "内部错误：动作被路由到了错误的执行分支（不应发生）。请重试或换一种动作。",
         else => @errorName(err),
     };
     return std.fmt.allocPrint(arena, "[观察] 工具执行失败：{s}", .{hint});
@@ -756,6 +768,31 @@ fn testAgent(brain: *ScriptedBrain, max_turns: u32) Agent {
         .complete_fn = scriptedComplete,
         .max_turns = max_turns,
     };
+}
+
+test "护栏/执行：契约外动作降级为 deny/error 而非 panic（硬化）" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var brain = ScriptedBrain{ .steps = &.{} };
+    var ag = testAgent(&brain, 16);
+
+    // guard(.final)：终态不应过护栏；若被误路由，降级为 deny。
+    switch (ag.guard(arena, .final, "")) {
+        .deny => {},
+        .allow => return error.ShouldHaveDenied,
+    }
+
+    // guardLocalRead(非读动作)：只读档下走 else 分支，降级为 deny 而非 unreachable。
+    ag.policy_mode = .readonly;
+    switch (ag.guardLocalRead(arena, .bash, "")) {
+        .deny => {},
+        .allow => return error.ShouldHaveDenied,
+    }
+
+    // execTool(.final)：终态被误路由时返回 error.UnexpectedAction，由 run 转成观察回灌。
+    try std.testing.expectError(error.UnexpectedAction, ag.execTool(arena, .final, ""));
 }
 
 test "run: ReACT 循环执行 bash 工具后给出最终答复" {
