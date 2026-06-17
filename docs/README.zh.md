@@ -2,6 +2,10 @@
 
 [English](../README.md) | 中文
 
+<p align="center">
+  <img src="assets/scoot-infographic.png" alt="Scoot —— 纯 Zig 编写的本地优先 AI Agent 守护进程 / CLI，展示 ReACT 闭环（模型、校验、策略、工具、审计）、内建工具与 guarded/readonly/unrestricted 执行策略" width="100%">
+</p>
+
 Scoot 是一个用纯 Zig 编写的轻量级 AI Agent 守护进程 / CLI。它在纯文本环境下运行，对接 OpenAI 兼容模型后端，校验模型输出的结构化步骤，通过策略门执行本地工具，并把每一步记录为可审计的本地状态。
 
 项目设计刻意保守：

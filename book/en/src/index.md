@@ -1,5 +1,9 @@
 # Scoot
 
+<p align="center">
+  <img src="assets/scoot-infographic.png" alt="Scoot — local-first AI agent daemon and CLI in pure Zig, showing the ReACT loop, built-in tools, and execution policies" width="100%">
+</p>
+
 Scoot is a lightweight AI agent daemon and CLI written in Zig. It runs local or remote OpenAI-compatible model backends through a defensive ReACT loop:
 
 1. ask the model for one structured step,
