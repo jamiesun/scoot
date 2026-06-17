@@ -17,6 +17,7 @@ const usage =
     \\
     \\选项:
     \\  -e, --eval <prompt>  单次执行一个目标后退出
+    \\  --trace              在 -e/--eval 模式下把执行轨迹打印到 stderr
     \\  --ticks <N>          schedule run 仅跑 N 轮后退出（默认 0=持续运行）
     \\  -h, --help           显示本帮助
     \\  -v, --version        显示版本号
@@ -35,9 +36,15 @@ pub fn main(init: std.process.Init) !void {
     const out = &stdout_writer.interface;
     defer out.flush() catch {};
 
+    var stderr_buffer: [4096]u8 = undefined;
+    var stderr_writer: Io.File.Writer = .init(.stderr(), io, &stderr_buffer);
+    const err_out = &stderr_writer.interface;
+    defer err_out.flush() catch {};
+
     const args = try init.minimal.args.toSlice(arena);
 
     var eval_prompt: ?[]const u8 = null;
+    var trace = false;
     var cmd_config = false;
     var cmd_skills = false;
     var cmd_schedule: ?[]const u8 = null; // null=未请求；否则为子动作 list/run
@@ -58,6 +65,8 @@ pub fn main(init: std.process.Init) !void {
                 die(out, 2);
             }
             eval_prompt = args[i];
+        } else if (eql(arg, "--trace")) {
+            trace = true;
         } else if (eql(arg, "--ticks")) {
             i += 1;
             if (i >= args.len) {
@@ -87,6 +96,11 @@ pub fn main(init: std.process.Init) !void {
             try out.writeAll(usage);
             die(out, 2);
         }
+    }
+
+    if (trace and eval_prompt == null) {
+        try out.writeAll("error: --trace 目前仅支持 -e/--eval 单次执行模式\n");
+        die(out, 2);
     }
 
     const dirs = scoot.paths.Paths.resolve(arena, env) catch |err| switch (err) {
@@ -164,6 +178,7 @@ pub fn main(init: std.process.Init) !void {
         ag.tool_timeout_ms = cfg.tools.timeout_ms;
         ag.policy_mode = scoot.policy.Mode.fromString(cfg.tools.policy);
         ag.ca_file = cfg.backend.ca_file;
+        if (trace) ag.trace = err_out;
 
         // 审计留痕（铁律：可审计胜过黑盒）。打不开则降级为「明示警告 + 不留痕」。
         var sink: AuditSink = .{};

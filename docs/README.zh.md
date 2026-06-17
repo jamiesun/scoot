@@ -45,7 +45,10 @@ zig build run -- --version
 ./zig-out/bin/scoot skills
 ./zig-out/bin/scoot schedule list
 ./zig-out/bin/scoot -e "统计当前仓库中的 Zig 源文件数量"
+./zig-out/bin/scoot --trace -e "统计当前仓库中的 Zig 源文件数量"
 ```
+
+`--trace` 用于单次 CLI 调试：ReACT 执行轨迹打印到 stderr，最终答复仍保持在 stdout。
 
 ## 配置
 
