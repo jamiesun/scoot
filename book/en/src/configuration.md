@@ -13,7 +13,7 @@ The recommended starting point is:
 ## Main Sections
 
 - `[backend]`: OpenAI-compatible endpoint, model, API key source, CA bundle, extra request fields.
-- `[agent]`: turn limit and default mode.
+- `[agent]`: turn limit, default mode, and context budget (`context_budget_bytes`, 0 = off).
 - `[tools]`: timeout and execution policy.
 - `[skills]`: skill discovery.
 - `[audit]`: audit log behavior.

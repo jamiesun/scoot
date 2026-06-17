@@ -47,6 +47,14 @@ max_turns = 32
 # Default cognition mode. Supported today: "goal"; "plan" is reserved.
 default_mode = "goal"
 
+# Context budget in bytes for the cumulative prompt history across turns.
+# When the running transcript would exceed this, the agent stops *before* the
+# next backend call with a clear error instead of letting the request grow
+# unbounded and fail late at a small-context backend. Bytes are a coarse proxy
+# for tokens; pick a conservative value below your backend's context window.
+# 0 disables the check (turn-count bound by max_turns only); this is the default.
+context_budget_bytes = 0
+
 [tools]
 # Hard timeout for each tool call, in milliseconds.
 timeout_ms = 30000

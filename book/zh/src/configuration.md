@@ -13,7 +13,7 @@ Scoot 从运行目录加载配置：
 ## 主要配置节
 
 - `[backend]`：OpenAI 兼容端点、模型、API key 来源、CA bundle、额外请求字段。
-- `[agent]`：回合上限和默认模式。
+- `[agent]`：回合上限、默认模式与上下文预算（`context_budget_bytes`，0 = 关闭）。
 - `[tools]`：超时和执行策略。
 - `[skills]`：skill 发现。
 - `[audit]`：审计日志行为。

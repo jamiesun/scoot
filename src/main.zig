@@ -1672,6 +1672,7 @@ fn setupRun(
     ag.tool_timeout_ms = cfg.tools.timeout_ms;
     ag.policy_mode = policy_mode;
     ag.ca_file = cfg.backend.ca_file;
+    ag.context_budget_bytes = cfg.agent.context_budget_bytes;
 
     sink.open(warn, arena, io, cfg.dirs.logs_dir);
     ag.audit = sink.loggerPtr();
