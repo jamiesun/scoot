@@ -1,0 +1,17 @@
+[book]
+title = "Scoot 文档"
+description = "轻量级、可审计的 AI Agent 守护进程与 CLI"
+authors = ["Scoot contributors"]
+language = "zh"
+src = "src"
+
+[build]
+build-dir = "../../site/zh"
+create-missing = false
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/jamiesun/scoot"
+additional-css = ["theme/language-switch.css"]
+additional-js = ["theme/language-switch.js"]

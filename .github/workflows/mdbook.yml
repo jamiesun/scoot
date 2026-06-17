@@ -1,0 +1,68 @@
+name: mdBook
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "book/**"
+      - "docs/**"
+      - "README.md"
+      - "AGENT.md"
+      - ".github/workflows/mdbook.yml"
+  pull_request:
+    paths:
+      - "book/**"
+      - "docs/**"
+      - "README.md"
+      - "AGENT.md"
+      - ".github/workflows/mdbook.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build bilingual docs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install mdBook
+        run: cargo install mdbook --locked
+
+      - name: Build English book
+        run: mdbook build book/en
+
+      - name: Build Chinese book
+        run: mdbook build book/zh
+
+      - name: Add landing page
+        run: |
+          mkdir -p site
+          cp book/site-index.html site/index.html
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
