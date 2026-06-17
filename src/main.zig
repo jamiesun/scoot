@@ -303,26 +303,16 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (eval_prompt) |prompt| {
-        const token = try resolveToken(out, cfg, arena, io, env);
-        var client = scoot.llm.Client.init(io, cfg.backend.base_url, cfg.backend.model, token);
-        client.ca_file = cfg.backend.ca_file;
-        client.extra_body = cfg.backend.extra_body;
-        var sess = scoot.session.Session.init("cli");
-        try sess.append(arena, .system, scoot.agent.system_prompt);
-        injectSkills(out, arena, io, cfg, &sess);
-        try sess.append(arena, .user, prompt);
+        // `-e` 单次：stdout 仅承载最终答案（可脚本/管道），故所有降级告警与错误改走 stderr（issue #23）。
+        var client = try initBackendClient(err_out, cfg, arena, io, env);
 
-        var ag = scoot.agent.Agent.initClient(&client);
-        ag.max_turns = cfg.agent.max_turns;
-        ag.tool_timeout_ms = cfg.tools.timeout_ms;
-        ag.policy_mode = scoot.policy.Mode.fromString(cfg.tools.policy);
-        ag.ca_file = cfg.backend.ca_file;
-        if (trace) ag.trace = err_out;
-
-        // 审计留痕（铁律：可审计胜过黑盒）。打不开则降级为「明示警告 + 不留痕」。
+        // 审计留痕（铁律：可审计胜过黑盒）。打不开则降级为「明示警告（→stderr）+ 不留痕」。
         var sink: AuditSink = .{};
-        sink.open(out, arena, io, cfg.dirs.logs_dir);
-        ag.audit = sink.loggerPtr();
+        const setup = try setupRun(&client, &sink, err_out, arena, io, cfg, "cli", scoot.policy.Mode.fromString(cfg.tools.policy));
+        var sess = setup.sess;
+        var ag = setup.agent;
+        try sess.append(arena, .user, prompt);
+        if (trace) ag.trace = err_out;
         if (ag.audit) |lg| lg.log(.run, prompt) catch {}; // 运行边界标记（携带用户目标）
 
         var retries_done: u32 = 0;
@@ -344,12 +334,13 @@ pub fn main(init: std.process.Init) !void {
 
                 if (ag.audit) |lg| lg.log(.system_error, @errorName(err)) catch {};
                 finalizeRun(io, &sess, cfg.dirs.sessions_dir, &sink);
-                try out.print("[scoot] 调用后端失败：{s}\n", .{@errorName(err)});
-                try printBackendErrorDetail(out, &client);
-                try out.print(
+                try err_out.print("[scoot] 调用后端失败：{s}\n", .{@errorName(err)});
+                try printBackendErrorDetail(err_out, &client);
+                try err_out.print(
                     "        后端 {s}（model={s}）。请确认 OpenAI 兼容服务在运行，必要时设置 {s}。\n",
                     .{ cfg.backend.base_url, cfg.backend.model, cfg.backend.api_key_env },
                 );
+                try err_out.flush();
                 die(out, 1);
             };
             finalizeRun(io, &sess, cfg.dirs.sessions_dir, &sink);
@@ -839,7 +830,7 @@ const repl_banner =
 /// 技能是增强项——发现失败或无技能时静默跳过，绝不阻断主流程或污染 `-e` 的可脚本输出。
 /// Registry 借 `arena` 分配，随进程退出整体回收，无需单独 deinit。
 fn injectSkills(
-    out: *Io.Writer,
+    warn: *Io.Writer,
     arena: std.mem.Allocator,
     io: std.Io,
     cfg: scoot.config.Config,
@@ -849,7 +840,7 @@ fn injectSkills(
     const paths = cfg.skillPaths(arena) catch return;
     var reg: scoot.skill.Registry = .{};
     reg.discoverAll(arena, io, paths) catch |err| {
-        out.print("[scoot] 技能发现失败（{s}），已跳过技能装载。\n", .{@errorName(err)}) catch {};
+        warn.print("[scoot] 技能发现失败（{s}），已跳过技能装载。\n", .{@errorName(err)}) catch {};
         return;
     };
     if (reg.count() == 0) return;
@@ -1278,20 +1269,13 @@ const RunCtx = struct {
         const eff = job.effectiveMode();
 
         const sid = std.fmt.allocPrint(a, "job-{s}", .{job.id}) catch return;
-        var sess = scoot.session.Session.init(sid);
-        sess.append(a, .system, scoot.agent.system_prompt) catch {};
-        injectSkills(self.out, a, self.io, self.cfg, &sess);
+        // schedule/daemon 的 stdout 即运行日志，降级告警走 self.out（与 -e 的 stderr 路由不同）。
+        var sink: AuditSink = .{};
+        const setup = setupRun(self.client, &sink, self.out, a, self.io, self.cfg, sid, eff) catch return;
+        var sess = setup.sess;
+        var ag = setup.agent;
         sess.append(a, .user, job.goal) catch {};
 
-        var ag = scoot.agent.Agent.initClient(self.client);
-        ag.max_turns = self.cfg.agent.max_turns;
-        ag.tool_timeout_ms = self.cfg.tools.timeout_ms;
-        ag.policy_mode = eff; // 强制有效安全档（结构上不可能跑在 guarded 之上）
-        ag.ca_file = self.cfg.backend.ca_file;
-
-        var sink: AuditSink = .{};
-        sink.open(self.out, a, self.io, self.cfg.dirs.logs_dir);
-        ag.audit = sink.loggerPtr();
         if (ag.audit) |lg| {
             const marker = std.fmt.allocPrint(a, "schedule job={s} mode={s} goal={s}", .{
                 job.id, @tagName(eff), job.goal,
@@ -1389,10 +1373,7 @@ fn runSchedule(
         return;
     }
 
-    const token = try resolveToken(out, cfg, arena, io, env);
-    var client = scoot.llm.Client.init(io, cfg.backend.base_url, cfg.backend.model, token);
-    client.ca_file = cfg.backend.ca_file;
-    client.extra_body = cfg.backend.extra_body;
+    var client = try initBackendClient(out, cfg, arena, io, env);
 
     var job_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer job_arena.deinit();
@@ -1451,10 +1432,7 @@ fn runDaemon(
         return;
     }
 
-    const token = try resolveToken(out, cfg, arena, io, env);
-    var client = scoot.llm.Client.init(io, cfg.backend.base_url, cfg.backend.model, token);
-    client.ca_file = cfg.backend.ca_file;
-    client.extra_body = cfg.backend.extra_body;
+    var client = try initBackendClient(out, cfg, arena, io, env);
 
     var job_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer job_arena.deinit();
@@ -1610,7 +1588,7 @@ fn currentPid() i64 {
 /// 修复静默吞咽：当用户**显式**配置了 file/cmd 来源却尚未实现时，明示告警，
 /// 不再把 NotImplemented 装作「无鉴权」悄悄吞掉。
 fn resolveToken(
-    out: *Io.Writer,
+    warn: *Io.Writer,
     cfg: scoot.config.Config,
     arena: std.mem.Allocator,
     io: std.Io,
@@ -1622,7 +1600,7 @@ fn resolveToken(
         // token 文件存在但权限过宽：明示告警（指导 chmod 600），降级为空 token 续跑。
         // 绝不读取世界可读的密钥（密钥零泄漏铁律）；本地无须密钥的后端不受影响。
         error.InsecurePermissions => {
-            try out.print(
+            try warn.print(
                 "[scoot] 警告：token 文件权限过宽（group/other 可读），已拒绝读取。\n" ++
                     "        请执行 `chmod 600 {s}` 收紧后重试。\n",
                 .{cfg.backend.api_key_file orelse cfg.dirs.token_file},
@@ -1633,7 +1611,7 @@ fn resolveToken(
         // 仅当用户**显式**配置了 file/cmd 来源却仍落空时才提示（配置未生效是值得知道的）。
         error.NoApiKey => {
             if (explicit_source) {
-                try out.print(
+                try warn.print(
                     "[scoot] 警告：已配置 token 文件/命令来源，但均未取得有效 token，将以空 token 继续。\n" ++
                         "        请检查文件是否存在且非空，或凭证命令是否成功输出。\n",
                     .{},
@@ -1646,6 +1624,61 @@ fn resolveToken(
     return s.value;
 }
 
+/// 解析 token 并构建后端 client。`-e` / REPL / schedule / daemon 四入口共用，杜绝各自漂移。
+/// `warn` 承载降级告警（token 来源落空 / 权限过宽）：交互式入口传 stdout，
+/// `-e` 单次传 stderr 以免污染可脚本输出（issue #23）。
+fn initBackendClient(
+    warn: *Io.Writer,
+    cfg: scoot.config.Config,
+    arena: std.mem.Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+) !scoot.llm.Client {
+    const token = try resolveToken(warn, cfg, arena, io, env);
+    var client = scoot.llm.Client.init(io, cfg.backend.base_url, cfg.backend.model, token);
+    client.ca_file = cfg.backend.ca_file;
+    client.extra_body = cfg.backend.extra_body;
+    return client;
+}
+
+/// 一次运行装配结果。client/sink 的存储由**调用方**持有（保证 agent 内部指针稳定），
+/// 本结构只承载可按值安全搬运的 session 与 agent（二者均不自引用）。
+const RunSetup = struct {
+    sess: scoot.session.Session,
+    agent: scoot.agent.Agent,
+};
+
+/// 统一装配 session（system prompt + 技能注入）+ agent（档位/超时/CA + 审计 sink）。
+/// `-e` / REPL / schedule job 三入口共用，消除三处近乎逐字重复的设置（issue #30）——
+/// 任一处修订（审计路由、新增 agent 字段等）只需改这一处，不再各自漂移。
+/// `warn` 路由降级告警（技能发现失败 / 审计打不开）：`-e` 传 stderr，其余传 stdout（issue #23）。
+/// 调用方负责后续追加 user/goal 消息、按需设 trace、写运行边界审计标记（各入口语义不同）。
+fn setupRun(
+    client: *scoot.llm.Client,
+    sink: *AuditSink,
+    warn: *Io.Writer,
+    arena: std.mem.Allocator,
+    io: std.Io,
+    cfg: scoot.config.Config,
+    session_id: []const u8,
+    policy_mode: scoot.policy.Mode,
+) !RunSetup {
+    var sess = scoot.session.Session.init(session_id);
+    try sess.append(arena, .system, scoot.agent.system_prompt);
+    injectSkills(warn, arena, io, cfg, &sess);
+
+    var ag = scoot.agent.Agent.initClient(client);
+    ag.max_turns = cfg.agent.max_turns;
+    ag.tool_timeout_ms = cfg.tools.timeout_ms;
+    ag.policy_mode = policy_mode;
+    ag.ca_file = cfg.backend.ca_file;
+
+    sink.open(warn, arena, io, cfg.dirs.logs_dir);
+    ag.audit = sink.loggerPtr();
+
+    return .{ .sess = sess, .agent = ag };
+}
+
 /// 交互式 REPL：在单一会话里跨多轮复用 ReACT 闭环。人在场监督，
 /// 单次后端失败只提示并继续，不终止整段会话。退出时落盘会话与审计。
 fn runRepl(
@@ -1655,24 +1688,12 @@ fn runRepl(
     env: *const std.process.Environ.Map,
     cfg: scoot.config.Config,
 ) !void {
-    const token = try resolveToken(out, cfg, arena, io, env);
-    var client = scoot.llm.Client.init(io, cfg.backend.base_url, cfg.backend.model, token);
-    client.ca_file = cfg.backend.ca_file;
-    client.extra_body = cfg.backend.extra_body;
-
-    var sess = scoot.session.Session.init("repl");
-    try sess.append(arena, .system, scoot.agent.system_prompt);
-    injectSkills(out, arena, io, cfg, &sess);
-
-    var ag = scoot.agent.Agent.initClient(&client);
-    ag.max_turns = cfg.agent.max_turns;
-    ag.tool_timeout_ms = cfg.tools.timeout_ms;
-    ag.policy_mode = scoot.policy.Mode.fromString(cfg.tools.policy);
-    ag.ca_file = cfg.backend.ca_file;
-
+    // REPL 为人在场的交互式入口，stdout 即对话界面，故降级告警随 out 即可。
+    var client = try initBackendClient(out, cfg, arena, io, env);
     var sink: AuditSink = .{};
-    sink.open(out, arena, io, cfg.dirs.logs_dir);
-    ag.audit = sink.loggerPtr();
+    const setup = try setupRun(&client, &sink, out, arena, io, cfg, "repl", scoot.policy.Mode.fromString(cfg.tools.policy));
+    var sess = setup.sess;
+    var ag = setup.agent;
 
     try out.print("scoot {s} — 交互式 REPL（后端 {s}，model={s}，策略 {s}）\n", .{
         scoot.version, cfg.backend.base_url, cfg.backend.model, cfg.tools.policy,
@@ -1745,10 +1766,10 @@ const AuditSink = struct {
 
     /// 打开审计日志（追加到末尾）。打不开则降级为「明示警告 + 不留痕」——
     /// 既不静默退回黑盒，也不因日志故障阻断任务（铁律：可审计胜过黑盒）。
-    fn open(self: *AuditSink, out: *Io.Writer, arena: std.mem.Allocator, io: std.Io, logs_dir: []const u8) void {
+    fn open(self: *AuditSink, warn: *Io.Writer, arena: std.mem.Allocator, io: std.Io, logs_dir: []const u8) void {
         const path = std.fmt.allocPrint(arena, "{s}/audit.jsonl", .{logs_dir}) catch return;
         const f = Io.Dir.cwd().createFile(io, path, .{ .truncate = false }) catch |err| {
-            out.print("[scoot] 警告：审计日志无法写入（{s}：{s}），本次不留痕\n", .{ path, @errorName(err) }) catch {};
+            warn.print("[scoot] 警告：审计日志无法写入（{s}：{s}），本次不留痕\n", .{ path, @errorName(err) }) catch {};
             return;
         };
         self.file = f;
