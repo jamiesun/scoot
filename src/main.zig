@@ -190,6 +190,7 @@ pub fn main(init: std.process.Init) !void {
             if (ag.audit) |lg| lg.log(.system_error, @errorName(err)) catch {};
             finalizeRun(io, &sess, cfg.dirs.sessions_dir, &sink);
             try out.print("[scoot] 调用后端失败：{s}\n", .{@errorName(err)});
+            try printBackendErrorDetail(out, &client);
             try out.print(
                 "        后端 {s}（model={s}）。请确认 OpenAI 兼容服务在运行，必要时设置 {s}。\n",
                 .{ cfg.backend.base_url, cfg.backend.model, cfg.backend.api_key_env },
@@ -202,6 +203,22 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try runRepl(out, arena, io, env, cfg);
+}
+
+fn printBackendErrorDetail(out: *Io.Writer, client: *const scoot.llm.Client) !void {
+    const body = client.lastErrorBody();
+    if (client.last_error_status == 0 and body.len == 0) return;
+
+    try out.print("        后端响应 status={d}", .{client.last_error_status});
+    if (body.len == 0) {
+        try out.writeAll("，无响应体。\n");
+        return;
+    }
+    try out.print("，body（前 {d} 字节{s}）：\n{s}\n", .{
+        body.len,
+        if (client.last_error_body_truncated) "，已截断" else "",
+        body,
+    });
 }
 
 fn eql(a: []const u8, b: []const u8) bool {

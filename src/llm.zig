@@ -43,9 +43,18 @@ pub const Client = struct {
     /// 动态扩展请求体参数（透传）：原样合并进请求体顶层。见 config.Backend.extra_body。
     /// 仅接受 JSON 对象；非对象忽略。每个成员经 std.json 序列化，故请求体始终合法。
     extra_body: ?std.json.Value = null,
+    /// 最近一次后端失败响应摘要。存固定缓冲，避免错误上抛后 per-call arena 已释放。
+    last_error_status: u16 = 0,
+    last_error_body_buf: [2048]u8 = undefined,
+    last_error_body_len: usize = 0,
+    last_error_body_truncated: bool = false,
 
     pub fn init(io: std.Io, base_url: []const u8, model: []const u8, api_key: []const u8) Client {
         return .{ .io = io, .base_url = base_url, .model = model, .api_key = api_key };
+    }
+
+    pub fn lastErrorBody(self: *const Client) []const u8 {
+        return self.last_error_body_buf[0..self.last_error_body_len];
     }
 
     /// 发起一次 chat/completions 请求并返回防弹解析后的结果。
@@ -56,6 +65,7 @@ pub const Client = struct {
         messages: []const Message,
         opts: ChatOptions,
     ) !Completion {
+        self.clearLastError();
         const body = try buildRequestBody(arena, self.model, messages, opts, self.extra_body);
         const url = try std.fmt.allocPrint(arena, "{s}/chat/completions", .{self.base_url});
 
@@ -89,10 +99,29 @@ pub const Client = struct {
         });
 
         const code = @intFromEnum(result.status);
+        const response_body = resp.writer.buffered();
+        if (code < 200 or code >= 300) self.rememberBackendResponse(code, response_body);
         if (code == 401 or code == 403) return error.Unauthorized;
         if (code < 200 or code >= 300) return error.BackendError;
 
-        return parseCompletion(arena, resp.writer.buffered());
+        return parseCompletion(arena, response_body) catch |err| {
+            self.rememberBackendResponse(code, response_body);
+            return err;
+        };
+    }
+
+    fn clearLastError(self: *Client) void {
+        self.last_error_status = 0;
+        self.last_error_body_len = 0;
+        self.last_error_body_truncated = false;
+    }
+
+    fn rememberBackendResponse(self: *Client, status: u16, body: []const u8) void {
+        self.last_error_status = status;
+        const n = if (body.len > self.last_error_body_buf.len) self.last_error_body_buf.len else body.len;
+        @memcpy(self.last_error_body_buf[0..n], body[0..n]);
+        self.last_error_body_len = n;
+        self.last_error_body_truncated = body.len > n;
     }
 };
 
@@ -271,6 +300,27 @@ test "parseCompletion 防弹：脏数据返回 MalformedResponse 而非 panic" {
     try std.testing.expectError(error.MalformedResponse, parseCompletion(arena, "{\"choices\":[]}"));
     try std.testing.expectError(error.MalformedResponse, parseCompletion(arena, "{}"));
     try std.testing.expectError(error.MalformedResponse, parseCompletion(arena, "{\"choices\":[{\"message\":{}}]}"));
+}
+
+test "Client 记录后端失败响应摘要并截断" {
+    var c = Client.init(std.testing.io, "http://example.invalid/v1", "m", "");
+    const body = "backend rejected this request";
+    c.rememberBackendResponse(400, body);
+    try std.testing.expectEqual(@as(u16, 400), c.last_error_status);
+    try std.testing.expectEqualStrings(body, c.lastErrorBody());
+    try std.testing.expect(!c.last_error_body_truncated);
+
+    const long = try std.testing.allocator.alloc(u8, c.last_error_body_buf.len + 8);
+    defer std.testing.allocator.free(long);
+    @memset(long, 'x');
+    c.rememberBackendResponse(500, long);
+    try std.testing.expectEqual(c.last_error_body_buf.len, c.lastErrorBody().len);
+    try std.testing.expect(c.last_error_body_truncated);
+
+    c.clearLastError();
+    try std.testing.expectEqual(@as(u16, 0), c.last_error_status);
+    try std.testing.expectEqual(@as(usize, 0), c.lastErrorBody().len);
+    try std.testing.expect(!c.last_error_body_truncated);
 }
 
 test {
