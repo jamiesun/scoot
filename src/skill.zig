@@ -10,15 +10,16 @@
 //! 渐进式披露（服务「轻量化」铁律，避免上下文爆炸）：
 //!   1) 发现：扫描各 skill 路径，**只解析 front-matter**（name+description）建轻量索引；
 //!   2) 注入：把可用 skill 的 name+description+路径渲染成清单注入 system 上下文；
-//!   3) 激活：模型判断某 skill 相关时，用既有 `bash` 工具读取其 SKILL.md 正文获取完整指令
-//!      （正文绝不预先注入，故上下文恒定轻量）；
+//!   3) 激活：模型判断某 skill 相关时，用**原生 `skill` 动作**按名读取其 SKILL.md 正文获取
+//!      完整指令（正文绝不预先注入，故上下文恒定轻量）；
 //!   4) 执行：skill 自带脚本经统一 bash 工具沙盒执行——**不给技能任何特权执行通道**，
 //!      与普通命令一样先过执行护栏、再带硬超时运行（兑现「安全可控」铁律）。
 //!
-//! 设计取舍（反过载）：激活走「模型用 bash cat SKILL.md」而非新增专用 action，
-//!   省掉了运行时动态 schema 与新分支，保持单体简洁；读取本身即被审计为 tool_call，
-//!   可追溯性不打折。per-skill `capabilities` / `allowed_tools` / `scope` 是审查声明，
-//!   不授予任何额外权限；真正执行仍由全局 policy gate 决定。
+//! 设计取舍：读取技能指令是 agent 的**原生只读能力**（见 agent.zig 的 `skill` 动作），
+//!   刻意不受执行策略约束——故 readonly 等 fail-closed 档下仍能正常激活技能；而技能里
+//!   **让模型去执行**的脚本/命令仍走全局 policy gate，不获任何特权。读取经 `skill` 动作
+//!   即被审计为 tool_call，可追溯性不打折。per-skill `capabilities` / `allowed_tools` /
+//!   `scope` 是审查声明，不授予任何额外权限；真正执行仍由全局 policy gate 决定。
 const std = @import("std");
 
 /// 读取单个 SKILL.md 的大小上限：1 MiB（指令文件实际仅几 KiB，留足冗余防失控）。
@@ -330,13 +331,15 @@ pub const Registry = struct {
         try w.writeAll(
             \\## 可用技能（Skills）
             \\你装载了以下预制技能，可用来完成专门任务。每个技能目录下的 SKILL.md 是其完整操作指令。
-            \\当且仅当某技能与当前任务相关时，先用 action="bash" 读取它的 SKILL.md（如 `cat <路径>`）获取指令，再据此行动；
-            \\技能脚本一律经普通命令沙盒执行（先过执行护栏、带硬超时）。无关时不要读取，保持上下文精简。
+            \\当且仅当某技能与当前任务相关时，先用 action="skill"（Scoot 原生只读能力，不受执行策略限制，
+            \\readonly 下同样可用）读取它的指令再据此行动：action_input={"name":"技能名"}（默认读 SKILL.md；
+            \\读其它资源用 {"name":"技能名","path":"references/xxx"}）。无关时不要读取，保持上下文精简。
+            \\技能里要你执行的脚本 / 命令仍经普通工具沙盒（先过执行护栏、带硬超时），是否可用取决于当前策略模式。
             \\
             \\
         );
         for (self.skills.items) |s| {
-            try w.print("- {s}：{s}\n  指令文件：{s}/SKILL.md\n", .{ s.name, s.description, s.dir });
+            try w.print("- {s}：{s}\n  读取指令：action=\"skill\", action_input={{\"name\":\"{s}\"}}（目录：{s}）\n", .{ s.name, s.description, s.name, s.dir });
         }
         try w.writeAll("\n未列出的技能不存在，不要臆造。\n");
         return aw.written();
@@ -466,7 +469,9 @@ test "Registry: discover 扫描目录、解析、去重、渲染清单" {
     const text = try reg.manifest(arena.allocator());
     try std.testing.expect(std.mem.indexOf(u8, text, "alpha") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "第一个技能") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "/alpha/SKILL.md") != null);
+    // 新清单引导模型用原生 `skill` 动作（而非 bash cat）按名读取技能指令。
+    try std.testing.expect(std.mem.indexOf(u8, text, "action=\"skill\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "{\"name\":\"alpha\"}") != null);
 }
 
 test "Registry: 路径不存在则静默跳过，清单为空" {

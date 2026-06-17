@@ -15,6 +15,6 @@ The Chinese agent guide lives at:
 - Run `zig build` and `zig build test` after Zig changes.
 - Keep all project documentation bilingual.
 - Do not execute unvalidated model output.
-- Do not let skills bypass the tool sandbox.
+- Do not let skill *execution* bypass the tool sandbox (reading a skill's instructions is a native read-only capability and is intentionally not policy-gated).
 - Do not write secrets into config, logs, or audit output.
 

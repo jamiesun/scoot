@@ -61,6 +61,7 @@ pub const system_prompt =
     \\  - "grep"：在某个文件内按正则逐行搜索，返回命中行号与原文；action_input 是 JSON 对象 {"pattern":"正则","path":"文件路径"}。支持子集：. ^ $ * + ? [] () | \d \w \s（不支持捕获组/反向引用/lookaround/惰性量词）。
     \\  - "glob"：在目录子树下按通配模式列出匹配的文件路径；action_input 是 JSON 对象 {"pattern":"通配模式","root":"起始目录（可选，默认 .）"}。* ? [] 不跨 /，** 跨目录层级。返回的路径可直接喂给 file_read / grep。
     \\  - "http_request"：发起一次 HTTP/HTTPS 请求；action_input 是 JSON 对象 {"method":"GET","url":"https://...","body":"可选请求体"}。method 取 GET/POST/PUT/DELETE/HEAD/PATCH。返回状态码与响应体；带硬超时，绝不挂死。
+    \\  - "skill"：读取一个已装载技能的指令或资源文件。这是 Scoot 的原生只读能力，不受执行策略限制（即便 readonly 也可用）；action_input 是 JSON 对象 {"name":"技能名","path":"技能目录内的相对路径（可选，默认 SKILL.md）"}。仅能读取「可用技能」清单中列出技能其目录内的文件，用于按需取回该技能的完整操作指令（技能里要你执行的 bash/写/网络动作仍各自受执行策略约束）。
     \\  - "parallel"：并发执行 1-4 个彼此独立的只读调用；action_input 是 JSON 对象 {"calls":[{"action":"file_read","input":"{\"path\":\"README.md\"}"},{"action":"grep","input":"{\"pattern\":\"Scoot\",\"path\":\"AGENT.md\"}"}]}。只允许 file_read / grep / glob / HTTP GET 或 HEAD；禁止 bash、写操作、嵌套 parallel。
     \\  - "final"：给出最终答复；action_input 是给用户的答复文本。
     \\
@@ -75,7 +76,7 @@ pub const system_prompt =
 ;
 
 /// 模型可选的动作。
-pub const Action = enum { bash, file_read, file_write, file_edit, grep, glob, http_request, parallel, final };
+pub const Action = enum { bash, file_read, file_write, file_edit, grep, glob, http_request, skill, parallel, final };
 
 /// 一个解析后的 ReACT 步骤。
 pub const Step = struct {
@@ -93,6 +94,7 @@ const FileEditArgs = struct { path: []const u8, old: []const u8, new: []const u8
 const GrepArgs = struct { pattern: []const u8, path: []const u8 };
 const GlobArgs = struct { pattern: []const u8, root: []const u8 = "." };
 const HttpArgs = struct { method: []const u8 = "GET", url: []const u8, body: ?[]const u8 = null };
+const SkillArgs = struct { name: []const u8, path: []const u8 = "SKILL.md" };
 const ParallelCallArgs = struct {
     action: []const u8,
     input: []const u8 = "",
@@ -116,6 +118,9 @@ pub const CompleteFn = *const fn (
     messages: []const llm.Message,
     opts: llm.ChatOptions,
 ) anyerror!llm.Completion;
+
+/// 已装载技能的轻量句柄：名字 → 目录。`skill` 动作据此把技能名解析为目录后只读其内文件。
+pub const SkillRef = struct { name: []const u8, dir: []const u8 };
 
 pub const Agent = struct {
     io: std.Io,
@@ -145,6 +150,9 @@ pub const Agent = struct {
     ca_file: ?[]const u8 = null,
     /// 可选 CLI 执行轨迹输出。仅用于显式调试；最终答复仍由调用方写 stdout。
     trace: ?*std.Io.Writer = null,
+    /// 已装载技能的 name→dir 表（由 setupRun 从 Registry 注入；arena 拥有，生命周期=本次运行）。
+    /// `skill` 动作据此解析技能名、只读其指令/资源。空表表示未装载任何技能。
+    skills: []const SkillRef = &.{},
 
     /// 用真实 LLM 后端构造 Agent。
     pub fn initClient(client: *llm.Client) Agent {
@@ -246,6 +254,7 @@ pub const Agent = struct {
             .file_read, .grep, .glob => self.guardLocalRead(arena, action, input),
             .file_write, .file_edit => self.guardWrite(arena, action, input),
             .http_request => self.guardHttp(arena, input),
+            .skill => .allow, // 见下：读取技能指令是原生只读能力，刻意置于执行策略之外。
             .parallel => self.guardParallel(arena, input),
             // 调用方契约：`run` 在调用 guard 前已就地处理 .final（终态不过护栏）。
             // 这里**不 panic**而是降级为 deny（防弹/铁律 #4）：未来若某调用方误把
@@ -351,6 +360,7 @@ pub const Agent = struct {
                 },
                 .bash => return .{ .deny = "parallel 禁止 bash；请使用结构化只读工具" },
                 .file_write, .file_edit => return .{ .deny = "parallel 禁止写文件或编辑文件" },
+                .skill => return .{ .deny = "parallel 禁止 skill；请用独立的 skill 动作读取技能指令" },
                 .parallel => return .{ .deny = "parallel 禁止嵌套 parallel" },
                 .final => return .{ .deny = "parallel 子调用不能是 final" },
             }
@@ -417,10 +427,60 @@ pub const Agent = struct {
                 break :blk try formatHttpResponse(arena, args.url, resp);
             },
             .parallel => try self.execParallel(arena, input),
+            .skill => blk: {
+                const args = try parseToolArgs(SkillArgs, arena, input);
+                break :blk try self.readSkill(arena, args.name, args.path);
+            },
             // 调用方契约：`run` 在调用 execTool 前已就地处理 .final。降级为 error 而非
             // unreachable：契约被破坏时 run 会把它转成「工具执行失败」观察回灌，不 panic。
             .final => error.UnexpectedAction,
         };
+    }
+
+    /// `skill` 动作的执行：把技能名解析为已装载技能目录，只读其内的指令/资源文件。
+    /// 这是 Scoot 的**原生只读能力**，刻意置于执行策略之外（guard 对 `.skill` 恒 allow）：
+    /// 技能清单本就由 Scoot 主动发现并注入 system 上下文，模型读取其 SKILL.md / 资源不
+    /// 构成新的越权面；真正受策略约束的是技能里**让模型去执行**的 bash/写/网络动作，
+    /// 它们仍各走自身护栏。读取面的边界改由此处把关，而非交给 policy：
+    ///   - 技能名必须在已装载清单中（否则回灌可纠错的观察，并列出可用技能）；
+    ///   - 相对路径禁绝对路径、禁 `..`，确保读取不逃逸该技能目录。
+    /// 任何读取失败均收口为可回灌的观察文本，不上抛、不 panic（铁律 #4）。
+    fn readSkill(self: *Agent, arena: std.mem.Allocator, name: []const u8, rel: []const u8) ![]const u8 {
+        const dir = for (self.skills) |s| {
+            if (std.mem.eql(u8, s.name, name)) break s.dir;
+        } else return try self.skillNotFoundObservation(arena, name);
+
+        const trimmed = std.mem.trim(u8, rel, " \t\r\n");
+        const sub = if (trimmed.len == 0) "SKILL.md" else trimmed;
+        if (std.fs.path.isAbsolute(sub) or pathHasDotDot(sub))
+            return try std.fmt.allocPrint(arena, "[观察] 技能读取被拒：path 必须是技能目录内的相对路径，且不得含 `..`（收到：{s}）。", .{sub});
+
+        const full = try std.fs.path.join(arena, &.{ dir, sub });
+        const content = tools.file.read(arena, self.io, full, skill_read_limit) catch |err|
+            return try std.fmt.allocPrint(arena, "[观察] 技能 {s} 的 {s} 读取失败：{s}。", .{ name, sub, @errorName(err) });
+        return try std.fmt.allocPrint(
+            arena,
+            "[观察] 技能 {s} 的 {s}（{d} 字节）：\n{s}",
+            .{ name, sub, content.len, try clipTo(arena, content, skill_observation_cap) },
+        );
+    }
+
+    /// 技能名未命中已装载清单时的可纠错观察：列出可用技能名，引导模型重选。
+    fn skillNotFoundObservation(self: *Agent, arena: std.mem.Allocator, name: []const u8) ![]const u8 {
+        var aw = std.Io.Writer.Allocating.init(arena);
+        const w = &aw.writer;
+        try w.print("[观察] 技能 {s} 未装载。", .{name});
+        if (self.skills.len == 0) {
+            try w.writeAll("当前没有任何已装载技能。");
+        } else {
+            try w.writeAll("可用技能：");
+            for (self.skills, 0..) |s, i| {
+                if (i != 0) try w.writeAll("、");
+                try w.writeAll(s.name);
+            }
+            try w.writeAll("。");
+        }
+        return aw.written();
     }
 
     fn execParallel(self: *Agent, arena: std.mem.Allocator, input: []const u8) ![]const u8 {
@@ -567,6 +627,12 @@ const observation_stream_cap = 2000;
 /// 给更大窗口便于后续 file_edit 看清确切文本），但仍设上限挡住超大文件撑爆上下文。
 const file_read_observation_cap = 8000;
 
+/// 单个技能指令/资源文件的读取上限（1 MiB；指令文件实际仅几 KiB，留足冗余防失控）。
+const skill_read_limit: std.Io.Limit = .limited(1 << 20);
+/// 技能内容回灌观察的截断上限：比普通 file_read 更宽——SKILL.md 是模型按需取回的
+/// 完整操作指令，截断会丢失步骤；但仍设硬上限挡住异常大文件撑爆上下文。
+const skill_observation_cap = 32_000;
+
 /// parallel v0 是显式 fan-out，不是 DAG 执行器。小上限避免拖垮本地 runtime。
 const max_parallel_calls = 4;
 const parallel_observation_cap = 12_000;
@@ -706,6 +772,15 @@ fn traceClipped(w: *std.Io.Writer, s: []const u8, cap: usize) !void {
 
 fn parallelCallInput(call: ParallelCallArgs) []const u8 {
     return if (call.input.len != 0) call.input else call.action_input;
+}
+
+/// 路径是否含 `..` 组件（按 `/` 与 `\` 切分）。用于 `skill` 读取的目录逃逸防护。
+fn pathHasDotDot(p: []const u8) bool {
+    var it = std.mem.tokenizeAny(u8, p, "/\\");
+    while (it.next()) |part| {
+        if (std.mem.eql(u8, part, "..")) return true;
+    }
+    return false;
 }
 
 const ParallelWorker = struct {
@@ -979,6 +1054,49 @@ fn expectDeny(d: policy.Decision) !void {
         .deny => {},
         .allow => return error.ShouldHaveDenied,
     }
+}
+
+test "skill 动作：原生只读，readonly 下也能按名读取技能指令，且收口在技能目录内" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const root = "/tmp/scoot_skill_action_test";
+    cwd.deleteTree(io, root) catch {};
+    defer cwd.deleteTree(io, root) catch {};
+    try cwd.createDirPath(io, root ++ "/demo/references");
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/demo/SKILL.md", .data = "# Demo\nMAGIC-INSTRUCTION-7" });
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/demo/references/extra.md", .data = "REF-BODY-9" });
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var brain = ScriptedBrain{ .steps = &.{} };
+    var ag = testAgent(&brain, 16);
+    ag.policy_mode = .readonly; // 关键：最严档下技能读取仍须畅通（原生能力，不过策略门）。
+    ag.skills = &.{.{ .name = "demo", .dir = root ++ "/demo" }};
+
+    // 1) guard 对 skill 恒放行——即便 readonly（readonly 禁 bash / 拒写 / 拒网，但不挡技能读取）。
+    try std.testing.expectEqual(policy.Decision.allow, ag.guard(arena, .skill, "{\"name\":\"demo\"}"));
+
+    // 2) 默认读 SKILL.md 正文，内容如实回灌。
+    const md = try ag.execTool(arena, .skill, "{\"name\":\"demo\"}");
+    try std.testing.expect(std.mem.indexOf(u8, md, "MAGIC-INSTRUCTION-7") != null);
+
+    // 3) 可按相对 path 读技能目录内其它资源。
+    const ref = try ag.execTool(arena, .skill, "{\"name\":\"demo\",\"path\":\"references/extra.md\"}");
+    try std.testing.expect(std.mem.indexOf(u8, ref, "REF-BODY-9") != null);
+
+    // 4) 目录逃逸收口：`..` 与绝对路径被拒（返回可纠错观察，不读到目录外）。
+    const esc = try ag.execTool(arena, .skill, "{\"name\":\"demo\",\"path\":\"../../etc/passwd\"}");
+    try std.testing.expect(std.mem.indexOf(u8, esc, "被拒") != null);
+    const abs = try ag.execTool(arena, .skill, "{\"name\":\"demo\",\"path\":\"/etc/passwd\"}");
+    try std.testing.expect(std.mem.indexOf(u8, abs, "被拒") != null);
+
+    // 5) 未装载技能名：回灌「未装载」观察并列出可用技能，便于模型纠错（不报错、不 panic）。
+    const miss = try ag.execTool(arena, .skill, "{\"name\":\"nope\"}");
+    try std.testing.expect(std.mem.indexOf(u8, miss, "未装载") != null);
+    try std.testing.expect(std.mem.indexOf(u8, miss, "demo") != null);
 }
 
 test "run: ReACT 循环执行 bash 工具后给出最终答复" {
