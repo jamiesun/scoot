@@ -51,10 +51,11 @@ zig build run -- --version
 ./zig-out/bin/scoot skills pack docs/examples/skills/minimal minimal.scoot-skill.tar
 ./zig-out/bin/scoot schedule list
 ./zig-out/bin/scoot -e "统计当前仓库中的 Zig 源文件数量"
+./zig-out/bin/scoot --retries 4 -e "统计当前仓库中的 Zig 源文件数量"
 ./zig-out/bin/scoot --trace -e "统计当前仓库中的 Zig 源文件数量"
 ```
 
-`--trace` 用于单次 CLI 调试：ReACT 执行轨迹打印到 stderr，最终答复仍保持在 stdout。
+`--trace` 用于单次 CLI 调试：ReACT 执行轨迹打印到 stderr，最终答复仍保持在 stdout。`--retries` 控制 `-e` 遇到限流、5xx 等临时后端错误时的重试次数。
 
 `doctor` 执行本地健康检查且不会打印密钥。`--scoot-home` 可覆盖运行目录，方便隔离测试。`policy check` 可在 `guarded`、`readonly` 或 `unrestricted` 策略档下 dry-run 某个工具动作。
 

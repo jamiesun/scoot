@@ -51,10 +51,11 @@ Run the built binary:
 ./zig-out/bin/scoot skills pack docs/examples/skills/minimal minimal.scoot-skill.tar
 ./zig-out/bin/scoot schedule list
 ./zig-out/bin/scoot -e "count Zig source files in this repository"
+./zig-out/bin/scoot --retries 4 -e "count Zig source files in this repository"
 ./zig-out/bin/scoot --trace -e "count Zig source files in this repository"
 ```
 
-`--trace` is for one-shot CLI debugging. It prints the ReACT execution trace to stderr while keeping the final answer on stdout.
+`--trace` is for one-shot CLI debugging. It prints the ReACT execution trace to stderr while keeping the final answer on stdout. `--retries` controls how many times `-e` retries temporary backend failures such as rate limits and 5xx responses.
 
 `doctor` performs local health checks without printing secrets. `--scoot-home` overrides the runtime directory for isolated tests. `policy check` dry-runs a tool action against `guarded`, `readonly`, or `unrestricted` policy mode.
 

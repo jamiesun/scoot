@@ -23,6 +23,7 @@ const usage =
     \\
     \\选项:
     \\  -e, --eval <prompt>  单次执行一个目标后退出
+    \\  --retries <N>        -e 模式下后端临时错误重试次数（默认 2，0=不重试）
     \\  --scoot-home <dir>   覆盖运行目录（优先于 SCOOT_HOME，便于测试隔离）
     \\  --trace              在 -e/--eval 模式下把执行轨迹打印到 stderr
     \\  --ticks <N>          schedule run 仅跑 N 轮后退出（默认 0=持续运行）
@@ -51,6 +52,8 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(arena);
 
     var eval_prompt: ?[]const u8 = null;
+    var eval_retries: u32 = default_eval_retries;
+    var eval_retries_set = false;
     var scoot_home_override: ?[]const u8 = null;
     var trace = false;
     var cmd_config = false;
@@ -75,6 +78,17 @@ pub fn main(init: std.process.Init) !void {
                 die(out, 2);
             }
             eval_prompt = args[i];
+        } else if (eql(arg, "--retries")) {
+            i += 1;
+            if (i >= args.len) {
+                try out.writeAll("error: --retries 需要一个整数参数\n");
+                die(out, 2);
+            }
+            eval_retries = std.fmt.parseInt(u32, args[i], 10) catch {
+                try out.print("error: --retries 参数不是合法整数：'{s}'\n", .{args[i]});
+                die(out, 2);
+            };
+            eval_retries_set = true;
         } else if (eql(arg, "--scoot-home")) {
             i += 1;
             if (i >= args.len or args[i].len == 0) {
@@ -149,6 +163,10 @@ pub fn main(init: std.process.Init) !void {
 
     if (trace and eval_prompt == null) {
         try out.writeAll("error: --trace 目前仅支持 -e/--eval 单次执行模式\n");
+        die(out, 2);
+    }
+    if (eval_retries_set and eval_prompt == null) {
+        try out.writeAll("error: --retries 目前仅支持 -e/--eval 单次执行模式\n");
         die(out, 2);
     }
 
@@ -252,20 +270,37 @@ pub fn main(init: std.process.Init) !void {
         ag.audit = sink.loggerPtr();
         if (ag.audit) |lg| lg.log(.run, prompt) catch {}; // 运行边界标记（携带用户目标）
 
-        const reply = ag.run(arena, &sess) catch |err| {
-            if (ag.audit) |lg| lg.log(.system_error, @errorName(err)) catch {};
+        var retries_done: u32 = 0;
+        while (true) {
+            const reply = ag.run(arena, &sess) catch |err| {
+                if (shouldRetryEvalError(err, &client, retries_done, eval_retries)) {
+                    retries_done += 1;
+                    const delay_ns = evalRetryDelayNs(retries_done);
+                    if (ag.audit) |lg| lg.log(.system_error, @errorName(err)) catch {};
+                    try err_out.print(
+                        "[scoot] 后端临时失败：{s}，第 {d}/{d} 次重试，{d}ms 后继续。\n",
+                        .{ @errorName(err), retries_done, eval_retries, delay_ns / std.time.ns_per_ms },
+                    );
+                    try printBackendErrorDetail(err_out, &client);
+                    try err_out.flush();
+                    io.sleep(std.Io.Duration.fromNanoseconds(@intCast(delay_ns)), .awake) catch {};
+                    continue;
+                }
+
+                if (ag.audit) |lg| lg.log(.system_error, @errorName(err)) catch {};
+                finalizeRun(io, &sess, cfg.dirs.sessions_dir, &sink);
+                try out.print("[scoot] 调用后端失败：{s}\n", .{@errorName(err)});
+                try printBackendErrorDetail(out, &client);
+                try out.print(
+                    "        后端 {s}（model={s}）。请确认 OpenAI 兼容服务在运行，必要时设置 {s}。\n",
+                    .{ cfg.backend.base_url, cfg.backend.model, cfg.backend.api_key_env },
+                );
+                die(out, 1);
+            };
             finalizeRun(io, &sess, cfg.dirs.sessions_dir, &sink);
-            try out.print("[scoot] 调用后端失败：{s}\n", .{@errorName(err)});
-            try printBackendErrorDetail(out, &client);
-            try out.print(
-                "        后端 {s}（model={s}）。请确认 OpenAI 兼容服务在运行，必要时设置 {s}。\n",
-                .{ cfg.backend.base_url, cfg.backend.model, cfg.backend.api_key_env },
-            );
-            die(out, 1);
-        };
-        finalizeRun(io, &sess, cfg.dirs.sessions_dir, &sink);
-        try out.print("{s}\n", .{reply});
-        return;
+            try out.print("{s}\n", .{reply});
+            return;
+        }
     }
 
     try runRepl(out, arena, io, env, cfg);
@@ -285,6 +320,55 @@ fn printBackendErrorDetail(out: *Io.Writer, client: *const scoot.llm.Client) !vo
         if (client.last_error_body_truncated) "，已截断" else "",
         body,
     });
+}
+
+const default_eval_retries: u32 = 2;
+const eval_retry_base_delay_ns: u64 = 2 * std.time.ns_per_s;
+const eval_retry_max_delay_ns: u64 = 10 * std.time.ns_per_s;
+
+fn shouldRetryEvalError(
+    err: anyerror,
+    client: *const scoot.llm.Client,
+    retries_done: u32,
+    max_retries: u32,
+) bool {
+    if (retries_done >= max_retries) return false;
+
+    if (err == error.BackendError) {
+        const status = client.last_error_status;
+        return status == 0 or isRetryableBackendStatus(status);
+    }
+
+    return isRetryableTransportError(err);
+}
+
+fn isRetryableBackendStatus(status: u16) bool {
+    return status == 408 or status == 409 or status == 425 or status == 429 or
+        status == 500 or status == 502 or status == 503 or status == 504;
+}
+
+fn isRetryableTransportError(err: anyerror) bool {
+    const name = @errorName(err);
+    const retryable = [_][]const u8{
+        "ConnectionRefused",
+        "ConnectionResetByPeer",
+        "ConnectionTimedOut",
+        "HttpConnectionClosing",
+        "NetworkUnreachable",
+        "TemporaryNameServerFailure",
+        "TlsInitializationFailed",
+    };
+    for (retryable) |candidate| {
+        if (std.mem.eql(u8, name, candidate)) return true;
+    }
+    return false;
+}
+
+fn evalRetryDelayNs(retry_index: u32) u64 {
+    const zero_based = if (retry_index == 0) 0 else retry_index - 1;
+    const shift: u6 = @intCast(@min(zero_based, 4));
+    const delay = eval_retry_base_delay_ns << shift;
+    return @min(delay, eval_retry_max_delay_ns);
 }
 
 const PolicyCheckCommand = struct {
@@ -1519,6 +1603,32 @@ test "packSkill: 无效 skill 不打包" {
     defer arena_state.deinit();
     try std.testing.expectError(error.InvalidSkill, packSkill(arena_state.allocator(), io, root, out_path));
     try std.testing.expect(!fileExists(io, out_path));
+}
+
+test "shouldRetryEvalError: 只重试临时后端错误且受次数限制" {
+    var client = scoot.llm.Client.init(std.testing.io, "http://backend", "model", "");
+
+    client.last_error_status = 429;
+    try std.testing.expect(shouldRetryEvalError(error.BackendError, &client, 0, 2));
+    try std.testing.expect(shouldRetryEvalError(error.BackendError, &client, 1, 2));
+    try std.testing.expect(!shouldRetryEvalError(error.BackendError, &client, 2, 2));
+
+    client.last_error_status = 503;
+    try std.testing.expect(shouldRetryEvalError(error.BackendError, &client, 0, 1));
+
+    client.last_error_status = 400;
+    try std.testing.expect(!shouldRetryEvalError(error.BackendError, &client, 0, 2));
+
+    client.last_error_status = 0;
+    try std.testing.expect(!shouldRetryEvalError(error.Unauthorized, &client, 0, 2));
+}
+
+test "evalRetryDelayNs: 指数退避且有上限" {
+    try std.testing.expectEqual(@as(u64, 2 * std.time.ns_per_s), evalRetryDelayNs(1));
+    try std.testing.expectEqual(@as(u64, 4 * std.time.ns_per_s), evalRetryDelayNs(2));
+    try std.testing.expectEqual(@as(u64, 8 * std.time.ns_per_s), evalRetryDelayNs(3));
+    try std.testing.expectEqual(@as(u64, 10 * std.time.ns_per_s), evalRetryDelayNs(4));
+    try std.testing.expectEqual(@as(u64, 10 * std.time.ns_per_s), evalRetryDelayNs(10));
 }
 
 test "parsePolicyModeStrict: 未知策略不静默回落" {
