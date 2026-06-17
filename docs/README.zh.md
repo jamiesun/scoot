@@ -43,6 +43,7 @@ zig build run -- --version
 ./zig-out/bin/scoot --help
 ./zig-out/bin/scoot config
 ./zig-out/bin/scoot doctor
+./zig-out/bin/scoot --scoot-home /tmp/scoot-test doctor
 ./zig-out/bin/scoot policy check bash "rm -rf /" --mode guarded
 ./zig-out/bin/scoot skills
 ./zig-out/bin/scoot schedule list
@@ -52,11 +53,11 @@ zig build run -- --version
 
 `--trace` 用于单次 CLI 调试：ReACT 执行轨迹打印到 stderr，最终答复仍保持在 stdout。
 
-`doctor` 执行本地健康检查且不会打印密钥。`policy check` 可在 `guarded`、`readonly` 或 `unrestricted` 策略档下 dry-run 某个工具动作。
+`doctor` 执行本地健康检查且不会打印密钥。`--scoot-home` 可覆盖运行目录，方便隔离测试。`policy check` 可在 `guarded`、`readonly` 或 `unrestricted` 策略档下 dry-run 某个工具动作。
 
 ## 配置
 
-使用 `SCOOT_HOME` 指定运行目录。默认运行目录是 `~/.scoot`。
+使用 `--scoot-home` 或 `SCOOT_HOME` 指定运行目录。`--scoot-home` 优先级高于环境变量。默认运行目录是 `~/.scoot`。
 
 ```text
 ~/.scoot/
