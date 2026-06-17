@@ -4,15 +4,16 @@
 //!
 //! 诚实声明：这不是沙箱，也不是安全边界。`guarded` 模式只是一条**灾难性命令的
 //! 绊线**（denylist 必然可被构造绕过，不要据此产生虚假安全感）；真正 fail-closed
-//! 的安全原语是 `readonly`（只读白名单，默认拒绝）。无人值守 / daemon 场景应显式
-//! 选 `readonly` 或计划模式确认。真正的隔离仍依赖工具沙盒与未来的容器化。
+//! 的安全原语是 `readonly`：禁 shell、拒写、默认拒绝出网，仅放行进程内本地读工具。
+//! 无人值守 / daemon 场景应显式选 `readonly` 或计划模式确认。真正的隔离仍依赖工具
+//! 沙盒、路径策略与未来的容器化。
 const std = @import("std");
 
 /// 护栏模式。从最危险到最安全：unrestricted < guarded < readonly。
 pub const Mode = enum {
     /// 拦截灾难性命令清单，其余放行。交互式 CLI 的默认值。
     guarded,
-    /// 只放行只读命令白名单，并禁止重定向/命令替换/链式；其余一律拒绝（fail-closed）。
+    /// 禁止 shell，只放行进程内本地读工具；写与出网一律拒绝（fail-closed）。
     readonly,
     /// 不设限（仍会被审计）。仅在用户显式选择时启用。
     unrestricted,
@@ -66,16 +67,6 @@ const catastrophic_patterns = [_][]const u8{
     "chown -r ",
 };
 
-/// 只读命令白名单：首 token（取 basename 后）命中才允许。
-/// 刻意排除 awk/sed（可经 system()/e 标志旁路执行）等可写/可执行工具。
-const readonly_cmds = [_][]const u8{
-    "ls",      "cat",   "echo",   "printf", "pwd",  "head",  "tail",
-    "grep",    "egrep", "fgrep",  "find",   "wc",   "stat",  "file",
-    "du",      "df",    "date",   "whoami", "id",   "uname", "hostname",
-    "env",     "printenv", "which", "type",  "tree", "sort",  "uniq",
-    "cut",     "basename", "dirname", "realpath", "readlink", "true", "false",
-}; // 注：env/printenv 仅打印环境，不改系统。
-
 /// 校验一条命令是否准许执行。`arena` 仅用于一次性归一化分配。
 pub fn evaluate(arena: std.mem.Allocator, command: []const u8, mode: Mode) Decision {
     const raw = std.mem.trim(u8, command, " \t\r\n");
@@ -91,17 +82,9 @@ pub fn evaluate(arena: std.mem.Allocator, command: []const u8, mode: Mode) Decis
     }
     if (mode == .guarded) return .allow;
 
-    // readonly：fail-closed。禁重定向/追加、命令替换、链式串联。
-    if (std.mem.indexOfScalar(u8, norm, '>') != null) return .{ .deny = "只读模式禁止输出重定向" };
-    if (std.mem.indexOf(u8, norm, "$(") != null or std.mem.indexOfScalar(u8, norm, '`') != null)
-        return .{ .deny = "只读模式禁止命令替换" };
-    if (std.mem.indexOf(u8, norm, ";") != null or std.mem.indexOf(u8, norm, "&&") != null or std.mem.indexOf(u8, norm, "||") != null)
-        return .{ .deny = "只读模式禁止命令串联" };
-
-    const first = firstToken(norm);
-    if (!isReadonlyCmd(first))
-        return .{ .deny = "只读模式仅允许只读命令白名单" };
-    return .allow;
+    // readonly：shell 组合语义太宽，无法靠字符串白名单精确防住读后外带。
+    // 本地只读操作应走 file_read / grep / glob 这些进程内工具。
+    return .{ .deny = "只读模式禁止 bash；请改用 file_read / grep / glob 等内建只读工具" };
 }
 
 /// 内建工具的能力分类。与 shell 不同：内建工具（file/grep/glob/http）不经 `/bin/sh`，
@@ -113,6 +96,7 @@ pub const Capability = enum {
     /// 写本地状态：创建 / 修改 / 删除文件等。
     write,
     /// 网络只读：HTTP GET / HEAD 等幂等、无副作用的远端读取。
+    /// 注意：readonly 暂不放行，避免本地读结果经 GET query/path 外带。
     net_read,
     /// 网络写：HTTP POST / PUT / DELETE / PATCH 等可能变更远端状态的请求。
     net_write,
@@ -123,15 +107,16 @@ pub const Capability = enum {
 ///   - unrestricted：全放行（仍审计）；
 ///   - guarded：人在场绊线，只拦灾难性 *shell* 命令；内建工具无"删全盘"等价物，
 ///     其边界由工具自身把关（路径范围 / 大小上限 / 硬超时），故此处放行；
-///   - readonly：fail-closed，只放行读类（本地读 + 网络只读），拒绝一切写。
+///   - readonly：fail-closed，只放行本地读类，拒绝写与网络。
 /// 这保证内建工具**不可能绕过 readonly 安全档**（无人值守 schedule 的结构性前提）。
 pub fn evaluateTool(cap: Capability, mode: Mode) Decision {
     return switch (mode) {
         .unrestricted => .allow,
         .guarded => .allow,
         .readonly => switch (cap) {
-            .read, .net_read => .allow,
+            .read => .allow,
             .write => .{ .deny = "只读模式禁止写文件 / 修改本地状态" },
+            .net_read => .{ .deny = "只读模式默认禁止网络请求，避免本地数据外带" },
             .net_write => .{ .deny = "只读模式禁止可变更远端状态的网络请求（仅允许 GET/HEAD）" },
         },
     };
@@ -159,21 +144,6 @@ fn normalize(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
     }
     while (n > 0 and out[n - 1] == ' ') n -= 1; // 去尾空格
     return out[0..n];
-}
-
-/// 取首个 token，并剥离路径前缀（`/usr/bin/ls` → `ls`）。
-fn firstToken(norm: []const u8) []const u8 {
-    const end = std.mem.indexOfScalar(u8, norm, ' ') orelse norm.len;
-    const tok = norm[0..end];
-    if (std.mem.lastIndexOfScalar(u8, tok, '/')) |slash| return tok[slash + 1 ..];
-    return tok;
-}
-
-fn isReadonlyCmd(name: []const u8) bool {
-    for (readonly_cmds) |c| {
-        if (std.mem.eql(u8, name, c)) return true;
-    }
-    return false;
 }
 
 const testing = std.testing;
@@ -232,22 +202,20 @@ test "guarded：常规命令放行" {
     }
 }
 
-test "readonly：白名单放行、写/链式/重定向拒绝（fail-closed）" {
+test "readonly：禁止 bash，避免 shell 组合与环境外泄面" {
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
 
-    try testing.expectEqual(Decision.allow, evaluate(a, "ls -la /etc", .readonly));
-    try testing.expectEqual(Decision.allow, evaluate(a, "cat /etc/hosts", .readonly));
-    try testing.expectEqual(Decision.allow, evaluate(a, "/usr/bin/grep foo bar.txt", .readonly)); // 路径前缀剥离
-    try testing.expectEqual(Decision.allow, evaluate(a, "ls | grep foo", .readonly)); // 单管道允许
-
     const denied = [_][]const u8{
-        "rm file.txt", // 不在白名单
+        "ls -la /etc",
+        "cat /etc/hosts",
+        "cat $(whoami)",
+        "ls | grep foo",
+        "env",
+        "printenv",
         "echo hi > f", // 重定向
         "ls; rm -rf x", // 串联（绕过首 token 检查）
-        "cat $(whoami)", // 命令替换
-        "git status", // 非只读白名单
         "awk 'BEGIN{system(\"x\")}'", // 排除 awk
         "", // 空命令
     };
@@ -273,11 +241,14 @@ test "unrestricted：除空命令外一律放行（但调用方仍会审计）" 
     }
 }
 
-test "evaluateTool：readonly 只放行读类，拒一切写（内建工具不可绕过安全档）" {
-    // readonly：本地读 + 网络只读放行；写 / 网络写拒绝（fail-closed）。
+test "evaluateTool：readonly 只放行本地读，拒写与网络（内建工具不可绕过安全档）" {
+    // readonly：本地读放行；写 / 网络读写拒绝（fail-closed）。
     try testing.expectEqual(Decision.allow, evaluateTool(.read, .readonly));
-    try testing.expectEqual(Decision.allow, evaluateTool(.net_read, .readonly));
     switch (evaluateTool(.write, .readonly)) {
+        .deny => {},
+        .allow => return error.ShouldHaveDenied,
+    }
+    switch (evaluateTool(.net_read, .readonly)) {
         .deny => {},
         .allow => return error.ShouldHaveDenied,
     }
