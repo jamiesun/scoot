@@ -2,11 +2,11 @@
 
 权威英文路线图：
 
-- [`docs/ROADMAP.md`](../../../docs/ROADMAP.md)
+- [`docs/ROADMAP.md`](https://github.com/jamiesun/scoot/blob/main/docs/ROADMAP.md)
 
 权威中文路线图：
 
-- [`docs/ROADMAP.zh.md`](../../../docs/ROADMAP.zh.md)
+- [`docs/ROADMAP.zh.md`](https://github.com/jamiesun/scoot/blob/main/docs/ROADMAP.zh.md)
 
 ## 简版
 
