@@ -74,6 +74,24 @@ so skills stay usable even in `readonly`. Safety is enforced in execution
 (directory confinement, audited reads), not by policy. Everything a skill then
 tells the model to *run* (shell, writes, network) goes through the normal gate.
 
+Because it bypasses the gate, the `skill` action **widens the `readonly` read
+surface**. Beyond the `evaluateReadPath`-gated reads above (project-cwd,
+non-sensitive, no `..`/absolute), it can read **any file under any registered
+skill directory**:
+
+1. `<cwd>/.agents/skills`
+2. `~/.agents/skills`
+3. `~/.scoot/skills`
+4. `extra_paths` declared in `[skills]`
+
+Each read is still confined to the matched skill's own directory (absolute
+paths, `..`, and symlinks that resolve outside that directory are rejected) and
+audited. The practical consequence for unattended/`readonly` runs: **only
+install skills you trust.** A tampered or malicious skill bundle can expose its
+own directory contents to the model even under `readonly` — this is part of the
+defined read boundary, not a bypass, so do not treat `readonly` as a sandbox
+against untrusted skills.
+
 ## Opt-in Hardening (guarded only)
 
 Two flags tighten `guarded` mode. Both default to `false` and apply **only in

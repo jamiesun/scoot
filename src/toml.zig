@@ -23,13 +23,53 @@ const Value = std.json.Value;
 const ObjectMap = std.json.ObjectMap;
 const Array = std.json.Array;
 
+/// 行内数组/表的最大嵌套深度：超出返回 error.InvalidToml，杜绝病态深嵌套导致的栈溢出（issue #44）。
+const max_nesting_depth: usize = 64;
+
 pub const Error = error{InvalidToml} || std.mem.Allocator.Error;
+
+/// 解析失败位置：供上层把不可读的 `error.InvalidToml` 转成「文件:行:列」可定位信息（issue #46）。
+pub const Diagnostic = struct {
+    /// 1 起行号。
+    line: usize,
+    /// 1 起列号（按字节）。
+    col: usize,
+    /// 出错处的字节偏移。
+    byte: usize,
+};
 
 /// 解析 TOML 文本，返回根表（Value.object）。畸形输入返回 error.InvalidToml。
 pub fn parse(arena: std.mem.Allocator, src: []const u8) Error!Value {
+    return parseDiag(arena, src, null);
+}
+
+/// 同 `parse`，但解析失败（InvalidToml）时把出错位置写入 `diag`（若提供），便于上层定位（issue #46）。
+pub fn parseDiag(arena: std.mem.Allocator, src: []const u8, diag: ?*Diagnostic) Error!Value {
     var p: Parser = .{ .src = src, .arena = arena, .root = .empty };
-    try p.run();
+    p.run() catch |err| {
+        if (err == error.InvalidToml) {
+            if (diag) |d| d.* = lineColAt(src, p.pos);
+        }
+        return err;
+    };
     return .{ .object = p.root };
+}
+
+/// 由字节偏移算出 1 起的行/列（用于解析失败定位）。
+fn lineColAt(src: []const u8, pos: usize) Diagnostic {
+    const clamped = if (pos > src.len) src.len else pos;
+    var line: usize = 1;
+    var col: usize = 1;
+    var i: usize = 0;
+    while (i < clamped) : (i += 1) {
+        if (src[i] == '\n') {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    return .{ .line = line, .col = col, .byte = clamped };
 }
 
 const Parser = struct {
@@ -41,6 +81,8 @@ const Parser = struct {
     cur_path: []const []const u8 = &.{},
     /// cur_path 末段是否为「表数组」（[[..]]）——是则插入目标为该数组的最后一个元素。
     cur_is_array_elem: bool = false,
+    /// 当前值解析的嵌套深度（行内数组/表）。防无界互递归导致栈溢出（issue #44）。
+    depth: usize = 0,
 
     fn run(self: *Parser) Error!void {
         while (true) {
@@ -224,8 +266,19 @@ const Parser = struct {
         const c = self.peek() orelse return error.InvalidToml;
         switch (c) {
             '"', '\'' => return .{ .string = try self.parseString() },
-            '[' => return self.parseArray(),
-            '{' => return self.parseInlineTable(),
+            '[' => {
+                // 行内数组/表的嵌套深度护栏：超限返回 InvalidToml 而非栈溢出（issue #44）。
+                if (self.depth >= max_nesting_depth) return error.InvalidToml;
+                self.depth += 1;
+                defer self.depth -= 1;
+                return self.parseArray();
+            },
+            '{' => {
+                if (self.depth >= max_nesting_depth) return error.InvalidToml;
+                self.depth += 1;
+                defer self.depth -= 1;
+                return self.parseInlineTable();
+            },
             't', 'f' => return self.parseBool(),
             '0'...'9', '+', '-' => return self.parseNumber(),
             else => return error.InvalidToml,
@@ -312,15 +365,18 @@ const Parser = struct {
     /// 调用时 self.pos 指向 'u'/'U'；返回时 pos 指向最后一个十六进制位（外层再 +1）。
     fn parseUnicodeEscape(self: *Parser, out: *std.ArrayList(u8), n: usize) Error!void {
         if (self.pos + n >= self.src.len) return error.InvalidToml;
-        var cp: u21 = 0;
+        // 用 u32 容纳 \U 的 8 位十六进制：u21 在累加时会静默丢高位，把越界码点截成错字符（issue #47）。
+        var cp: u32 = 0;
         var i: usize = 0;
         while (i < n) : (i += 1) {
             const hc = self.src[self.pos + 1 + i];
             const d = hexDigit(hc) orelse return error.InvalidToml;
             cp = (cp << 4) | d;
         }
+        // 越界（> U+10FFFF）或代理区（U+D800..U+DFFF）码点：明确拒绝，绝不静默产出错字符（issue #47）。
+        if (cp > 0x10FFFF or (cp >= 0xD800 and cp <= 0xDFFF)) return error.InvalidToml;
         var buf: [4]u8 = undefined;
-        const len = std.unicode.utf8Encode(cp, &buf) catch return error.InvalidToml;
+        const len = std.unicode.utf8Encode(@intCast(cp), &buf) catch return error.InvalidToml;
         try out.appendSlice(self.arena, buf[0..len]);
         self.pos += n; // 外层循环结束再 +1 吃掉最后一位
     }
@@ -413,8 +469,12 @@ const Parser = struct {
         const s = buf.items;
         if (s.len == 0) return error.InvalidToml;
 
-        // 中部出现 '-' （非首位）→ 日期，拒绝。
-        if (std.mem.indexOfScalarPos(u8, s, 1, '-')) |_| return error.InvalidToml;
+        // 中部出现 '-'（非首位、且非紧跟指数符 e/E）→ 视为日期，拒绝。
+        // 指数负号如 `1e-5` / `2.5e-10` 的 '-' 紧跟 e/E，属合法浮点，不在此拒绝（issue #43）。
+        var k: usize = 1;
+        while (k < s.len) : (k += 1) {
+            if (s[k] == '-' and s[k - 1] != 'e' and s[k - 1] != 'E') return error.InvalidToml;
+        }
 
         const is_float = std.mem.indexOfScalar(u8, s, '.') != null or
             std.mem.indexOfScalar(u8, s, 'e') != null or
@@ -584,4 +644,60 @@ test "toml: 畸形输入一律报错不 panic（防弹）" {
     for (bad) |s| {
         try std.testing.expectError(error.InvalidToml, parse(arena.allocator(), s));
     }
+}
+
+test "toml: 负指数浮点合法（issue #43）" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const src =
+        \\a = 1e-5
+        \\b = 2.5e-10
+        \\c = -3e-2
+        \\d = 1e+5
+        \\e = 6.022e23
+    ;
+    const v = try parse(arena.allocator(), src);
+    try std.testing.expectApproxEqRel(@as(f64, 1e-5), v.object.get("a").?.float, 1e-12);
+    try std.testing.expectApproxEqRel(@as(f64, 2.5e-10), v.object.get("b").?.float, 1e-12);
+    try std.testing.expectApproxEqRel(@as(f64, -3e-2), v.object.get("c").?.float, 1e-12);
+    try std.testing.expectApproxEqRel(@as(f64, 1e5), v.object.get("d").?.float, 1e-12);
+    try std.testing.expectApproxEqRel(@as(f64, 6.022e23), v.object.get("e").?.float, 1e-12);
+    // 真正的日期仍被拒绝。
+    try std.testing.expectError(error.InvalidToml, parse(arena.allocator(), "x = 1979-05-27"));
+}
+
+test "toml: 深嵌套不栈溢出，返回 InvalidToml（issue #44）" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const open_arrays = "[" ** 5000;
+    const src_arr = try std.fmt.allocPrint(arena.allocator(), "a = {s}", .{open_arrays});
+    try std.testing.expectError(error.InvalidToml, parse(arena.allocator(), src_arr));
+    // 行内表同理。
+    const tbl = "x={" ** 5000;
+    const src_tbl = try std.fmt.allocPrint(arena.allocator(), "a = {s}", .{tbl});
+    try std.testing.expectError(error.InvalidToml, parse(arena.allocator(), src_tbl));
+    // 合法的浅嵌套仍正常。
+    const ok = try parse(arena.allocator(), "a = [[1, 2], [3, 4]]");
+    try std.testing.expectEqual(@as(usize, 2), ok.object.get("a").?.array.items.len);
+}
+
+test "toml: 越界 unicode 转义被拒绝，不静默截断（issue #47）" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    // \U00200000 > U+10FFFF：必须报错，而非截断成 NUL 等错字符。
+    try std.testing.expectError(error.InvalidToml, parse(arena.allocator(), "s = \"\\U00200000\""));
+    // 代理区码点亦拒绝。
+    try std.testing.expectError(error.InvalidToml, parse(arena.allocator(), "s = \"\\uD800\""));
+    // 合法转义仍可用。
+    const v = try parse(arena.allocator(), "s = \"\\u00e9\\U0001F600\"");
+    try std.testing.expectEqualStrings("é😀", v.object.get("s").?.string);
+}
+
+test "toml: 解析失败带行列诊断（issue #46）" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const src = "a = 1\nb = 2\nc = @bad\n";
+    var diag: Diagnostic = undefined;
+    try std.testing.expectError(error.InvalidToml, parseDiag(arena.allocator(), src, &diag));
+    try std.testing.expectEqual(@as(usize, 3), diag.line);
 }

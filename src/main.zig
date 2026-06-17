@@ -217,12 +217,20 @@ pub fn main(init: std.process.Init) !void {
             },
             else => return err,
         };
-    const cfg = scoot.config.Config.loadFromDirs(arena, io, dirs) catch |err| switch (err) {
+    var load_report: scoot.config.LoadReport = .{};
+    const cfg = scoot.config.Config.loadFromDirs(arena, io, dirs, &load_report) catch |err| switch (err) {
         error.InvalidConfig => {
-            try out.print(
-                "error: 配置文件解析失败（TOML/JSON 语法或字段类型不符）。请检查 {s} 或 {s}\n",
-                .{ dirs.config_toml_file, dirs.config_file },
-            );
+            if (load_report.toml_diag) |d| {
+                try out.print(
+                    "error: 配置文件解析失败：{s}:{d}:{d}（第 {d} 字节附近的 TOML 语法错误）。\n",
+                    .{ dirs.config_toml_file, d.line, d.col, d.byte },
+                );
+            } else {
+                try out.print(
+                    "error: 配置文件解析失败（TOML/JSON 语法或字段类型不符）。请检查 {s} 或 {s}\n",
+                    .{ dirs.config_toml_file, dirs.config_file },
+                );
+            }
             die(out, 1);
         },
         else => {
@@ -233,6 +241,13 @@ pub fn main(init: std.process.Init) !void {
             die(out, 1);
         },
     };
+    // 未识别的配置键（拼写错误）会被静默回落默认，可能悄悄降低安全性（如把 policy 误写成 polcy 而落回 guarded）；
+    // 加载成功后统一告警到 stderr，避免污染 stdout（含 -e 可脚本输出，issue #45/#23）。
+    if (load_report.unknown_keys.len > 0) {
+        for (load_report.unknown_keys) |k|
+            err_out.print("warning: 配置含未识别的键 `{s}`，已忽略并回落默认值（请检查拼写）。\n", .{k}) catch {};
+        err_out.flush() catch {};
+    }
 
     cfg.dirs.ensure(io) catch |err| {
         try out.print("error: 无法创建运行目录（{s}）：{s}\n", .{ @errorName(err), cfg.dirs.home });

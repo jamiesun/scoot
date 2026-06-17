@@ -72,7 +72,8 @@ This is the core security property:
 - **Reading a skill is free.** The `skill` action is a native, read-only
   capability that **bypasses the execution policy by design**, so skills work
   even in `readonly` (where `bash` is denied). Reads are confined to the skill's
-  own directory (absolute paths and `..` are rejected), unknown names return a
+  own directory (absolute paths, `..`, and symlinks that resolve outside the
+  directory are rejected), unknown names return a
   recoverable observation, and every read is audited.
 - **Acting on a skill is gated.** Everything the skill then tells the model to
   *do* — run `bash`, write files, make network requests, execute `scripts/` —
