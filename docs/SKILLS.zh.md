@@ -28,7 +28,7 @@ my-skill/
 
 发现阶段只注入每个技能的 `name` + `description`（渐进式披露，保持上下文精简）。当某技能相关时，模型用原生 **`skill` 动作**读取它的 `SKILL.md`——`{"name":"<技能名>"}`（读技能目录内其它资源用 `{"name":"<技能名>","path":"references/x.md"}`）。
 
-读取技能是 agent 的**原生只读能力**，**不**受执行策略约束：即便在 `readonly` 档（该档会禁用 `bash`）下也能正常激活。读取被收口在该技能自身目录内（拒绝绝对路径与 `..` 逃逸），并照常被审计为 tool call。
+读取技能是 agent 的**原生只读能力**，**不**受执行策略约束：即便在 `readonly` 档（该档会禁用 `bash`）下也能正常激活。读取被收口在该技能自身目录内（拒绝绝对路径、`..` 逃逸，以及解析后落在技能目录之外的 symlink），并照常被审计为 tool call。
 
 ## Front Matter
 
@@ -84,3 +84,14 @@ scoot skills pack path/to/my-skill my-skill.scoot-skill.tar
 skill 元数据只是声明。`allowed_tools` 用于给审查者说明预期工具使用范围，不授予权限。
 
 读取技能的指令与资源是原生只读能力，按设计绕过 policy gate（这样技能在 `readonly` 档下仍可用）。而技能随后让模型去**执行**的一切——`bash`、写文件、网络请求、运行 `scripts/`——仍经过与普通模型工具调用相同的全局 policy 检查。读取技能免门，执行技能受门。
+
+### 这对 `readonly` 读取面意味着什么
+
+`readonly` 通常通过 `policy.evaluateReadPath` 把读取收口在项目工作目录内（禁绝对路径、禁 `..`、禁常见敏感路径片段）。`skill` 动作是唯一的有意例外：因为它豁免于 policy，它可以读取**任意已注册技能目录下的文件**，这是在 `evaluateReadPath` 把关的项目内读取之外额外放开的一块。已注册的技能目录即上文的四个搜索根：
+
+1. `<cwd>/.agents/skills`
+2. `~/.agents/skills`
+3. `~/.scoot/skills`
+4. config 中 `[skills]` 声明的 `extra_paths`
+
+通过 `skill` 动作的读取仍被收口在命中的那个技能自身目录内（拒绝绝对路径、`..`，以及解析后逃逸该目录的 symlink）。对无人值守 / `readonly` 运行的现实含义：**只安装你信任的技能。** 被污染或恶意的技能包即便在 `readonly` 下也能把它自身目录的内容暴露给模型——这是读取边界的既定组成部分，而非绕过，因此不要把 `readonly` 当成对抗不可信技能的沙箱。

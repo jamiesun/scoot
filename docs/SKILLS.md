@@ -37,8 +37,9 @@ directory).
 
 Reading a skill is a native, read-only agent capability and is **not** subject
 to the execution policy: it works even in `readonly` mode (which otherwise
-blocks `bash`). Reads are confined to the skill's own directory (absolute paths
-and `..` escapes are rejected) and are still audited as tool calls.
+blocks `bash`). Reads are confined to the skill's own directory — absolute paths,
+`..` escapes, and symlinks that resolve outside the skill directory are all
+rejected — and are still audited as tool calls.
 
 ## Front Matter
 
@@ -105,3 +106,25 @@ and bypasses the policy gate by design (so skills remain usable in `readonly`).
 Everything a skill then tells the model to *do* — `bash`, file writes, network
 requests, running `scripts/` — still goes through the same global policy checks
 as ordinary model tool calls. Reading the skill is free; acting on it is gated.
+
+### What this means for the `readonly` read surface
+
+`readonly` normally confines reads to the project working directory via
+`policy.evaluateReadPath` (no absolute paths, no `..`, no common sensitive path
+fragments). The `skill` action is the one deliberate exception: because it is
+policy-exempt, it can read **any file under a registered skill directory**, in
+addition to the `evaluateReadPath`-gated project reads. The registered skill
+directories are the same four search roots listed above:
+
+1. `<cwd>/.agents/skills`
+2. `~/.agents/skills`
+3. `~/.scoot/skills`
+4. any `extra_paths` declared in `[skills]`
+
+Reads through the `skill` action remain confined to the matched skill's own
+directory (absolute paths, `..`, and symlinks resolving outside the directory are
+rejected). The practical implication for unattended / `readonly` runs: **only
+install skills you trust.** A malicious or compromised skill package can expose
+the contents of its own directory to the model even under `readonly` — this is an
+intended part of the read boundary, not a bypass, so do not treat `readonly` as a
+sandbox against untrusted skills.
