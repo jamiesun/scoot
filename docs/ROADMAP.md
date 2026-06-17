@@ -116,7 +116,7 @@ Scheduled jobs correct `guarded` to `readonly` at execution time because unatten
 
 ### Skills
 
-Skills are directories containing `SKILL.md`. Discovery reads only front matter (`name`, `description`) and injects a compact manifest into the system context. Full skill instructions are loaded only when relevant.
+Skills are directories containing `SKILL.md`. Discovery reads front matter (`name`, `description`, and optional review metadata such as `capabilities`, `allowed_tools`, and `scope`) and injects a compact manifest into the system context. Full skill instructions are loaded only when relevant.
 
 Skills do not bypass policy or the tool sandbox.
 

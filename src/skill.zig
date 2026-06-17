@@ -3,7 +3,7 @@
 //!
 //! 一个 Skill 就是一个目录：
 //!   <skill>/
-//!     SKILL.md       必需：YAML front-matter(name, description) + Markdown 正文指令
+//!     SKILL.md       必需：YAML front-matter(name, description, optional metadata) + Markdown 正文指令
 //!     scripts/       可选：脚本等资源（被调用时同样经统一 bash 沙盒，受策略门 + 硬超时约束）
 //!     references/    可选：按需加载的参考资料
 //!
@@ -17,9 +17,8 @@
 //!
 //! 设计取舍（反过载）：激活走「模型用 bash cat SKILL.md」而非新增专用 action，
 //!   省掉了运行时动态 schema 与新分支，保持单体简洁；读取本身即被审计为 tool_call，
-//!   可追溯性不打折。per-skill `allowed_tools` 工具白名单是预留格式字段——当前仅 bash
-//!   一个工具，做白名单即过载设计；待 file/http/search 工具落地后再按需启用，届时由
-//!   `allowsTool` 收口，现在不引入死字段。
+//!   可追溯性不打折。per-skill `capabilities` / `allowed_tools` / `scope` 是审查声明，
+//!   不授予任何额外权限；真正执行仍由全局 policy gate 决定。
 const std = @import("std");
 
 /// 读取单个 SKILL.md 的大小上限：1 MiB（指令文件实际仅几 KiB，留足冗余防失控）。
@@ -34,12 +33,21 @@ pub const Skill = struct {
     description: []const u8,
     /// 技能目录路径；其下的 SKILL.md 即完整指令。
     dir: []const u8,
+    /// 可选审查声明：skill 提供的能力类型（逗号或内联列表形式）。
+    capabilities: []const u8 = "",
+    /// 可选审查声明：skill 预期会用到的工具动作（不授予权限）。
+    allowed_tools: []const u8 = "",
+    /// 可选审查声明：文档适用范围。
+    scope: []const u8 = "",
 };
 
 /// front-matter 解析结果：借用源文本的切片，无分配（纯函数，便于防弹测试）。
 pub const Meta = struct {
     name: []const u8,
     description: []const u8,
+    capabilities: []const u8 = "",
+    allowed_tools: []const u8 = "",
+    scope: []const u8 = "",
     compatibility_key: []const u8 = "",
     compatibility: []const u8 = "",
 };
@@ -49,7 +57,7 @@ pub const Validation = union(enum) {
     invalid: []const u8,
 };
 
-/// 解析 SKILL.md 的 YAML front-matter，仅提取 name / description 及兼容性声明。
+/// 解析 SKILL.md 的 YAML front-matter，仅提取 Scoot 关心的轻量元数据。
 /// 返回 null 表示「没有合法 front-matter 或缺 name」——该目录不是 skill，调用方应跳过。
 /// 返回的切片借用 `src`，调用方需在使用期间保证 `src` 存活。
 /// 防弹：任意非法/截断输入只会得到 null，绝不越界或 panic。
@@ -59,6 +67,9 @@ pub fn parseFrontMatter(src: []const u8) ?Meta {
 
     var name: []const u8 = "";
     var description: []const u8 = "";
+    var capabilities: []const u8 = "";
+    var allowed_tools: []const u8 = "";
+    var scope: []const u8 = "";
     var compatibility_key: []const u8 = "";
     var compatibility: []const u8 = "";
     var closed = false;
@@ -77,6 +88,12 @@ pub fn parseFrontMatter(src: []const u8) ?Meta {
             name = val;
         } else if (std.ascii.eqlIgnoreCase(key, "description")) {
             description = val;
+        } else if (std.ascii.eqlIgnoreCase(key, "capabilities")) {
+            capabilities = val;
+        } else if (std.ascii.eqlIgnoreCase(key, "allowed_tools")) {
+            allowed_tools = val;
+        } else if (std.ascii.eqlIgnoreCase(key, "scope")) {
+            scope = val;
         } else if (std.ascii.eqlIgnoreCase(key, "scoot_version") or
             std.ascii.eqlIgnoreCase(key, "compatibility") or
             std.ascii.eqlIgnoreCase(key, "requires_scoot"))
@@ -91,6 +108,9 @@ pub fn parseFrontMatter(src: []const u8) ?Meta {
     return .{
         .name = name,
         .description = description,
+        .capabilities = capabilities,
+        .allowed_tools = allowed_tools,
+        .scope = scope,
         .compatibility_key = compatibility_key,
         .compatibility = compatibility,
     };
@@ -113,6 +133,9 @@ pub fn validateDir(arena: std.mem.Allocator, io: std.Io, dir: []const u8) !Valid
     if (meta.description.len == 0) return .{
         .invalid = "description is required",
     };
+    if (validateCapabilities(arena, meta.capabilities)) |msg| return .{ .invalid = msg };
+    if (validateAllowedTools(arena, meta.allowed_tools)) |msg| return .{ .invalid = msg };
+    if (validateScope(meta.scope)) |msg| return .{ .invalid = msg };
     if (meta.compatibility_key.len != 0) return .{
         .invalid = try std.fmt.allocPrint(
             arena,
@@ -121,6 +144,81 @@ pub fn validateDir(arena: std.mem.Allocator, io: std.Io, dir: []const u8) !Valid
         ),
     };
     return .{ .valid = meta };
+}
+
+pub fn parseInlineList(arena: std.mem.Allocator, raw: []const u8) ![]const []const u8 {
+    var s = std.mem.trim(u8, raw, " \t\r\n");
+    if (s.len == 0) return &.{};
+    if (s[0] == '[') {
+        if (s.len < 2 or s[s.len - 1] != ']') return error.InvalidSkillList;
+        s = std.mem.trim(u8, s[1 .. s.len - 1], " \t\r\n");
+    }
+    if (s.len == 0) return &.{};
+
+    var items: std.ArrayList([]const u8) = .empty;
+    var parts = std.mem.splitScalar(u8, s, ',');
+    while (parts.next()) |part| {
+        const item = stripQuotes(std.mem.trim(u8, part, " \t\r\n"));
+        if (item.len == 0) return error.InvalidSkillList;
+        try items.append(arena, item);
+    }
+    return items.items;
+}
+
+fn validateCapabilities(arena: std.mem.Allocator, raw: []const u8) ?[]const u8 {
+    const items = parseInlineList(arena, raw) catch return "capabilities must be an inline list such as [instructions, scripts]";
+    for (items) |item| {
+        if (std.mem.eql(u8, item, "instructions") or
+            std.mem.eql(u8, item, "scripts") or
+            std.mem.eql(u8, item, "references"))
+        {
+            continue;
+        }
+        return std.fmt.allocPrint(
+            arena,
+            "unsupported capability `{s}`; use instructions, scripts, or references",
+            .{item},
+        ) catch "unsupported capability";
+    }
+    return null;
+}
+
+fn validateAllowedTools(arena: std.mem.Allocator, raw: []const u8) ?[]const u8 {
+    const items = parseInlineList(arena, raw) catch return "allowed_tools must be an inline list such as [file_read, grep]";
+    for (items) |item| {
+        if (isKnownToolAction(item)) continue;
+        return std.fmt.allocPrint(
+            arena,
+            "unknown allowed_tools entry `{s}`; use known tool action names",
+            .{item},
+        ) catch "unknown allowed_tools entry";
+    }
+    return null;
+}
+
+fn validateScope(raw: []const u8) ?[]const u8 {
+    const scope = stripQuotes(std.mem.trim(u8, raw, " \t\r\n"));
+    if (scope.len == 0) return null;
+    if (std.mem.eql(u8, scope, "general") or
+        std.mem.eql(u8, scope, "project") or
+        std.mem.eql(u8, scope, "repository") or
+        std.mem.eql(u8, scope, "domain") or
+        std.mem.eql(u8, scope, "workflow"))
+    {
+        return null;
+    }
+    return "scope must be one of: general, project, repository, domain, workflow";
+}
+
+fn isKnownToolAction(name: []const u8) bool {
+    return std.mem.eql(u8, name, "bash") or
+        std.mem.eql(u8, name, "file_read") or
+        std.mem.eql(u8, name, "file_write") or
+        std.mem.eql(u8, name, "file_edit") or
+        std.mem.eql(u8, name, "grep") or
+        std.mem.eql(u8, name, "glob") or
+        std.mem.eql(u8, name, "http_request") or
+        std.mem.eql(u8, name, "parallel");
 }
 
 pub fn isValidName(name: []const u8) bool {
@@ -187,9 +285,22 @@ pub const Registry = struct {
             errdefer gpa.free(name);
             const desc = try gpa.dupe(u8, meta.description);
             errdefer gpa.free(desc);
+            const capabilities = try gpa.dupe(u8, meta.capabilities);
+            errdefer gpa.free(capabilities);
+            const allowed_tools = try gpa.dupe(u8, meta.allowed_tools);
+            errdefer gpa.free(allowed_tools);
+            const scope = try gpa.dupe(u8, meta.scope);
+            errdefer gpa.free(scope);
             const skill_dir = try std.fs.path.join(gpa, &.{ path, entry.name });
             errdefer gpa.free(skill_dir);
-            try self.skills.append(gpa, .{ .name = name, .description = desc, .dir = skill_dir });
+            try self.skills.append(gpa, .{
+                .name = name,
+                .description = desc,
+                .dir = skill_dir,
+                .capabilities = capabilities,
+                .allowed_tools = allowed_tools,
+                .scope = scope,
+            });
         }
     }
 
@@ -237,6 +348,9 @@ pub const Registry = struct {
             gpa.free(s.name);
             gpa.free(s.description);
             gpa.free(s.dir);
+            gpa.free(s.capabilities);
+            gpa.free(s.allowed_tools);
+            gpa.free(s.scope);
         }
         self.skills.deinit(gpa);
     }
@@ -260,7 +374,9 @@ test "parseFrontMatter: 去引号 + 忽略未知键 + 冒号在值中" {
     const src =
         \\---
         \\name: "deploy"
-        \\allowed_tools: [bash, file]
+        \\capabilities: [instructions, scripts]
+        \\allowed_tools: [bash, file_read]
+        \\scope: workflow
         \\description: '比例 a:b 的部署助手'
         \\extra: 忽略我
         \\---
@@ -269,6 +385,9 @@ test "parseFrontMatter: 去引号 + 忽略未知键 + 冒号在值中" {
     const m = parseFrontMatter(src) orelse return error.TestUnexpectedNull;
     try std.testing.expectEqualStrings("deploy", m.name);
     try std.testing.expectEqualStrings("比例 a:b 的部署助手", m.description);
+    try std.testing.expectEqualStrings("[instructions, scripts]", m.capabilities);
+    try std.testing.expectEqualStrings("[bash, file_read]", m.allowed_tools);
+    try std.testing.expectEqualStrings("workflow", m.scope);
 }
 
 test "parseFrontMatter: 识别兼容性声明供校验阶段拒绝" {
@@ -373,7 +492,7 @@ test "validateDir: 接受最小合法 skill 目录" {
     try cwd.createDirPath(io, root);
     try cwd.writeFile(io, .{
         .sub_path = root ++ "/SKILL.md",
-        .data = "---\nname: good-skill\ndescription: A valid local skill.\n---\n# Good\n",
+        .data = "---\nname: good-skill\ndescription: A valid local skill.\ncapabilities: [instructions, references]\nallowed_tools: [file_read, grep, glob]\nscope: workflow\n---\n# Good\n",
     });
 
     var arena: std.heap.ArenaAllocator = .init(gpa);
@@ -384,9 +503,12 @@ test "validateDir: 接受最小合法 skill 目录" {
         .invalid => return error.TestUnexpectedResult,
     };
     try std.testing.expectEqualStrings("good-skill", meta.name);
+    try std.testing.expectEqualStrings("[instructions, references]", meta.capabilities);
+    try std.testing.expectEqualStrings("[file_read, grep, glob]", meta.allowed_tools);
+    try std.testing.expectEqualStrings("workflow", meta.scope);
 }
 
-test "validateDir: 拒绝缺失 description、非法 name 与兼容性声明" {
+test "validateDir: 拒绝缺失 description、非法 name、非法元数据与兼容性声明" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     const cwd = std.Io.Dir.cwd();
@@ -409,6 +531,21 @@ test "validateDir: 拒绝缺失 description、非法 name 与兼容性声明" {
         .sub_path = root ++ "/future/SKILL.md",
         .data = "---\nname: future\ndescription: Future gate.\nscoot_version: \">=1.0.0\"\n---\n# Future\n",
     });
+    try cwd.createDirPath(io, root ++ "/bad_tool");
+    try cwd.writeFile(io, .{
+        .sub_path = root ++ "/bad_tool/SKILL.md",
+        .data = "---\nname: bad-tool\ndescription: Bad tool.\nallowed_tools: [telepathy]\n---\n# Bad\n",
+    });
+    try cwd.createDirPath(io, root ++ "/bad_capability");
+    try cwd.writeFile(io, .{
+        .sub_path = root ++ "/bad_capability/SKILL.md",
+        .data = "---\nname: bad-cap\ndescription: Bad capability.\ncapabilities: [network]\n---\n# Bad\n",
+    });
+    try cwd.createDirPath(io, root ++ "/bad_scope");
+    try cwd.writeFile(io, .{
+        .sub_path = root ++ "/bad_scope/SKILL.md",
+        .data = "---\nname: bad-scope\ndescription: Bad scope.\nscope: universal\n---\n# Bad\n",
+    });
 
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
@@ -429,6 +566,24 @@ test "validateDir: 拒绝缺失 description、非法 name 与兼容性声明" {
     switch (future) {
         .valid => return error.TestUnexpectedResult,
         .invalid => |msg| try std.testing.expect(std.mem.indexOf(u8, msg, "unsupported compatibility") != null),
+    }
+
+    const bad_tool = try validateDir(arena.allocator(), io, root ++ "/bad_tool");
+    switch (bad_tool) {
+        .valid => return error.TestUnexpectedResult,
+        .invalid => |msg| try std.testing.expect(std.mem.indexOf(u8, msg, "unknown allowed_tools") != null),
+    }
+
+    const bad_capability = try validateDir(arena.allocator(), io, root ++ "/bad_capability");
+    switch (bad_capability) {
+        .valid => return error.TestUnexpectedResult,
+        .invalid => |msg| try std.testing.expect(std.mem.indexOf(u8, msg, "unsupported capability") != null),
+    }
+
+    const bad_scope = try validateDir(arena.allocator(), io, root ++ "/bad_scope");
+    switch (bad_scope) {
+        .valid => return error.TestUnexpectedResult,
+        .invalid => |msg| try std.testing.expect(std.mem.indexOf(u8, msg, "scope must") != null),
     }
 }
 

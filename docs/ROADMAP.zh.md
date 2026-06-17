@@ -83,7 +83,7 @@ Scoot 是一个运行在纯文本环境下的轻量级 AI Agent 守护进程（D
   一段有边界交互（REPL 对话 / `-e` 调用 / 被调度的 job）的消息流。承载在长寿命分配器上，使对话历史跨越认知回合的 per-turn arena 重置依然存活。内存记录（追加即复制副本）、JSONL 序列化与追加落盘（`state/sessions/<id>.jsonl`）均已实现并有测试（`src/session.zig`）。**跨会话的长期记忆不在此实现**——交由 Skill 机制（知识注入）或 `state/` 纯文本摘要 + 文件工具承载，避免引入向量库等重依赖而撞穿铁律。
 
 - **✅ Skill 机制（Skill Engine）— 必备能力**
-  以目录形式挂载"能力 + 指令集"，从 `~/.scoot/skills`（及配置的额外路径）发现、按需加载。`src/skill.zig` 已实现渐进式披露：遍历各路径子目录、**防弹解析** `SKILL.md` 的 YAML front-matter（name/description，任意截断/畸形输入只得 null 绝不 panic）、按名去重建轻量索引；清单（name+描述+路径）注入 system 上下文，模型判断相关时**用既有 bash 工具读取正文激活**（正文绝不预注入，上下文恒定轻量），脚本经统一沙盒执行不获特权。`scoot skills` 可列出已发现技能。含单测 + 端到端冒烟（清单进入请求体、cat 激活取回正文 sentinel）。🚧 per-skill `allowed_tools` 白名单为预留格式字段，待按需启用 `allowsTool`。
+  以目录形式挂载"能力 + 指令集"，从 `~/.scoot/skills`（及配置的额外路径）发现、按需加载。`src/skill.zig` 已实现渐进式披露：遍历各路径子目录、**防弹解析** `SKILL.md` 的 YAML front-matter（name/description 及可选 `capabilities` / `allowed_tools` / `scope` 审查元数据，任意截断/畸形输入只得 null 绝不 panic）、按名去重建轻量索引；清单（name+描述+路径）注入 system 上下文，模型判断相关时**用既有 bash 工具读取正文激活**（正文绝不预注入，上下文恒定轻量），脚本经统一沙盒执行不获特权。`scoot skills` 可列出已发现技能，`scoot skills check/pack` 可校验和导出审查 manifest。skill 元数据仅供审查，不授予权限，真正执行仍由全局 policy gate 决定。
 
 - **🧱🚧 运行目录与配置（Runtime & Config）**
   统一运行目录 `~/.scoot/`（`SCOOT_HOME` 可覆盖），含 `config.toml`（或 `config.json`）/ `token` / `skills/` / `logs/` / `state/`。结构化配置（backend / agent / tools / skills / audit / schedule）见 `src/config.zig`；路径解析、`scoot config` 命令、配置文件加载（**TOML 优先、JSON 回落**：自研零依赖 TOML 子集解析→`std.json.Value`，复用 std.json 按节合并——缺省回落默认、未知字段忽略、畸形配置清晰报错）、启动时幂等建目录树（`paths.ensure`）均已可用。🚧 目录权限收紧（home 0700 / token 0600 的 mkdir 强制）仍用系统默认权限，待硬化（非阻断）。
