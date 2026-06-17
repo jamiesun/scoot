@@ -32,6 +32,20 @@ pub const Decision = union(enum) {
     deny: []const u8,
 };
 
+const sensitive_path_fragments = [_][]const u8{
+    ".env",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    ".ssh",
+    ".gnupg",
+    "id_rsa",
+    "id_ed25519",
+    "credentials",
+    "secret",
+    "token",
+};
+
 /// 灾难性命令绊线：不可逆 / 摧毁性 / 远程代码执行类的归一化子串。
 /// 这些在 guarded 与 readonly 下一律拦截。清单刻意从紧，宁缺毋滥。
 const catastrophic_patterns = [_][]const u8{
@@ -120,6 +134,37 @@ pub fn evaluateTool(cap: Capability, mode: Mode) Decision {
             .net_write => .{ .deny = "只读模式禁止可变更远端状态的网络请求（仅允许 GET/HEAD）" },
         },
     };
+}
+
+/// 校验 readonly 下本地读取路径是否留在当前项目工作目录内。
+/// 当前 Scoot 尚无一等 project-dir 概念，因此把进程 cwd 视为项目根：
+///   - 禁绝对路径，防 `/etc/passwd` 等系统读取；
+///   - 禁 `..` 组件，防逃逸 cwd；
+///   - 禁常见敏感文件 / 目录片段，降低误读 token、.env、SSH key 的风险。
+/// guarded / unrestricted 不在这里收紧，仍由调用者审计和用户监督。
+pub fn evaluateReadPath(path: []const u8, mode: Mode) Decision {
+    if (mode != .readonly) return .allow;
+    const p = std.mem.trim(u8, path, " \t\r\n");
+    if (p.len == 0) return .{ .deny = "只读模式禁止空路径" };
+    if (std.fs.path.isAbsolute(p)) return .{ .deny = "只读模式禁止读取绝对路径；请使用项目内相对路径" };
+    if (p[0] == '~' or std.mem.indexOfScalar(u8, p, '$') != null)
+        return .{ .deny = "只读模式禁止 shell 风格路径展开" };
+
+    var it = std.mem.tokenizeAny(u8, p, "/\\");
+    while (it.next()) |part| {
+        if (std.mem.eql(u8, part, ".."))
+            return .{ .deny = "只读模式禁止通过 .. 逃逸项目目录" };
+        if (isSensitivePathPart(part))
+            return .{ .deny = "只读模式拒绝读取常见敏感路径片段" };
+    }
+    return .allow;
+}
+
+fn isSensitivePathPart(part: []const u8) bool {
+    for (sensitive_path_fragments) |frag| {
+        if (std.mem.indexOf(u8, part, frag) != null) return true;
+    }
+    return false;
 }
 
 /// 空白折叠为单空格并转小写。命令长度上限防止 DoS（远超任何合法命令）。
@@ -264,6 +309,40 @@ test "evaluateTool：guarded / unrestricted 放行各类内建工具" {
             try testing.expectEqual(Decision.allow, evaluateTool(c, m));
         }
     }
+}
+
+test "evaluateReadPath：readonly 只允许项目内相对非敏感路径" {
+    try testing.expectEqual(Decision.allow, evaluateReadPath("README.md", .readonly));
+    try testing.expectEqual(Decision.allow, evaluateReadPath("src/main.zig", .readonly));
+    try testing.expectEqual(Decision.allow, evaluateReadPath("docs/ROADMAP.md", .readonly));
+
+    const denied = [_][]const u8{
+        "/etc/passwd",
+        "../outside.txt",
+        "src/../../outside.txt",
+        "~/.ssh/id_rsa",
+        "$HOME/.ssh/id_rsa",
+        ".env",
+        ".env.local",
+        ".ssh/id_ed25519",
+        "config/token",
+        "credentials.json",
+        "secret.toml",
+    };
+    for (denied) |p| {
+        switch (evaluateReadPath(p, .readonly)) {
+            .deny => {},
+            .allow => {
+                std.debug.print("readonly path 应拒绝却放行: {s}\n", .{p});
+                return error.ShouldHaveDenied;
+            },
+        }
+    }
+}
+
+test "evaluateReadPath：guarded / unrestricted 不限制路径，由外层审计承接" {
+    try testing.expectEqual(Decision.allow, evaluateReadPath("/etc/passwd", .guarded));
+    try testing.expectEqual(Decision.allow, evaluateReadPath("../outside.txt", .unrestricted));
 }
 
 test {

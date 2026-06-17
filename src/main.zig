@@ -322,6 +322,9 @@ const PolicyHttpArgs = struct {
     method: []const u8 = "GET",
     body: ?[]const u8 = null,
 };
+const PolicyFileReadArgs = struct { path: []const u8 };
+const PolicyGrepArgs = struct { pattern: []const u8, path: []const u8 };
+const PolicyGlobArgs = struct { pattern: []const u8, root: []const u8 = "." };
 
 fn policyDecisionForAction(
     arena: std.mem.Allocator,
@@ -331,7 +334,9 @@ fn policyDecisionForAction(
 ) scoot.policy.Decision {
     return switch (action) {
         .bash => scoot.policy.evaluate(arena, input, mode),
-        .file_read, .grep, .glob => scoot.policy.evaluateTool(.read, mode),
+        .file_read => policyDecisionForReadPath(PolicyFileReadArgs, arena, mode, input, "file_read", "path"),
+        .grep => policyDecisionForReadPath(PolicyGrepArgs, arena, mode, input, "grep", "path"),
+        .glob => policyDecisionForGlob(arena, mode, input),
         .file_write, .file_edit => scoot.policy.evaluateTool(.write, mode),
         .http_request => blk: {
             const args = std.json.parseFromSliceLeaky(PolicyHttpArgs, arena, input, .{
@@ -343,6 +348,44 @@ fn policyDecisionForAction(
         },
         .final => .{ .deny = "final 不是可执行工具动作" },
     };
+}
+
+fn policyDecisionForReadPath(
+    comptime T: type,
+    arena: std.mem.Allocator,
+    mode: scoot.policy.Mode,
+    input: []const u8,
+    comptime action_name: []const u8,
+    comptime field_name: []const u8,
+) scoot.policy.Decision {
+    const base = scoot.policy.evaluateTool(.read, mode);
+    switch (base) {
+        .deny => return base,
+        .allow => {},
+    }
+    if (mode != .readonly) return .allow;
+    const args = std.json.parseFromSliceLeaky(T, arena, input, .{
+        .ignore_unknown_fields = true,
+    }) catch return .{ .deny = "只读模式无法解析 " ++ action_name ++ " 路径，已拒绝" };
+    return scoot.policy.evaluateReadPath(@field(args, field_name), mode);
+}
+
+fn policyDecisionForGlob(arena: std.mem.Allocator, mode: scoot.policy.Mode, input: []const u8) scoot.policy.Decision {
+    const base = scoot.policy.evaluateTool(.read, mode);
+    switch (base) {
+        .deny => return base,
+        .allow => {},
+    }
+    if (mode != .readonly) return .allow;
+    const args = std.json.parseFromSliceLeaky(PolicyGlobArgs, arena, input, .{
+        .ignore_unknown_fields = true,
+    }) catch return .{ .deny = "只读模式无法解析 glob 参数，已拒绝" };
+    const root_decision = scoot.policy.evaluateReadPath(args.root, mode);
+    switch (root_decision) {
+        .deny => return root_decision,
+        .allow => {},
+    }
+    return scoot.policy.evaluateReadPath(args.pattern, mode);
 }
 
 const Doctor = struct {
@@ -1016,6 +1059,18 @@ test "policyDecisionForAction: 复用工具策略语义" {
     switch (policyDecisionForAction(arena, .readonly, .file_read, "{\"path\":\"README.md\"}")) {
         .allow => {},
         .deny => return error.ExpectedAllow,
+    }
+    switch (policyDecisionForAction(arena, .readonly, .file_read, "{\"path\":\"/etc/passwd\"}")) {
+        .deny => {},
+        .allow => return error.ExpectedDeny,
+    }
+    switch (policyDecisionForAction(arena, .readonly, .glob, "{\"pattern\":\"**/*.zig\",\"root\":\".\"}")) {
+        .allow => {},
+        .deny => return error.ExpectedAllow,
+    }
+    switch (policyDecisionForAction(arena, .readonly, .glob, "{\"pattern\":\"**/*\",\"root\":\"..\"}")) {
+        .deny => {},
+        .allow => return error.ExpectedDeny,
     }
     switch (policyDecisionForAction(arena, .readonly, .file_write, "{\"path\":\"x\",\"content\":\"y\"}")) {
         .deny => {},
