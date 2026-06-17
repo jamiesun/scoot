@@ -1,0 +1,105 @@
+# Scoot sample configuration.
+#
+# Copy this file to ~/.scoot/config.toml, or put it under the directory
+# pointed to by SCOOT_HOME as config.toml.
+#
+# Loading order: config.toml first, then config.json. Missing sections or
+# fields fall back to built-in defaults. Unknown fields are ignored.
+# Keep secrets out of this file; use api_key_env, api_key_file, or api_key_cmd.
+
+[backend]
+# OpenAI-compatible chat/completions endpoint.
+# Default local Ollama-compatible endpoint:
+base_url = "http://127.0.0.1:11434/v1"
+
+# Model name sent to the backend.
+model = "qwen2.5"
+
+# Environment variable used as the first API token source.
+# The value of this environment variable is never written back to disk.
+api_key_env = "OPENAI_API_KEY"
+
+# Optional token file path.
+# Omit this field to use ~/.scoot/token. If set, the file must be 0600.
+# api_key_file = "/Users/you/.config/scoot/token"
+
+# Optional command that prints a token, used after env and file sources.
+# Keep the command bounded and non-interactive.
+# api_key_cmd = "pass show openai"
+
+# Optional PEM CA bundle path for HTTPS backends and http_request.
+# Omit this field to scan system root certificates.
+# ca_file = "/etc/ssl/certs/ca-certificates.crt"
+
+# Optional extra request body fields merged into chat/completions JSON.
+# Omit the whole [backend.extra_body] table when no extra fields are needed.
+# Do not put secrets here. Do not override core fields like model/messages.
+#
+# [backend.extra_body]
+# service_tier = "priority"
+# reasoning_effort = "high"
+# top_p = 0.9
+
+[agent]
+# Maximum ReACT turns before the agent stops to avoid runaway loops.
+max_turns = 32
+
+# Default cognition mode. Supported today: "goal"; "plan" is reserved.
+default_mode = "goal"
+
+[tools]
+# Hard timeout for each tool call, in milliseconds.
+timeout_ms = 30000
+
+# Execution policy for interactive tool use:
+# - guarded: default; blocks catastrophic shell commands, allows ordinary work.
+# - readonly: fail-closed read-only mode; blocks writes and network mutations.
+# - unrestricted: no policy limit, still audited.
+# Alias: "yolo" is parsed as unrestricted. Unknown values fall back to guarded.
+policy = "guarded"
+
+[skills]
+# Enable local Skill discovery.
+enabled = true
+
+# Extra Skill search paths. ~/.scoot/skills is always included automatically.
+extra_paths = []
+# extra_paths = ["/opt/scoot/skills", "./skills"]
+
+[audit]
+# Audit verbosity: debug, info, warn, or error.
+level = "info"
+
+# Write audit logs under ~/.scoot/logs.
+to_file = true
+
+[schedule]
+# Enable unattended scheduled agent runs. Keep false unless explicitly needed.
+enabled = false
+
+# Scheduler polling interval in milliseconds.
+poll_ms = 1000
+
+# Scheduled jobs are optional. Each job needs exactly one trigger:
+# every_sec, at_unix, or cron. Cron is parsed but not supported yet, so it
+# never fires. Schedule jobs default to readonly mode; guarded is corrected to
+# readonly at execution time. Use unrestricted only with deliberate acceptance
+# of unattended write/network risk.
+
+# [[schedule.jobs]]
+# id = "disk-check"
+# goal = "Inspect disk usage and summarize anomalies"
+# every_sec = 300
+# mode = "readonly"
+
+# [[schedule.jobs]]
+# id = "morning"
+# goal = "Prepare today's task brief"
+# at_unix = 1893456000
+# mode = "readonly"
+
+# [[schedule.jobs]]
+# id = "future-cron-placeholder"
+# goal = "This job will not fire until cron support is implemented"
+# cron = "0 9 * * *"
+# mode = "readonly"
