@@ -61,6 +61,8 @@ zig build run -- --version
 
 最小模板见 [docs/examples/skills/minimal/SKILL.md](examples/skills/minimal/SKILL.md)。
 
+Agent 也可以使用有界 `parallel` 动作一次执行 1-4 个彼此独立的只读工具调用。观察结果按输入顺序返回，shell、写操作和嵌套 parallel 会被拒绝，每个子调用仍然经过正常 policy gate。
+
 ## 配置
 
 使用 `--scoot-home` 或 `SCOOT_HOME` 指定运行目录。`--scoot-home` 优先级高于环境变量。默认运行目录是 `~/.scoot`。
