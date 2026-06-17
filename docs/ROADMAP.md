@@ -109,7 +109,7 @@ Each action is validated, policy-checked, executed through the tool layer, audit
 Modes:
 
 - `guarded`: interactive tripwire mode; blocks catastrophic shell patterns.
-- `readonly`: fail-closed mode; allows read-only shell commands and read/net-read built-in capabilities.
+- `readonly`: fail-closed unattended mode; rejects shell and network, and allows only local read built-in capabilities.
 - `unrestricted`: no policy limit, still audited.
 
 Scheduled jobs correct `guarded` to `readonly` at execution time because unattended execution must not rely on a human tripwire.

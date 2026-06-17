@@ -1021,9 +1021,13 @@ test "policyDecisionForAction: 复用工具策略语义" {
         .deny => {},
         .allow => return error.ExpectedDeny,
     }
+    switch (policyDecisionForAction(arena, .readonly, .bash, "cat README.md")) {
+        .deny => {},
+        .allow => return error.ExpectedDeny,
+    }
     switch (policyDecisionForAction(arena, .readonly, .http_request, "{\"method\":\"GET\",\"url\":\"https://example.com\"}")) {
-        .allow => {},
-        .deny => return error.ExpectedAllow,
+        .deny => {},
+        .allow => return error.ExpectedDeny,
     }
     switch (policyDecisionForAction(arena, .readonly, .http_request, "{\"method\":\"POST\",\"url\":\"https://example.com\"}")) {
         .deny => {},
