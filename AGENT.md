@@ -1,117 +1,144 @@
 # AGENT.md
 
-面向在本仓库工作的 AI Agent 与贡献者的工程约定。**动手前先读这里，再读 [`ROADMAP.md`](./ROADMAP.md)。** ROADMAP 是事实来源与红线；本文件是落地时的操作手册。
+Engineering guidance for AI agents and contributors working in this repository.
 
-## 一句话项目定位
+Read this file before making changes. Then read the roadmap:
 
-Scoot 是用**纯 Zig（0.16.0+）**手搓的轻量级 AI Agent 守护进程（Daemon / CLI）。基调：轻量、无冗余、本地优先、防御性编程。**当前已落地北极星五大支柱**（均有测试守护，`zig build test` 全绿 112 项）：`scoot -e` 单次执行与默认 REPL 多轮交互跑完整 ReACT 闭环（结构化步骤 + 执行护栏 + 审计落盘）；**内建工具集自包含**（bash + file_read/write/edit + grep/glob + http_request，全部进程内实现、零外部命令依赖，可在裁剪/嵌入式 Linux 运行）；Skill 渐进式披露；Schedule 无人值守自主调度（强制 readonly 安全档）；密钥三来源安全管理。`grep -rn NotImplemented src` 现已无实现桩——新增能力时这是「扩展」而非「填空」。
+- English: [docs/ROADMAP.md](docs/ROADMAP.md)
+- Chinese: [docs/ROADMAP.zh.md](docs/ROADMAP.zh.md)
 
-## 常用命令
+The roadmap is the source of product intent and non-goals. This file is the implementation handbook.
+
+## Documentation Language Policy
+
+All project documentation updates must be synchronized in both English and Chinese.
+
+- Root documentation is English by default.
+- Chinese project documentation lives under `docs/` with `.zh.md` suffixes.
+- If you update `AGENT.md`, update [docs/AGENT.zh.md](docs/AGENT.zh.md).
+- If you update `README.md`, update [docs/README.zh.md](docs/README.zh.md).
+- If you update [docs/ROADMAP.md](docs/ROADMAP.md), update [docs/ROADMAP.zh.md](docs/ROADMAP.zh.md).
+- mdBook content under `book/en` and `book/zh` must stay consistent enough that navigation, scope, commands, and safety rules match across languages.
+
+## One-Line Project Positioning
+
+Scoot is a lightweight AI agent daemon and CLI written in pure Zig 0.16+. It is local-first, defensive, auditable, and intentionally small. Its core loop is ReACT: a model emits structured steps, Scoot validates them, applies execution policy, runs built-in tools, records audit events, and feeds observations back until a final answer is produced.
+
+The project already has the core pillars in place:
+
+- ReACT execution for `scoot -e` and the default REPL.
+- Built-in tools: `bash`, `file_read`, `file_write`, `file_edit`, `grep`, `glob`, and `http_request`.
+- Execution policy: `guarded`, `readonly`, and `unrestricted`.
+- Local skill discovery with progressive disclosure.
+- Scheduled unattended jobs with effective `readonly` mode by default.
+- Local config, sessions, audit logs, and secret loading from env/file/command.
+
+## Common Commands
 
 ```sh
-zig build            # 编译 → zig-out/bin/scoot（默认 Debug）
-zig build run -- ARGS   # 构建并运行（如 zig build run -- --version）
-zig build test       # 运行全部测试（提交前必跑）
-zig build -Doptimize=ReleaseSmall   # 校验轻量级单体二进制
-zig build -Doptimize=ReleaseSafe    # 嵌入式 / 生产部署推荐档（见下）
+zig build
+zig build run -- --version
+zig build test
+zig build -Doptimize=ReleaseSmall
+zig build -Doptimize=ReleaseSafe
 ```
 
-改动任何 `.zig` 后，至少跑通 `zig build` 与 `zig build test` 再交付。
+After changing any `.zig` file, run at least:
 
-**部署优化档（安全决策，非纯性能）**：嵌入式 / 生产部署推荐 **`ReleaseSafe`**——它保留整数溢出、越界、`unreachable` 等 safety check，触发时是**可被审计捕获的 panic**（与铁律 #4「绝不 panic」配套：结构性不可达一旦被破坏能立刻暴露，而非静默走错）。`ReleaseFast` 会把这些变成**静默未定义行为**，最危险的生产场景反而最不安全，**不推荐用于部署**。`ReleaseSafe` 档同样 112/112 测试通过。
+```sh
+zig build
+zig build test
+```
 
-## 代码地图
+For documentation:
 
-| 路径 | 职责 |
+```sh
+mdbook build book/en
+mdbook build book/zh
+mkdir -p site
+cp book/site-index.html site/index.html
+```
+
+## Code Map
+
+| Path | Responsibility |
 | --- | --- |
-| `src/main.zig` | CLI 入口：参数解析 → REPL / 单次执行 / 守护 / `config` |
-| `src/root.zig` | `scoot` 库模块根，再导出各子系统命名空间 |
-| `src/paths.zig` | 运行目录解析：`~/.scoot`（`SCOOT_HOME` 覆盖）及各子路径 |
-| `src/config.zig` | 结构化配置（backend / agent / tools / skills / audit）；TOML 优先 / JSON 回落 |
-| `src/toml.zig` | 自研零依赖 TOML 子集解析器（→ `std.json.Value`，复用 JSON 类型映射） |
-| `src/secret.zig` | 密钥管理：env → 文件(0600) → 凭证命令，脱敏 |
-| `src/llm.zig` | LLM 适配（仅 OpenAI `/v1/chat/completions`）：HTTP 往返 + 强制 json_schema/strict + 防弹解析 |
-| `src/jsonio.zig` | 共享 JSON 字符串转义（session / llm 复用） |
-| `src/skill.zig` | Skill 机制：发现 / 选择 / 按需加载（渐进式披露） |
-| `src/session.zig` | 会话：跨回合存活的消息流 + JSONL 序列化（短期记忆载体） |
-| `src/agent.zig` | 认知流引擎：多轮 ReACT 闭环（structured step + bash 工具）+ 每回合 ArenaAllocator，围绕 Session 运行 |
-| `src/schedule.zig` | 调度引擎：every / at（`cron` 暂不支持，恒判定不到点） |
-| `src/audit.zig` | 审计日志 |
-| `src/tools/*.zig` | 执行沙盒：bash / file / search / http |
-| `build.zig`, `build.zig.zon` | 构建与包清单 |
+| `src/main.zig` | CLI entrypoint: argument parsing, REPL, one-shot eval, config, skills, schedule |
+| `src/root.zig` | Library root and public subsystem exports |
+| `src/paths.zig` | Runtime directory resolution: `~/.scoot` or `SCOOT_HOME` |
+| `src/config.zig` | Structured config: backend, agent, tools, skills, audit, schedule |
+| `src/toml.zig` | Zero-dependency TOML subset parser |
+| `src/secret.zig` | Secret loading from env, 0600 token file, or credential command |
+| `src/llm.zig` | OpenAI-compatible `/v1/chat/completions` client with JSON schema output |
+| `src/jsonio.zig` | Shared JSON string escaping |
+| `src/skill.zig` | Skill discovery and progressive disclosure |
+| `src/session.zig` | Short-term session message storage and JSONL persistence |
+| `src/agent.zig` | ReACT loop, action parsing, tool execution, observation feedback |
+| `src/schedule.zig` | `every` and `at` schedule triggers; `cron` is intentionally not implemented yet |
+| `src/audit.zig` | JSONL audit events |
+| `src/policy.zig` | Execution policy gate |
+| `src/tools/*.zig` | Built-in tools and execution sandbox |
+| `build.zig`, `build.zig.zon` | Zig build graph and package manifest |
 
-新增子系统：在 `src/` 建文件，并在 `src/root.zig` 用 `pub const xxx = @import("xxx.zig");` 再导出，使其纳入测试图。
+When adding a subsystem, add a file under `src/` and export it from `src/root.zig` with `pub const name = @import("name.zig");` so it participates in the test graph.
 
-## Zig 0.16 关键习惯（容易踩错，务必遵守）
+## Zig 0.16 Habits
 
-本仓库用的是较新的 Zig，许多旧 API 已变化。**不要套用 0.11–0.14 的写法。**
+This repository targets Zig 0.16+. Do not copy old 0.11-0.14 idioms.
 
-- **入口签名**：`pub fn main(init: std.process.Init) !void`。不要用旧的 `pub fn main() !void` + `GeneralPurposeAllocator`。
-- **进程级分配器**：`const arena = init.arena.allocator();`（进程生命周期，适合“活到进程结束”的分配）。
-- **命令行参数**：`const args = try init.minimal.args.toSlice(arena);`，`args[0]` 是程序名。
-- **I/O 需要 `init.io`**。写 stdout：
+- Entrypoint: `pub fn main(init: std.process.Init) !void`.
+- Process allocator: `const arena = init.arena.allocator();`.
+- Args: `const args = try init.minimal.args.toSlice(arena);`.
+- I/O uses `init.io`; pass `std.Io` explicitly into filesystem and process helpers.
+- `std.ArrayList(T)` is unmanaged: initialize with `.empty`, and pass the allocator to methods.
+- Environment variables come from `init.environ_map.get("KEY")`.
+- Each module should include `test { std.testing.refAllDecls(@This()); }`.
 
-  ```zig
-  var buf: [4096]u8 = undefined;
-  var w: std.Io.File.Writer = .init(.stdout(), init.io, &buf);
-  const out = &w.interface;   // *std.Io.Writer
-  defer out.flush() catch {}; // 别忘了 flush
-  try out.print("...{s}\n", .{x});
-  ```
+## Memory Discipline
 
-  `std.debug.print` 走的是 **stderr**，仅用于调试。程序真正的输出走 stdout writer。
-- **`std.ArrayList(T)` 是 unmanaged**：初始化 `= .empty`，方法都要带分配器——`list.append(gpa, x)`、`list.deinit(gpa)`、`list.orderedRemove(i)`、`list.pop()`。
-- **环境变量**：`getEnvVarOwned` 已不存在。用 `init.environ_map.get("KEY")`（返回 `?[]const u8`，借用值，进程内有效）。类型为 `*std.process.Environ.Map`。需要把 env 传进子系统时，签名用 `env: *const std.process.Environ.Map`。
-- **文件系统是 `Io` 驱动的**：`std.fs.cwd()` 已移除，文件 / 目录操作走 `std.Io`。需要 I/O 的函数把 `io: std.Io` 显式传进去（即便当前是 stub，也按真实签名预留），路径字符串用 `std.fs.path.join(allocator, &.{...})` 拼。
-- **测试可见性**：每个文件用 `test { std.testing.refAllDecls(@This()); }` 强制编译并校验其声明。
+Long-running stability matters more than feature count.
 
-## 内存纪律（核心约束）
+- Use per-turn arenas for temporary ReACT work.
+- Keep session history in a longer-lived backing allocator.
+- Do not allocate per-turn JSON, request, or response scratch data in long-lived storage.
+- Add explicit `deinit` only where ownership is not naturally process-scoped or arena-scoped.
 
-服务于 ROADMAP「长效守护零泄漏」：
+## Runtime, Config, Secrets, And Skills
 
-- 每个推理回合在长寿命 backing 分配器之上派生一个局部 arena，**回合末整体释放**：
+- Runtime state belongs under `~/.scoot/`, or under `SCOOT_HOME` when overridden.
+- Config files are `config.toml` first, `config.json` second.
+- Never add inline plaintext API keys to config.
+- Secret priority is env, then 0600 token file, then credential command.
+- Skill directories contain `SKILL.md` with front matter. Discovery reads only name and description; full instructions are loaded only when relevant.
+- Skill scripts do not get special privileges. They must run through the same tool sandbox and policy gates as normal actions.
+- Sessions are short-term memory only. Do not introduce vector databases or long-term semantic memory without first revisiting the roadmap.
 
-  ```zig
-  var arena_state = std.heap.ArenaAllocator.init(backing);
-  defer arena_state.deinit();
-  const arena = arena_state.allocator();
-  ```
+## Hard Rules
 
-- 回合内的临时分配（消息组装、JSON 解析等）一律走该 arena，**不要**用 backing 分配器做回合内临时对象，避免常驻碎片。
-- 长寿命状态（调度任务表、配置）才用 backing/gpa，并配对 `deinit`。
+Changing these boundaries requires an explicit roadmap-level decision.
 
-## 运行目录 / 配置 / 密钥 / Skill 约定
+1. No GUI, web UI, tray app, or desktop app.
+2. Only OpenAI-compatible API shape is supported. Do not add provider-specific protocol glue.
+3. No complex cloud sync. State stays local.
+4. Never execute unvalidated model output.
+5. Do not trade the small single-binary design for feature count.
+6. Every subprocess and network path must have a hard timeout.
+7. Secrets must never be compiled in, committed, printed, or written to audit logs.
+8. Skills must not bypass the registered tool sandbox.
+9. Documentation changes must be bilingual.
 
-- **运行目录**：一切配置、密钥、技能、状态收敛在 `~/.scoot/`（`SCOOT_HOME` 可覆盖）。解析逻辑在 `src/paths.zig`；新写盘的东西放对应子目录（`config.toml`（或 `config.json`）/ `token` / `skills/` / `logs/` / `state/`），不要散落到别处或 `$HOME` 根下。`scoot config` 可打印解析结果。
-- **配置**：结构化分节（backend / agent / tools / skills / audit）在 `src/config.zig`，默认值即可用；加 JSON 加载时用 `std.json` 并与默认值合并，**不要**改默认值的含义。
-- **密钥**：解析在 `src/secret.zig`，优先级 env → 文件(0600) → 凭证命令。实现文件分支时**必须**先 `assertPrivate` 校验 0600，权限过宽要拒绝。任何日志 / 错误 / 审计输出 token 前先过 `secret.redact`。
-- **Skill**：机制在 `src/skill.zig`。坚持渐进式披露——发现阶段只读 front-matter（name+description），正文按需在 `activate` 时加载。skill 携带的脚本必须经 `src/tools/` 沙盒执行（带硬超时），不得新开绕过沙盒的执行路径。
-- **会话 / 记忆**：`src/session.zig` 持有单次交互的消息流，**用 backing/gpa 拥有**（追加时复制内容），使其跨回合存活——绝不把对话历史放进会被 `deinit` 的 per-turn arena。持久化用 JSONL 追加写到 `state/sessions/<id>.jsonl`（纯文本、可回溯）。**跨会话长期记忆不做成子系统**：用 Skill 注入知识或 `state/` 摘要文件 + 文件工具承载，不引入向量库 / embedding（撞「单体简洁」铁律）。
+## Extension Workflow
 
-## 红线（铁律，不得违反）
+1. Check [docs/ROADMAP.md](docs/ROADMAP.md) before adding capability.
+2. Identify whether the work extends an existing subsystem or needs a new one.
+3. Add focused tests with the smallest behavioral surface that proves the change.
+4. Validate inputs before executing external effects.
+5. Run `zig build` and `zig build test`.
+6. Update English and Chinese documentation together.
 
-违反前必须先回到 ROADMAP 与用户确认是否改边界：
+## Style
 
-1. **不引入图形界面**：只有 CLI + 配置文件。不写 Web UI / GUI / 托盘。
-2. **只对接 OpenAI 协议**：仅 `/v1/chat/completions`，强制 `response_format=json_schema` 与 tool calling `strict=true`。**不要**为 Anthropic / Google 等非 OpenAI 格式写胶水代码。
-3. **不搞复杂云端同步**：状态严格本地（`~/.scoot/`，SQLite 或纯文本）。不引入远程数据库、E2E 同步，不与特定网络栈强耦合。
-4. **绝不信任模型输出**：任何未经 Schema 校验的模型响应都不得直接执行；解析失败要包装成 System Error 回灌触发重试，**不准 panic**。
-5. **不为功能数量牺牲单体简洁**：不堆重型运行时、不做需要动态链接 / 加载原生代码的二进制插件体系。新增依赖前先问：它会破坏“单文件、零臃肿依赖”吗？（Skill 加载的是指令 + 数据 + 沙盒脚本，不是原生插件，不在此列。）
-6. **工具必须有硬超时**：任何子进程 / 网络调用超时即猎杀（SIGKILL 或等效）并记录，绝不让单个任务卡死拖垮主循环。
-7. **密钥零泄漏**：token 绝不编译进二进制、绝不内联进随仓库提交的配置、绝不打印进日志 / 审计 / 报错。不强依赖特定 OS 钥匙串；安全存储通过外部凭证命令接入。
-8. **Skill 不越权**：skill 不得绕过工具沙盒、不得自动联网拉取远程代码执行、不得获得超出已注册工具的能力。
-
-## 新增 / 扩展一个能力的推荐流程
-
-1. 在 ROADMAP 里确认这条能力服务于哪个目标画像 / 方向，是否触碰红线。
-2. 定位落点：扩展既有子系统（如给 `agent.zig` 加一个 `Action`、给某工具加分支）还是新建文件；核心逻辑已基本无 `error.NotImplemented` 桩，多数是「在既有结构上扩展」而非「填空」。
-3. 先写最小可用实现 + 对应 `test` 块；保持函数签名稳定，必要时再扩展。
-4. 防御式编码：先校验输入与模型输出，再执行；外部交互全部加超时。
-5. `zig build && zig build test` 通过后再交付。
-
-## 风格与提交
-
-- 只为需要解释的地方写注释；公共 API 用 `///` 文档注释说明意图与边界。
-- 注释 / 文档默认中文（与本仓库一致）。
-- 改动保持外科手术式：不顺手重构无关代码，不偷偷放宽红线。
-- 当代码与 ROADMAP / 本文件冲突时，以**可运行的代码与测试**为事实来源，并同步修订文档对应处。
+- Keep changes scoped. Do not refactor unrelated files.
+- Prefer existing local abstractions over new architecture.
+- Comments should explain intent and boundary, not restate obvious code.
+- If code and docs conflict, runnable code and tests are the immediate source of truth, then docs must be corrected in both languages.

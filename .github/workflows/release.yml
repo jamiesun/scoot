@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.asset }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - asset: linux-amd64
+            target: x86_64-linux-musl
+            cpu: ""
+          - asset: linux-arm64
+            target: aarch64-linux-musl
+            cpu: ""
+          - asset: linux-armv7
+            target: arm-linux-musleabihf
+            cpu: cortex_a7
+          - asset: macos-amd64
+            target: x86_64-macos
+            cpu: ""
+          - asset: macos-arm64
+            target: aarch64-macos
+            cpu: ""
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build ReleaseSafe
+        run: |
+          if [ -n "${{ matrix.cpu }}" ]; then
+            zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} -Dcpu=${{ matrix.cpu }}
+          else
+            zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }}
+          fi
+
+      - name: Create archive
+        id: package
+        run: |
+          version="${GITHUB_REF_NAME//\//-}"
+          artifact="scoot-${version}-${{ matrix.asset }}"
+          mkdir -p dist/scoot
+          cp zig-out/bin/scoot dist/scoot/
+          cp README.md config.example.toml dist/scoot/
+          cp -R docs dist/scoot/docs
+          tar -C dist -czf "${artifact}.tar.gz" scoot
+          sha256sum "${artifact}.tar.gz" > "${artifact}.tar.gz.sha256"
+          echo "archive=${artifact}.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "checksum=${artifact}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scoot-${{ matrix.asset }}
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.checksum }}
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.checksum }}

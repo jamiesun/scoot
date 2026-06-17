@@ -1,0 +1,17 @@
+[book]
+title = "Scoot Documentation"
+description = "Lightweight auditable AI agent daemon and CLI"
+authors = ["Scoot contributors"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "../../site/en"
+create-missing = false
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/jamiesun/scoot"
+additional-css = ["theme/language-switch.css"]
+additional-js = ["theme/language-switch.js"]
