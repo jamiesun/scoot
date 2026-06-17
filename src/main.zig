@@ -793,13 +793,19 @@ fn checkScheduleConfig(d: *Doctor, cfg: scoot.config.Config) !void {
         return;
     }
     var invalid: usize = 0;
+    var cron_unsupported: usize = 0;
     for (cfg.schedule.jobs) |job| {
-        if (job.toJob() == null) invalid += 1;
+        if (job.toJob()) |j| {
+            if (j.trigger == .cron) cron_unsupported += 1;
+        } else invalid += 1;
     }
-    if (invalid == 0) {
+    if (invalid == 0 and cron_unsupported == 0) {
         try d.ok("schedule.jobs", "all valid");
+    } else if (invalid == 0) {
+        // cron 触发器能解析但暂不支持，运行时会跳过——doctor 须如实示警（issue #25）。
+        try d.warn("schedule.jobs", "含 cron 触发器（暂不支持），运行时会跳过");
     } else {
-        try d.warn("schedule.jobs", "存在非法任务触发器，运行时会跳过");
+        try d.warn("schedule.jobs", "存在非法/不支持的任务触发器，运行时会跳过");
     }
 }
 
@@ -1230,6 +1236,13 @@ fn printSchedule(out: *Io.Writer, cfg: scoot.config.Config) !void {
     var tbuf: [128]u8 = undefined;
     for (sc.jobs) |jc| {
         if (jc.toJob()) |job| {
+            if (job.trigger == .cron) {
+                // cron 暂不支持：明确标记 INACTIVE，避免用户误以为它会按表运行（issue #25）。
+                try out.print("  - {s}  [{s}]  ⚠ INACTIVE（cron 暂不支持，不会运行）  goal={s}\n", .{
+                    jc.id, triggerLabel(&tbuf, job.trigger), job.goal,
+                });
+                continue;
+            }
             const eff = job.effectiveMode();
             const coerced = if (eff != job.mode) "（强制矫正）" else "";
             try out.print("  - {s}  [{s}]  执行档={s}{s}  goal={s}\n", .{
@@ -1313,6 +1326,12 @@ fn loadSchedule(out: *Io.Writer, arena: std.mem.Allocator, cfg: scoot.config.Con
             try out.print("[scoot] 跳过非法任务 '{s}'（触发器须恰好设置其一）。\n", .{jc.id});
             continue;
         };
+        if (job.trigger == .cron) {
+            // cron 触发器暂不支持（schedule.dueAt 对 cron 恒 false）：fail loud——明示跳过且
+            // 不计入可运行任务，杜绝「列在表里、调度启动数里有它，却永不触发」的静默陷阱（issue #25）。
+            try out.print("[scoot] 跳过任务 '{s}'：cron 触发器暂不支持，不会运行（请改用 every_sec / at_unix）。\n", .{jc.id});
+            continue;
+        }
         try sch.add(arena, job); // job 内容借 cfg/arena 生命周期（>= scheduler）
         valid += 1;
     }
@@ -1985,6 +2004,34 @@ test "parsePolicyModeStrict: 未知策略不静默回落" {
     try std.testing.expectEqual(scoot.policy.Mode.readonly, parsePolicyModeStrict("readonly").?);
     try std.testing.expectEqual(scoot.policy.Mode.unrestricted, parsePolicyModeStrict("unrestricted").?);
     try std.testing.expect(parsePolicyModeStrict("surprise") == null);
+}
+
+test "schedule: cron 触发器 fail-loud——loadSchedule 跳过且不计入、printSchedule 标记 INACTIVE（issue #25）" {
+    const jobs = [_]scoot.config.JobConfig{
+        .{ .id = "tick", .goal = "g", .every_sec = 5 },
+        .{ .id = "nightly", .goal = "g", .cron = "0 3 * * *" },
+    };
+    var cfg: scoot.config.Config = .{ .dirs = undefined };
+    cfg.schedule = .{ .enabled = true, .jobs = &jobs };
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    // loadSchedule：只有 every_sec 计入有效任务；cron 被显式跳过并打印原因。
+    var lbuf: [1024]u8 = undefined;
+    var lw = Io.Writer.fixed(&lbuf);
+    const loaded = try loadSchedule(&lw, arena.allocator(), cfg);
+    try std.testing.expectEqual(@as(usize, 1), loaded.valid);
+    const lout = lw.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, lout, "nightly") != null);
+    try std.testing.expect(std.mem.indexOf(u8, lout, "cron 触发器暂不支持") != null);
+
+    // printSchedule：cron 任务显式标记 INACTIVE（不展示执行档，杜绝「以为会运行」）。
+    var pbuf: [1024]u8 = undefined;
+    var pw = Io.Writer.fixed(&pbuf);
+    try printSchedule(&pw, cfg);
+    const pout = pw.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, pout, "INACTIVE") != null);
 }
 
 test {
