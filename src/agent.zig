@@ -196,13 +196,43 @@ pub const Agent = struct {
 
     /// 按动作类别选择执行护栏：bash 解析命令字符串（可经 shell 任意执行，须逐串审查）；
     /// 内建工具的读/写/网络语义静态已知，按能力分类判定（见 policy.evaluateTool）。
+    /// readonly 下本地读工具额外执行路径策略，避免读取项目目录外或常见敏感文件。
     fn guard(self: *Agent, arena: std.mem.Allocator, action: Action, input: []const u8) policy.Decision {
         return switch (action) {
             .bash => policy.evaluate(arena, input, self.policy_mode),
-            .file_read, .grep, .glob => policy.evaluateTool(.read, self.policy_mode),
+            .file_read, .grep, .glob => self.guardLocalRead(arena, action, input),
             .file_write, .file_edit => policy.evaluateTool(.write, self.policy_mode),
             .http_request => self.guardHttp(arena, input),
             .final => unreachable,
+        };
+    }
+
+    fn guardLocalRead(self: *Agent, arena: std.mem.Allocator, action: Action, input: []const u8) policy.Decision {
+        const base = policy.evaluateTool(.read, self.policy_mode);
+        switch (base) {
+            .deny => return base,
+            .allow => {},
+        }
+        if (self.policy_mode != .readonly) return .allow;
+        return switch (action) {
+            .file_read => blk: {
+                const args = parseToolArgs(FileReadArgs, arena, input) catch
+                    break :blk .{ .deny = "只读模式无法解析 file_read 路径，已拒绝" };
+                break :blk policy.evaluateReadPath(args.path, self.policy_mode);
+            },
+            .grep => blk: {
+                const args = parseToolArgs(GrepArgs, arena, input) catch
+                    break :blk .{ .deny = "只读模式无法解析 grep 路径，已拒绝" };
+                break :blk policy.evaluateReadPath(args.path, self.policy_mode);
+            },
+            .glob => blk: {
+                const args = parseToolArgs(GlobArgs, arena, input) catch
+                    break :blk .{ .deny = "只读模式无法解析 glob 参数，已拒绝" };
+                const root_decision = policy.evaluateReadPath(args.root, self.policy_mode);
+                if (root_decision != .allow) break :blk root_decision;
+                break :blk policy.evaluateReadPath(args.pattern, self.policy_mode);
+            },
+            else => unreachable,
         };
     }
 
@@ -791,6 +821,35 @@ test "run: readonly 安全档下 file_write 被护栏拒绝（不落盘、留痕
     try std.testing.expect(std.mem.indexOf(u8, log, "\"kind\":\"observation\"") == null);
 }
 
+test "run: readonly 安全档拒绝项目外 file_read 路径（不读取敏感文件）" {
+    const gpa = std.testing.allocator;
+    const s_read =
+        \\{"thought":"读系统文件","action":"file_read","action_input":"{\"path\":\"/etc/passwd\"}"}
+    ;
+    const s_final =
+        \\{"thought":"改道","action":"final","action_input":"只读模式无法读取项目外路径"}
+    ;
+    var brain = ScriptedBrain{ .steps = &.{ s_read, s_final } };
+    var ag = testAgent(&brain, 16);
+    ag.policy_mode = .readonly;
+
+    var logbuf: [4096]u8 = undefined;
+    var lw = std.Io.Writer.fixed(&logbuf);
+    var logger = audit.Logger.init(&lw);
+    ag.audit = &logger;
+
+    var sess = session.Session.init("t");
+    defer sess.deinit(gpa);
+    try sess.append(gpa, .user, "读系统文件");
+    const reply = try ag.run(gpa, &sess);
+    defer gpa.free(reply);
+    try std.testing.expectEqualStrings("只读模式无法读取项目外路径", reply);
+
+    const log = lw.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, log, "\"kind\":\"policy_deny\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, log, "\"kind\":\"observation\"") == null);
+}
+
 test "run: file 工具参数畸形→回灌纠错提示后以正确参数收敛（防弹重试）" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
@@ -837,7 +896,7 @@ test "run: glob 找文件 → grep 搜内容 全链路（readonly 安全档亦�
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     const cwd = std.Io.Dir.cwd();
-    const dir = "/tmp/scoot_agent_search_flow";
+    const dir = ".zig-cache/scoot_agent_search_flow";
     cwd.deleteTree(io, dir) catch {};
     defer cwd.deleteTree(io, dir) catch {};
     try cwd.createDirPath(io, dir);
@@ -846,10 +905,10 @@ test "run: glob 找文件 → grep 搜内容 全链路（readonly 安全档亦�
     try tools.file.write(io, dir ++ "/README.md", "# doc\n");
 
     const s_glob =
-        \\{"thought":"找 zig 文件","action":"glob","action_input":"{\"pattern\":\"**/*.zig\",\"root\":\"/tmp/scoot_agent_search_flow\"}"}
+        \\{"thought":"找 zig 文件","action":"glob","action_input":"{\"pattern\":\"**/*.zig\",\"root\":\".zig-cache/scoot_agent_search_flow\"}"}
     ;
     const s_grep =
-        \\{"thought":"搜 main","action":"grep","action_input":"{\"pattern\":\"pub fn \\\\w+\",\"path\":\"/tmp/scoot_agent_search_flow/src/main.zig\"}"}
+        \\{"thought":"搜 main","action":"grep","action_input":"{\"pattern\":\"pub fn \\\\w+\",\"path\":\".zig-cache/scoot_agent_search_flow/src/main.zig\"}"}
     ;
     const s_final =
         \\{"thought":"完成","action":"final","action_input":"found"}
