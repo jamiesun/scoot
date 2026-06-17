@@ -14,7 +14,7 @@ scoot [options] [command]
 | `-e, --eval <prompt>` | 运行单个目标至完成，打印答复，然后退出。 |
 | `--retries <N>` | `-e` 模式下针对瞬时后端错误的重试次数（默认 `2`，`0` 禁用）。 |
 | `--scoot-home <dir>` | 覆盖运行目录。优先于 `SCOOT_HOME`。 |
-| `--trace` | 在 `-e` 模式下，把 ReACT 执行轨迹打印到 **stderr**（答复仍在 stdout）。 |
+| `--trace` | 把 ReACT 执行轨迹打印到 **stderr**（答复/对话仍在 stdout）。`-e` 与交互式 REPL 模式均可用。 |
 | `--ticks <N>` | 用于 `schedule run` / `daemon run`：运行 `N` 个轮询周期后退出（默认 `0` = 永久运行）。 |
 | `-h, --help` | 显示用法。 |
 | `-v, --version` | 显示版本。 |
@@ -29,6 +29,11 @@ scoot              # or: scoot repl
 
 启动交互式的读取-求值-打印循环（Read-Eval-Print loop）。输入一个目标，看着 agent 工作，
 得到答复，再循环。输入 `/exit` 退出。每个提示都会在所配置的策略下运行完整的 ReACT 循环。
+加上 `--trace` 可把每一轮的 ReACT 轨迹流式输出到 **stderr**，对话仍保留在 stdout：
+
+```sh
+scoot --trace            # 交互式 REPL，执行轨迹输出到 stderr
+```
 
 ### `-e, --eval` — 一次性
 
