@@ -20,12 +20,13 @@ const usage =
     \\
     \\选项:
     \\  -e, --eval <prompt>  单次执行一个目标后退出
+    \\  --scoot-home <dir>   覆盖运行目录（优先于 SCOOT_HOME，便于测试隔离）
     \\  --trace              在 -e/--eval 模式下把执行轨迹打印到 stderr
     \\  --ticks <N>          schedule run 仅跑 N 轮后退出（默认 0=持续运行）
     \\  -h, --help           显示本帮助
     \\  -v, --version        显示版本号
     \\
-    \\运行目录默认为 ~/.scoot（可用环境变量 SCOOT_HOME 覆盖）。
+    \\运行目录默认为 ~/.scoot（可用 --scoot-home 或环境变量 SCOOT_HOME 覆盖）。
     \\
 ;
 
@@ -47,6 +48,7 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(arena);
 
     var eval_prompt: ?[]const u8 = null;
+    var scoot_home_override: ?[]const u8 = null;
     var trace = false;
     var cmd_config = false;
     var cmd_doctor = false;
@@ -70,6 +72,13 @@ pub fn main(init: std.process.Init) !void {
                 die(out, 2);
             }
             eval_prompt = args[i];
+        } else if (eql(arg, "--scoot-home")) {
+            i += 1;
+            if (i >= args.len or args[i].len == 0) {
+                try out.writeAll("error: --scoot-home 需要一个目录参数\n");
+                die(out, 2);
+            }
+            scoot_home_override = args[i];
         } else if (eql(arg, "--trace")) {
             trace = true;
         } else if (eql(arg, "--ticks")) {
@@ -112,13 +121,16 @@ pub fn main(init: std.process.Init) !void {
         die(out, 2);
     }
 
-    const dirs = scoot.paths.Paths.resolve(arena, env) catch |err| switch (err) {
-        error.NoHomeDir => {
-            try out.writeAll("error: 无法确定运行目录：请设置 HOME 或 SCOOT_HOME\n");
-            die(out, 1);
-        },
-        else => return err,
-    };
+    const dirs = if (scoot_home_override) |home|
+        try scoot.paths.Paths.fromHome(arena, home)
+    else
+        scoot.paths.Paths.resolve(arena, env) catch |err| switch (err) {
+            error.NoHomeDir => {
+                try out.writeAll("error: 无法确定运行目录：请设置 --scoot-home、HOME 或 SCOOT_HOME\n");
+                die(out, 1);
+            },
+            else => return err,
+        };
     const cfg = scoot.config.Config.loadFromDirs(arena, io, dirs) catch |err| switch (err) {
         error.InvalidConfig => {
             try out.print(

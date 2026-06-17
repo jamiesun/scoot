@@ -43,6 +43,7 @@ Run the built binary:
 ./zig-out/bin/scoot --help
 ./zig-out/bin/scoot config
 ./zig-out/bin/scoot doctor
+./zig-out/bin/scoot --scoot-home /tmp/scoot-test doctor
 ./zig-out/bin/scoot policy check bash "rm -rf /" --mode guarded
 ./zig-out/bin/scoot skills
 ./zig-out/bin/scoot schedule list
@@ -52,11 +53,11 @@ Run the built binary:
 
 `--trace` is for one-shot CLI debugging. It prints the ReACT execution trace to stderr while keeping the final answer on stdout.
 
-`doctor` performs local health checks without printing secrets. `policy check` dry-runs a tool action against `guarded`, `readonly`, or `unrestricted` policy mode.
+`doctor` performs local health checks without printing secrets. `--scoot-home` overrides the runtime directory for isolated tests. `policy check` dry-runs a tool action against `guarded`, `readonly`, or `unrestricted` policy mode.
 
 ## Configuration
 
-Use `SCOOT_HOME` to choose a runtime directory. By default Scoot uses `~/.scoot`.
+Use `--scoot-home` or `SCOOT_HOME` to choose a runtime directory. `--scoot-home` has priority over the environment variable. By default Scoot uses `~/.scoot`.
 
 ```text
 ~/.scoot/

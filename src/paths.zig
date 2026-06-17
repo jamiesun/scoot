@@ -1,5 +1,5 @@
 //! 运行目录解析：~/.scoot/ 作为 Scoot 的家目录与运行目录。
-//! 解析优先级：环境变量 SCOOT_HOME > $HOME/.scoot。
+//! 解析优先级：CLI --scoot-home（由 main 处理）> 环境变量 SCOOT_HOME > $HOME/.scoot。
 //! 本模块只做路径字符串解析；实际目录创建/读写走 Io（见 ensure）。
 const std = @import("std");
 const Environ = std.process.Environ;
@@ -28,6 +28,11 @@ pub const Paths = struct {
             const h = env.get("HOME") orelse return error.NoHomeDir;
             break :blk try std.fs.path.join(arena, &.{ h, ".scoot" });
         };
+        return fromHome(arena, home);
+    }
+
+    /// 从显式 home 目录派生完整运行目录树。供 CLI override 与测试共用。
+    pub fn fromHome(arena: std.mem.Allocator, home: []const u8) !Paths {
         const state_dir = try std.fs.path.join(arena, &.{ home, "state" });
         return .{
             .home = home,
@@ -57,6 +62,17 @@ pub const Paths = struct {
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "fromHome: 从显式 home 派生运行目录树" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const p = try Paths.fromHome(arena_state.allocator(), "/tmp/scoot_explicit_home");
+
+    try std.testing.expectEqualStrings("/tmp/scoot_explicit_home", p.home);
+    try std.testing.expectEqualStrings("/tmp/scoot_explicit_home/config.toml", p.config_toml_file);
+    try std.testing.expectEqualStrings("/tmp/scoot_explicit_home/logs", p.logs_dir);
+    try std.testing.expectEqualStrings("/tmp/scoot_explicit_home/state/sessions", p.sessions_dir);
 }
 
 test "ensure: 在临时目录下创建运行目录树且幂等" {
