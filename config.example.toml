@@ -47,6 +47,14 @@ max_turns = 32
 # Default cognition mode. Supported today: "goal"; "plan" is reserved.
 default_mode = "goal"
 
+# Context budget in bytes for the cumulative prompt history across turns.
+# When the running transcript would exceed this, the agent stops *before* the
+# next backend call with a clear error instead of letting the request grow
+# unbounded and fail late at a small-context backend. Bytes are a coarse proxy
+# for tokens; pick a conservative value below your backend's context window.
+# 0 disables the check (turn-count bound by max_turns only); this is the default.
+context_budget_bytes = 0
+
 [tools]
 # Hard timeout for each tool call, in milliseconds.
 timeout_ms = 30000
@@ -57,6 +65,17 @@ timeout_ms = 30000
 # - unrestricted: no policy limit, still audited.
 # Alias: "yolo" is parsed as unrestricted. Unknown values fall back to guarded.
 policy = "guarded"
+
+# Opt-in hardening (both default false, effective only in guarded mode; issue #32).
+# readonly already fail-closes writes and network, so these matter for guarded only.
+# confine_writes: keep file_write/file_edit inside the project root; reject absolute
+#   paths, ".." escapes, and shell-style expansion (~ / $VAR).
+confine_writes = false
+# block_internal_http: reject http_request to loopback / private / link-local / cloud
+#   metadata hosts (SSRF guard). Heuristic on literal IPs + known internal names; it
+#   does NOT resolve DNS, so DNS-rebinding can still bypass — use readonly for real
+#   isolation.
+block_internal_http = false
 
 [skills]
 # Enable local Skill discovery.
@@ -81,8 +100,9 @@ enabled = false
 poll_ms = 1000
 
 # Scheduled jobs are optional. Each job needs exactly one trigger:
-# every_sec, at_unix, or cron. Cron is parsed but not supported yet, so it
-# never fires. Schedule jobs default to readonly mode; guarded is corrected to
+# every_sec, at_unix, or cron. Cron is parsed but not supported yet: Scoot skips
+# such jobs with a clear warning (they show as INACTIVE in `schedule list`), so
+# they never fire. Schedule jobs default to readonly mode; guarded is corrected to
 # readonly at execution time. Use unrestricted only with deliberate acceptance
 # of unattended write/network risk.
 

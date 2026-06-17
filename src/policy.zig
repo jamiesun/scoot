@@ -167,6 +167,145 @@ fn isSensitivePathPart(part: []const u8) bool {
     return false;
 }
 
+/// 写路径的项目根约束（opt-in 加固，默认关闭，仅 `guarded` 生效）。
+/// 威胁：`guarded` 下未受信模型可 file_write/file_edit 到项目外（如 `$HOME/.ssh/authorized_keys`）。
+/// 开启后：禁绝对路径、`..` 逃逸、shell 风格展开——把写入面收口到项目工作目录内。
+/// 与 `evaluateReadPath` 不同，这里**不**拦敏感文件名片段：项目内合法文件可能恰好叫
+/// secret.* / token.*，写入面的风险是**位置逃逸**而非命名。`confine=false` 或非 guarded：
+/// 放行（写仍受 `evaluateTool` 的 readonly fail-closed 约束兜底）。
+pub fn evaluateWritePath(path: []const u8, mode: Mode, confine: bool) Decision {
+    if (!confine or mode != .guarded) return .allow;
+    const p = std.mem.trim(u8, path, " \t\r\n");
+    if (p.len == 0) return .{ .deny = "写入项目根约束：路径为空，已拒绝" };
+    if (std.fs.path.isAbsolute(p))
+        return .{ .deny = "写入项目根约束：禁止写绝对路径，请使用项目内相对路径" };
+    if (p[0] == '~' or std.mem.indexOfScalar(u8, p, '$') != null)
+        return .{ .deny = "写入项目根约束：禁止 shell 风格路径展开（~ / $VAR）" };
+    var it = std.mem.tokenizeAny(u8, p, "/\\");
+    while (it.next()) |part| {
+        if (std.mem.eql(u8, part, ".."))
+            return .{ .deny = "写入项目根约束：禁止通过 .. 逃逸项目目录" };
+    }
+    return .allow;
+}
+
+/// HTTP 目标的 SSRF 防护（opt-in 加固，默认关闭，仅 `guarded` 生效）。
+/// 威胁：`guarded` 下未受信模型可 http_request 到环回 / 内网 / 链路本地 / 云元数据端点，
+/// 形成「读敏感数据 → GET 外带」或「打内网服务 / 元数据取云凭证」的 SSRF 链路。
+/// 开启后：解析 URL host，命中内部地址即拒绝。`block_internal=false` 或非 guarded：放行。
+/// 诚实声明：这是「字面量 IP 段 + 已知内部主机名」的启发式，**不解析 DNS**——DNS rebinding
+/// （公网名解析到内网 IP）仍可绕过；真正隔离仍依赖 readonly / 网络沙箱（与本模块整体立场一致）。
+pub fn evaluateHttpUrl(url: []const u8, mode: Mode, block_internal: bool) Decision {
+    if (!block_internal or mode != .guarded) return .allow;
+    const host = hostFromUrl(url) orelse
+        return .{ .deny = "SSRF 防护：无法从 URL 解析出主机，已拒绝" };
+    if (isInternalHost(host))
+        return .{ .deny = "SSRF 防护：禁止访问环回 / 内网 / 链路本地 / 云元数据地址" };
+    return .allow;
+}
+
+/// 从 URL 取出 host（去 scheme / userinfo / 端口 / IPv6 方括号）。不分配，返回原串切片。
+/// 缺少 `scheme://` 或 authority 为空时返回 null（调用方按拒绝处理，fail-closed）。
+fn hostFromUrl(url: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, url, " \t\r\n");
+    const sep = std.mem.indexOf(u8, trimmed, "://") orelse return null;
+    const rest = trimmed[sep + 3 ..];
+    var auth_end: usize = rest.len;
+    for (rest, 0..) |c, i| {
+        if (c == '/' or c == '?' or c == '#') {
+            auth_end = i;
+            break;
+        }
+    }
+    var authority = rest[0..auth_end];
+    if (authority.len == 0) return null;
+    if (std.mem.lastIndexOfScalar(u8, authority, '@')) |at| authority = authority[at + 1 ..];
+    if (authority.len == 0) return null;
+    if (authority[0] == '[') { // IPv6 字面量 [::1]:port
+        const close = std.mem.indexOfScalar(u8, authority, ']') orelse return null;
+        return authority[1..close];
+    }
+    if (std.mem.indexOfScalar(u8, authority, ':')) |colon| return authority[0..colon];
+    return authority;
+}
+
+/// host（已去端口 / 方括号）是否指向内部地址：字面量 IPv4/IPv6 段判定 + 已知内部主机名。
+fn isInternalHost(host: []const u8) bool {
+    if (host.len == 0) return true; // 解析不出主机：fail-closed
+    if (parseIp4(host)) |o| return isInternalIp4(o);
+    if (std.mem.indexOfScalar(u8, host, ':') != null) return isInternalIp6(host);
+    return isInternalHostname(host);
+}
+
+fn isInternalIp4(o: [4]u8) bool {
+    if (o[0] == 127) return true; // 127/8 环回
+    if (o[0] == 0) return true; // 0/8 未指定 / 本机
+    if (o[0] == 10) return true; // 10/8 私有
+    if (o[0] == 172 and o[1] >= 16 and o[1] <= 31) return true; // 172.16/12 私有
+    if (o[0] == 192 and o[1] == 168) return true; // 192.168/16 私有
+    if (o[0] == 169 and o[1] == 254) return true; // 169.254/16 链路本地（含云元数据 169.254.169.254）
+    return false;
+}
+
+/// 严格点分十进制 IPv4 解析；非 IPv4（含非数字 / 段超界 / 段数≠4）返回 null。
+fn parseIp4(s: []const u8) ?[4]u8 {
+    var o: [4]u8 = undefined;
+    var it = std.mem.splitScalar(u8, s, '.');
+    var i: usize = 0;
+    while (it.next()) |seg| {
+        if (i >= 4 or seg.len == 0 or seg.len > 3) return null;
+        var v: u16 = 0;
+        for (seg) |c| {
+            if (c < '0' or c > '9') return null;
+            v = v * 10 + (c - '0');
+        }
+        if (v > 255) return null;
+        o[i] = @intCast(v);
+        i += 1;
+    }
+    return if (i == 4) o else null;
+}
+
+fn isInternalIp6(host: []const u8) bool {
+    var buf: [64]u8 = undefined;
+    if (host.len > buf.len) return true; // 异常长：fail-closed
+    for (host, 0..) |c, i| buf[i] = std.ascii.toLower(c);
+    const h = buf[0..host.len];
+
+    if (std.mem.eql(u8, h, "::1")) return true; // 环回
+    if (std.mem.eql(u8, h, "::")) return true; // 未指定
+    // IPv4-mapped（::ffff:a.b.c.d）：取尾部 IPv4 判定。
+    if (std.mem.lastIndexOfScalar(u8, h, ':')) |last_colon| {
+        const tail = h[last_colon + 1 ..];
+        if (std.mem.indexOfScalar(u8, tail, '.') != null) {
+            if (parseIp4(tail)) |o| return isInternalIp4(o);
+        }
+    }
+    // fe80::/10 链路本地：fe8 / fe9 / fea / feb 开头。
+    if (h.len >= 3 and h[0] == 'f' and h[1] == 'e' and (h[2] == '8' or h[2] == '9' or h[2] == 'a' or h[2] == 'b'))
+        return true;
+    // fc00::/7 唯一本地：fc / fd 开头。
+    if (h.len >= 2 and h[0] == 'f' and (h[1] == 'c' or h[1] == 'd')) return true;
+    return false;
+}
+
+fn isInternalHostname(host: []const u8) bool {
+    var buf: [256]u8 = undefined;
+    if (host.len > buf.len) return false;
+    for (host, 0..) |c, i| buf[i] = std.ascii.toLower(c);
+    const h = buf[0..host.len];
+    const exact = [_][]const u8{
+        "localhost",
+        "metadata", // 常见内部别名
+        "metadata.google.internal", // GCP 元数据
+        "instance-data", // AWS
+        "instance-data.ec2.internal", // AWS
+    };
+    for (exact) |name| if (std.mem.eql(u8, h, name)) return true;
+    if (std.mem.endsWith(u8, h, ".localhost")) return true; // *.localhost 一律视为本地
+    return false;
+}
+
 /// 空白折叠为单空格并转小写。命令长度上限防止 DoS（远超任何合法命令）。
 fn normalize(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
     if (s.len > 1 << 16) return error.TooLong;
@@ -343,6 +482,74 @@ test "evaluateReadPath：readonly 只允许项目内相对非敏感路径" {
 test "evaluateReadPath：guarded / unrestricted 不限制路径，由外层审计承接" {
     try testing.expectEqual(Decision.allow, evaluateReadPath("/etc/passwd", .guarded));
     try testing.expectEqual(Decision.allow, evaluateReadPath("../outside.txt", .unrestricted));
+}
+
+test "evaluateWritePath：开启项目根约束后拒绝逃逸写（issue #32）" {
+    // 关闭（默认）：即便绝对路径也放行——保持「绊线非沙箱」立场不变。
+    try testing.expectEqual(Decision.allow, evaluateWritePath("/etc/cron.d/x", .guarded, false));
+    // 非 guarded：本函数放行（readonly 的写拒绝由 evaluateTool 兜底）。
+    try testing.expectEqual(Decision.allow, evaluateWritePath("/etc/x", .readonly, true));
+
+    // 开启 + guarded：项目内相对路径放行。
+    try testing.expectEqual(Decision.allow, evaluateWritePath("src/out.txt", .guarded, true));
+    try testing.expectEqual(Decision.allow, evaluateWritePath("notes/today.md", .guarded, true));
+
+    const denied = [_][]const u8{
+        "/Users/me/.ssh/authorized_keys",
+        "/etc/passwd",
+        "../escape.txt",
+        "src/../../escape.txt",
+        "~/.bashrc",
+        "$HOME/.profile",
+        "",
+    };
+    for (denied) |p| {
+        switch (evaluateWritePath(p, .guarded, true)) {
+            .deny => {},
+            .allow => {
+                std.debug.print("写约束应拒绝却放行: {s}\n", .{p});
+                return error.ShouldHaveDenied;
+            },
+        }
+    }
+}
+
+test "evaluateHttpUrl：开启 SSRF 防护后拒绝内部目标（issue #32）" {
+    // 关闭（默认）：内部地址也放行——保持默认行为不变。
+    try testing.expectEqual(Decision.allow, evaluateHttpUrl("http://169.254.169.254/", .guarded, false));
+    // 非 guarded：本函数放行（readonly 的网络拒绝由 evaluateTool 兜底）。
+    try testing.expectEqual(Decision.allow, evaluateHttpUrl("http://127.0.0.1/", .readonly, true));
+
+    // 开启 + guarded：公网目标放行。
+    try testing.expectEqual(Decision.allow, evaluateHttpUrl("https://example.com/path?q=1", .guarded, true));
+    try testing.expectEqual(Decision.allow, evaluateHttpUrl("http://93.184.216.34/", .guarded, true));
+
+    const denied = [_][]const u8{
+        "http://127.0.0.1/", // 环回
+        "http://127.1.2.3:8080/x", // 127/8
+        "http://localhost/admin", // 主机名
+        "https://API.LOCALHOST/x", // *.localhost 大小写
+        "http://169.254.169.254/latest/meta-data/", // 云元数据（链路本地）
+        "http://metadata.google.internal/x", // GCP 元数据名
+        "http://10.0.0.5/internal", // 10/8 私有
+        "http://172.16.3.4/x", // 172.16/12 私有
+        "http://192.168.1.1/x", // 192.168/16 私有
+        "http://user:pass@127.0.0.1/x", // userinfo 不应骗过解析
+        "http://[::1]:9000/x", // IPv6 环回
+        "http://[fe80::1]/x", // IPv6 链路本地
+        "http://[fd00::1]/x", // IPv6 ULA
+        "http://[::ffff:127.0.0.1]/x", // IPv4-mapped 环回
+        "not-a-url", // 无 scheme：无法分类 → fail-closed
+    };
+    for (denied) |u| {
+        switch (evaluateHttpUrl(u, .guarded, true)) {
+            .deny => {},
+            .allow => {
+                std.debug.print("SSRF 防护应拒绝却放行: {s}\n", .{u});
+                return error.ShouldHaveDenied;
+            },
+        }
+    }
 }
 
 test {

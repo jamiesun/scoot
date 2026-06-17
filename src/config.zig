@@ -33,6 +33,11 @@ pub const Agent = struct {
     max_turns: u32 = 32,
     /// 默认认知模式：goal / plan。
     default_mode: []const u8 = "goal",
+    /// 上下文预算（字节）：跨回合累计的提示历史超过此值则在下次后端调用前主动中止，
+    /// 避免在小上下文窗口的后端上跑到一半才被后端拒绝（issue #28）。
+    /// 0 = 关闭（仅受 max_turns 约束，保持默认行为）。字节是 token 体量的粗略代理，
+    /// 取经验保守值（≈ 上下文上限 token × 每 token 字节数，再留余量）。
+    context_budget_bytes: usize = 0,
 };
 
 /// 工具沙盒配置。
@@ -42,6 +47,12 @@ pub const Tools = struct {
     /// 执行护栏模式：guarded（拦截灾难性命令，默认）/ readonly（只读白名单，
     /// fail-closed）/ unrestricted（不设限）。见 policy.zig。无人值守场景应选 readonly。
     policy: []const u8 = "guarded",
+    /// opt-in 加固（默认关闭，仅 guarded 生效）：把 file_write/file_edit 收口到项目根内，
+    /// 拒绝绝对路径 / `..` 逃逸 / shell 展开（issue #32）。readonly 已 fail-closed 拒写。
+    confine_writes: bool = false,
+    /// opt-in 加固（默认关闭，仅 guarded 生效）：拒绝 http_request 访问环回 / 内网 /
+    /// 链路本地 / 云元数据地址，收窄 SSRF / 外带面（issue #32）。readonly 已默认拒网。
+    block_internal_http: bool = false,
 };
 
 /// Skill 机制配置。
