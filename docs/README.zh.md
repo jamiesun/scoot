@@ -56,6 +56,9 @@ zig build run -- --version
 ./zig-out/bin/scoot skills pack docs/examples/skills/minimal minimal.scoot-skill.tar
 ./zig-out/bin/scoot wasm-tools check path/to/tool
 ./zig-out/bin/scoot schedule list
+./zig-out/bin/scoot daemon status
+./zig-out/bin/scoot daemon run --ticks 1
+./zig-out/bin/scoot daemon stop
 ./zig-out/bin/scoot -e "统计当前仓库中的 Zig 源文件数量"
 ./zig-out/bin/scoot --retries 4 -e "统计当前仓库中的 Zig 源文件数量"
 ./zig-out/bin/scoot --trace -e "统计当前仓库中的 Zig 源文件数量"
@@ -72,6 +75,8 @@ zig build run -- --version
 模板见 [docs/examples/skills/minimal/SKILL.md](examples/skills/minimal/SKILL.md) 和 [docs/examples/skills/metadata/SKILL.md](examples/skills/metadata/SKILL.md)。
 
 `wasm-tools check <dir>` 校验本地 Wasm 工具包边界，包括 `manifest.toml`、`policy.toml`、引用的 JSON schema 和安全相对路径。它只做静态校验，不会加载或执行 Wasm。
+
+`daemon run` 是 scheduled job 的前台长运行模式。它会写入 `state/daemon.json` 和 `state/daemon.pid`，处理 SIGTERM/SIGINT，并保留 scheduled job 的安全规则：无人值守的 `guarded` job 会以有效 `readonly` 运行。
 
 Agent 也可以使用有界 `parallel` 动作一次执行 1-4 个彼此独立的只读工具调用。观察结果按输入顺序返回，shell、写操作和嵌套 parallel 会被拒绝，每个子调用仍然经过正常 policy gate。
 
@@ -97,6 +102,8 @@ Agent 也可以使用有界 `parallel` 动作一次执行 1-4 个彼此独立的
 - 中文路线图：[ROADMAP.zh.md](ROADMAP.zh.md)
 - 英文 Agent 指南：[AGENT.md](../AGENT.md)
 - 中文 Agent 指南：[AGENT.zh.md](AGENT.zh.md)
+- 英文 Daemon 生命周期：[DAEMON.md](DAEMON.md)
+- 中文 Daemon 生命周期：[DAEMON.zh.md](DAEMON.zh.md)
 - 英文 Skills 指南：[SKILLS.md](SKILLS.md)
 - 中文 Skills 指南：[SKILLS.zh.md](SKILLS.zh.md)
 - 英文 Wasm 工具包：[WASM_TOOLS.md](WASM_TOOLS.md)

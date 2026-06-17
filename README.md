@@ -56,6 +56,9 @@ Run the built binary:
 ./zig-out/bin/scoot skills pack docs/examples/skills/minimal minimal.scoot-skill.tar
 ./zig-out/bin/scoot wasm-tools check path/to/tool
 ./zig-out/bin/scoot schedule list
+./zig-out/bin/scoot daemon status
+./zig-out/bin/scoot daemon run --ticks 1
+./zig-out/bin/scoot daemon stop
 ./zig-out/bin/scoot -e "count Zig source files in this repository"
 ./zig-out/bin/scoot --retries 4 -e "count Zig source files in this repository"
 ./zig-out/bin/scoot --trace -e "count Zig source files in this repository"
@@ -72,6 +75,8 @@ Run the built binary:
 Templates are available at [docs/examples/skills/minimal/SKILL.md](docs/examples/skills/minimal/SKILL.md) and [docs/examples/skills/metadata/SKILL.md](docs/examples/skills/metadata/SKILL.md).
 
 `wasm-tools check <dir>` validates a local Wasm tool package boundary: `manifest.toml`, `policy.toml`, referenced JSON schemas, and safe relative paths. It is static validation only and never loads or executes Wasm.
+
+`daemon run` is the foreground long-running mode for scheduled jobs. It writes `state/daemon.json` and `state/daemon.pid`, handles SIGTERM/SIGINT, and preserves the scheduled-job safety rule that unattended `guarded` jobs run as effective `readonly`.
 
 The agent can also use a bounded `parallel` action for 1-4 independent read-only tool calls. It preserves observation order, rejects shell/write/nested calls, and still routes every child call through the normal policy gate.
 
@@ -97,6 +102,8 @@ Start from [config.example.toml](config.example.toml).
 - Chinese roadmap: [docs/ROADMAP.zh.md](docs/ROADMAP.zh.md)
 - English agent guide: [AGENT.md](AGENT.md)
 - Chinese agent guide: [docs/AGENT.zh.md](docs/AGENT.zh.md)
+- English daemon lifecycle: [docs/DAEMON.md](docs/DAEMON.md)
+- Chinese daemon lifecycle: [docs/DAEMON.zh.md](docs/DAEMON.zh.md)
 - English skills guide: [docs/SKILLS.md](docs/SKILLS.md)
 - Chinese skills guide: [docs/SKILLS.zh.md](docs/SKILLS.zh.md)
 - English Wasm tool packages: [docs/WASM_TOOLS.md](docs/WASM_TOOLS.md)
