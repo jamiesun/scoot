@@ -1,0 +1,80 @@
+# 会话与审计
+
+Scoot 把自己做过的事以**追加写 JSONL** 持久化到本地磁盘 —— 短期会话记录与逐步审计日志。两者都是纯文本，便于回放、grep 或喂给其它工具。按设计**没有**长期语义记忆或向量库（见[路线图](roadmap.md)）。
+
+## 会话
+
+会话是一次交互的消息记录（一次 `-e` 运行、一段 REPL 对话或一个调度任务）。它持久化到：
+
+```text
+~/.scoot/state/sessions/<id>.jsonl
+```
+
+每行一条消息：
+
+```json
+{"role":"system","content":"..."}
+{"role":"user","content":"count the Zig files"}
+{"role":"assistant","content":"{\"thought\":\"...\",\"action\":\"glob\",\"action_input\":\"...\"}"}
+```
+
+`role` 为 `system`、`user` 或 `assistant`。写入是**追加式**的，故一个文件累积该会话完整的来回往复，可按序回放。
+
+会话只是短期记忆。它不会跨运行被索引或汇总；持久化是为了可审计与可检视，而非用于回忆。
+
+## 审计日志
+
+当 `[audit] to_file = true`（默认）时，每个有意义的步骤都会记入审计日志：
+
+```text
+~/.scoot/logs/audit.jsonl
+```
+
+每行一个事件：
+
+```json
+{"seq":0,"ts":1718600000123,"kind":"run","msg":"goal: count the Zig files"}
+{"seq":1,"ts":1718600000456,"kind":"thought","msg":"..."}
+{"seq":2,"ts":1718600000789,"kind":"tool_call","msg":"glob {\"pattern\":\"**/*.zig\"}"}
+{"seq":3,"ts":1718600000900,"kind":"observation","msg":"..."}
+{"seq":4,"ts":1718600001000,"kind":"final","msg":"There are 23 Zig files."}
+```
+
+| 字段 | 含义 |
+| --- | --- |
+| `seq` | 单调递增的事件序号（每个 logger 实例从 0 起）。 |
+| `ts` | 墙钟时间戳，Unix **毫秒**。 |
+| `kind` | 事件类型（见下）。 |
+| `msg` | 消息文本，密钥已脱敏。 |
+
+### 事件类型
+
+| `kind` | 何时写入 |
+| --- | --- |
+| `run` | 一次运行的起点，携带用户目标（在日志里分隔多次运行）。 |
+| `thought` | 模型对某步的一句话推理。 |
+| `tool_call` | 即将执行的动作及其输入。 |
+| `observation` | 回灌给模型的工具结果。 |
+| `final` | 终态答复。 |
+| `policy_deny` | 被策略门拒绝的动作。 |
+| `system_error` | 内部/可恢复错误。 |
+
+`run` 标记让你把单个追加文件切分成一次次运行，`seq` + `ts` 让你回放时间线并关联事件。`policy_deny` 条目正是策略门拦截了什么的审计轨迹。
+
+## 详细程度
+
+用 `[audit] level` 控制记录量 —— `debug`、`info`（默认）、`warn` 或 `error`。设 `to_file = false` 可完全关闭文件日志。
+
+```toml
+[audit]
+level = "info"
+to_file = true
+```
+
+## 密钥绝不入日志
+
+后端 token 的值**绝不**写入会话或审计日志 —— 只会报告其*来源*（由 `config`/`doctor`）。审计消息写入前先经脱敏。见 [Agent 指南](agent.md)的密钥规则。
+
+## 留存
+
+本版本中会话与审计文件均为**追加写**；Scoot 暂不轮转或清理它们。长期部署请在外部轮转或清理 `logs/` 与 `state/sessions/`（如 `logrotate`、定时任务或清理脚本）。

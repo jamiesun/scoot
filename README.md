@@ -97,18 +97,31 @@ Start from [config.example.toml](config.example.toml).
 
 ## Documentation
 
+The **User Guide** (bilingual mdBook under [`book/`](book/)) is the comprehensive,
+task-oriented documentation. Source chapters:
+
+- [Introduction](book/en/src/index.md)
+- [Installation](book/en/src/installation.md) — build, install, backend setup.
+- [Configuration](book/en/src/configuration.md) — every config key, with defaults.
+- [CLI Reference](book/en/src/cli.md) — every command and flag.
+- [Built-in Tools](book/en/src/tools.md) — the ten agent actions.
+- [Execution Policy & Security](book/en/src/policy.md) — modes, hardening, threat model.
+- [Skills](book/en/src/skills.md) — authoring and using skills.
+- [Scheduling & Daemon](book/en/src/scheduling.md) — unattended jobs.
+- [Sessions & Audit](book/en/src/sessions.md) — local state formats.
+- [Wasm Tool Packages](book/en/src/wasm-tools.md) — package boundary.
+- [Troubleshooting & FAQ](book/en/src/troubleshooting.md)
+
+Chinese chapters live under [`book/zh/src/`](book/zh/src/).
+
+Reference documents:
+
 - Chinese README: [docs/README.zh.md](docs/README.zh.md)
-- English roadmap: [docs/ROADMAP.md](docs/ROADMAP.md)
-- Chinese roadmap: [docs/ROADMAP.zh.md](docs/ROADMAP.zh.md)
-- English agent guide: [AGENT.md](AGENT.md)
-- Chinese agent guide: [docs/AGENT.zh.md](docs/AGENT.zh.md)
-- English daemon lifecycle: [docs/DAEMON.md](docs/DAEMON.md)
-- Chinese daemon lifecycle: [docs/DAEMON.zh.md](docs/DAEMON.zh.md)
-- English skills guide: [docs/SKILLS.md](docs/SKILLS.md)
-- Chinese skills guide: [docs/SKILLS.zh.md](docs/SKILLS.zh.md)
-- English Wasm tool packages: [docs/WASM_TOOLS.md](docs/WASM_TOOLS.md)
-- Chinese Wasm tool packages: [docs/WASM_TOOLS.zh.md](docs/WASM_TOOLS.zh.md)
-- mdBook source: [book/](book/)
+- English roadmap: [docs/ROADMAP.md](docs/ROADMAP.md) · Chinese: [docs/ROADMAP.zh.md](docs/ROADMAP.zh.md)
+- English agent guide: [AGENT.md](AGENT.md) · Chinese: [docs/AGENT.zh.md](docs/AGENT.zh.md)
+- Daemon lifecycle: [docs/DAEMON.md](docs/DAEMON.md) · [docs/DAEMON.zh.md](docs/DAEMON.zh.md)
+- Skills: [docs/SKILLS.md](docs/SKILLS.md) · [docs/SKILLS.zh.md](docs/SKILLS.zh.md)
+- Wasm tool packages: [docs/WASM_TOOLS.md](docs/WASM_TOOLS.md) · [docs/WASM_TOOLS.zh.md](docs/WASM_TOOLS.zh.md)
 
 Build the docs locally:
 

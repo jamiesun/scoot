@@ -2,11 +2,11 @@
 
 The authoritative English roadmap lives at:
 
-- [`docs/ROADMAP.md`](../../../docs/ROADMAP.md)
+- [`docs/ROADMAP.md`](https://github.com/jamiesun/scoot/blob/main/docs/ROADMAP.md)
 
 The Chinese roadmap lives at:
 
-- [`docs/ROADMAP.zh.md`](../../../docs/ROADMAP.zh.md)
+- [`docs/ROADMAP.zh.md`](https://github.com/jamiesun/scoot/blob/main/docs/ROADMAP.zh.md)
 
 ## Short Version
 

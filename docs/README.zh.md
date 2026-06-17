@@ -97,18 +97,30 @@ Agent 也可以使用有界 `parallel` 动作一次执行 1-4 个彼此独立的
 
 ## 文档
 
+**用户指南**（[`book/`](../book/) 下的双语 mdBook）是最完整、面向任务的文档。中文章节源码：
+
+- [介绍](../book/zh/src/index.md)
+- [安装](../book/zh/src/installation.md) —— 构建、安装、后端配置。
+- [配置](../book/zh/src/configuration.md) —— 每一个配置项及其默认值。
+- [CLI 参考](../book/zh/src/cli.md) —— 每个命令与选项。
+- [内建工具](../book/zh/src/tools.md) —— 代理的十个动作。
+- [执行策略与安全](../book/zh/src/policy.md) —— 模式、加固、威胁模型。
+- [技能](../book/zh/src/skills.md) —— 编写与使用技能。
+- [调度与守护进程](../book/zh/src/scheduling.md) —— 无人值守任务。
+- [会话与审计](../book/zh/src/sessions.md) —— 本地状态格式。
+- [Wasm 工具包](../book/zh/src/wasm-tools.md) —— 工具包边界。
+- [故障排查与 FAQ](../book/zh/src/troubleshooting.md)
+
+英文章节位于 [`book/en/src/`](../book/en/src/)。
+
+参考文档：
+
 - 英文 README：[README.md](../README.md)
-- 英文路线图：[ROADMAP.md](ROADMAP.md)
-- 中文路线图：[ROADMAP.zh.md](ROADMAP.zh.md)
-- 英文 Agent 指南：[AGENT.md](../AGENT.md)
-- 中文 Agent 指南：[AGENT.zh.md](AGENT.zh.md)
-- 英文 Daemon 生命周期：[DAEMON.md](DAEMON.md)
-- 中文 Daemon 生命周期：[DAEMON.zh.md](DAEMON.zh.md)
-- 英文 Skills 指南：[SKILLS.md](SKILLS.md)
-- 中文 Skills 指南：[SKILLS.zh.md](SKILLS.zh.md)
-- 英文 Wasm 工具包：[WASM_TOOLS.md](WASM_TOOLS.md)
-- 中文 Wasm 工具包：[WASM_TOOLS.zh.md](WASM_TOOLS.zh.md)
-- mdBook 源码：[book/](../book/)
+- 英文路线图：[ROADMAP.md](ROADMAP.md) · 中文：[ROADMAP.zh.md](ROADMAP.zh.md)
+- 英文 Agent 指南：[AGENT.md](../AGENT.md) · 中文：[AGENT.zh.md](AGENT.zh.md)
+- Daemon 生命周期：[DAEMON.md](DAEMON.md) · [DAEMON.zh.md](DAEMON.zh.md)
+- Skills 指南：[SKILLS.md](SKILLS.md) · [SKILLS.zh.md](SKILLS.zh.md)
+- Wasm 工具包：[WASM_TOOLS.md](WASM_TOOLS.md) · [WASM_TOOLS.zh.md](WASM_TOOLS.zh.md)
 
 本地构建文档：
 

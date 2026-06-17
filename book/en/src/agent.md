@@ -2,11 +2,11 @@
 
 The authoritative English agent guide lives at:
 
-- [`AGENT.md`](../../../AGENT.md)
+- [`AGENT.md`](https://github.com/jamiesun/scoot/blob/main/AGENT.md)
 
 The Chinese agent guide lives at:
 
-- [`docs/AGENT.zh.md`](../../../docs/AGENT.zh.md)
+- [`docs/AGENT.zh.md`](https://github.com/jamiesun/scoot/blob/main/docs/AGENT.zh.md)
 
 ## Key Rules
 

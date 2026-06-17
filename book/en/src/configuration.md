@@ -1,46 +1,274 @@
 # Configuration
 
-Scoot loads config from the runtime directory:
+Scoot reads configuration from its runtime directory and falls back to built-in
+defaults, so it runs with zero config. This page is the complete reference for
+every section and key.
+
+## File Locations & Loading Order
+
+The runtime directory is `~/.scoot` by default. Override it with `--scoot-home`
+(highest priority) or the `SCOOT_HOME` environment variable.
+
+Within that directory, configuration is loaded in this order:
 
 1. `config.toml`
 2. `config.json`
 3. built-in defaults
 
-The recommended starting point is:
+**Merge semantics:** loading is **per-section and per-field**. Any missing
+section or field falls back to its built-in default, and **unknown fields are
+ignored**. This means a partial config is always valid — you only specify what
+you want to change. Start from [`config.example.toml`](https://github.com/jamiesun/scoot/blob/main/config.example.toml).
 
-- [`config.example.toml`](../../../config.example.toml)
+Run `scoot config` at any time to print the *resolved* runtime directory and
+backend configuration (with secrets redacted).
 
-## Main Sections
+## Sections At A Glance
 
-- `[backend]`: OpenAI-compatible endpoint, model, API key source, CA bundle, extra request fields.
-- `[agent]`: turn limit, default mode, and context budget (`context_budget_bytes`, 0 = off).
-- `[tools]`: timeout, execution policy, and opt-in guarded-mode hardening (`confine_writes`, `block_internal_http`).
-- `[skills]`: skill discovery. Search order: `<cwd>/.agents/skills` > `~/.agents/skills` > `~/.scoot/skills` > `extra_paths`. Reading a skill is native and not policy-gated (works in `readonly`); skill execution is.
-- `[audit]`: audit log behavior.
-- `[schedule]`: scheduled jobs.
+| Section | Purpose |
+| --- | --- |
+| `[backend]` | LLM endpoint, model, API-key source, TLS, extra request fields |
+| `[agent]` | ReACT turn limit, cognition mode, context budget |
+| `[tools]` | Tool timeout, execution policy, opt-in hardening |
+| `[skills]` | Skill discovery toggle and extra search paths |
+| `[audit]` | Audit log level and file output |
+| `[schedule]` | Unattended scheduled jobs and the poll interval |
 
-## Policy Modes
+---
 
-- `guarded`: interactive tripwire mode.
-- `readonly`: fail-closed mode for read-only operation.
-- `unrestricted`: no policy limit, still audited.
+## `[backend]`
 
-Scheduled jobs correct `guarded` to `readonly`.
+The LLM backend. Scoot speaks **only** the OpenAI-compatible `chat/completions`
+protocol.
 
-## Guarded-Mode Hardening (opt-in)
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `base_url` | string | `http://127.0.0.1:11434/v1` | OpenAI-compatible endpoint base URL. |
+| `model` | string | `qwen2.5` | Model name sent to the backend. |
+| `api_key_env` | string | `OPENAI_API_KEY` | Environment variable used as the **first** token source. |
+| `api_key_file` | string? | unset → `~/.scoot/token` | Path to a `0600` token file. Used after the env source. |
+| `api_key_cmd` | string? | unset | Command that prints a token (e.g. `pass show openai`). Used last. |
+| `ca_file` | string? | unset → system roots | PEM CA bundle for HTTPS. Set this on systems lacking root certs. |
+| `extra_body` | table? | unset | Extra top-level JSON fields merged into every request. |
 
-Both default `false` and apply only in `guarded` mode (`readonly` already fail-closes writes and network):
+### `[backend.extra_body]`
 
-- `confine_writes`: keep `file_write` / `file_edit` inside the project root; reject absolute paths, `..` escapes, and `~` / `$VAR` expansion.
-- `block_internal_http`: reject `http_request` to loopback / private / link-local / cloud-metadata hosts (SSRF guard).
+A pass-through table merged verbatim into the top-level `chat/completions` JSON.
+Use it for backend-specific or newer fields without recompiling — e.g.
+`reasoning_effort`, `service_tier`, `top_p`. Only a JSON **object** is accepted;
+non-object values are ignored. **Never put secrets here**, and do not override
+core fields like `model` or `messages`.
 
-`block_internal_http` is a heuristic over literal IP ranges and known internal names; it does **not** resolve DNS, so DNS-rebinding can still bypass it. For real isolation use `readonly` or a network sandbox.
+```toml
+[backend]
+base_url = "https://api.openai.com/v1"
+model    = "gpt-4o-mini"
+api_key_env = "OPENAI_API_KEY"
+
+[backend.extra_body]
+top_p = 0.9
+reasoning_effort = "high"
+```
+
+---
+
+## `[agent]`
+
+The cognition engine.
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `max_turns` | u32 | `32` | Maximum ReACT turns before the agent stops, to bound runaway loops. |
+| `default_mode` | string | `goal` | Cognition mode. `goal` is implemented today; `plan` is reserved (see Roadmap) and does not yet change execution. |
+| `context_budget_bytes` | usize | `0` | Cumulative prompt-history budget in **bytes**. `0` disables it. |
+
+**`context_budget_bytes`** guards small-context backends. When the running
+transcript would exceed this size, the agent stops *before* the next backend
+call with a clear error, instead of letting the request grow unbounded and fail
+late. Bytes are a coarse proxy for tokens — pick a conservative value below your
+backend's context window (turn count is still bounded by `max_turns`).
+
+```toml
+[agent]
+max_turns = 32
+default_mode = "goal"
+context_budget_bytes = 0          # e.g. 120000 for a ~32k-token backend
+```
+
+---
+
+## `[tools]`
+
+The tool sandbox and execution policy. See [Execution Policy & Security](policy.md)
+for the full model.
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `timeout_ms` | u64 | `30000` | Hard timeout for **every** tool call, in milliseconds. |
+| `policy` | string | `guarded` | Execution policy: `guarded`, `readonly`, or `unrestricted` (alias `yolo`). Unknown values fall back to `guarded`. |
+| `confine_writes` | bool | `false` | Opt-in: keep `file_write`/`file_edit` inside the project root. **`guarded` only.** |
+| `block_internal_http` | bool | `false` | Opt-in: block `http_request` to internal/metadata hosts (SSRF guard). **`guarded` only.** |
+
+Both hardening flags apply **only in `guarded` mode** — `readonly` already
+fail-closes writes and network. `confine_writes` rejects absolute paths, `..`
+escapes, and shell-style `~`/`$VAR` expansion. `block_internal_http` is a
+heuristic over literal IP ranges and known internal names; it does **not**
+resolve DNS, so DNS-rebinding can still bypass it — use `readonly` or a network
+sandbox for real isolation.
+
+```toml
+[tools]
+timeout_ms = 30000
+policy = "guarded"
+confine_writes = false
+block_internal_http = false
+```
+
+---
+
+## `[skills]`
+
+Local skill discovery. See [Skills](skills.md).
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | Enable skill discovery and injection. |
+| `extra_paths` | list of string | `[]` | Additional skill search paths, appended after the built-in ones. |
+
+Skills are discovered in **priority order** (earlier wins on name collision):
+
+1. `<cwd>/.agents/skills` — project-local, travels with the repository.
+2. `~/.agents/skills` — cross-agent user-level skills (independent of `SCOOT_HOME`).
+3. `~/.scoot/skills` — Scoot's own user-level directory.
+4. the `extra_paths` listed here.
+
+Reading a skill's instructions is a native, read-only capability that works even
+in `readonly` mode; what a skill then tells the model to run is still
+policy-gated.
+
+```toml
+[skills]
+enabled = true
+extra_paths = ["/opt/scoot/skills", "./skills"]
+```
+
+---
+
+## `[audit]`
+
+Audit logging. See [Sessions & Audit](sessions.md).
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `level` | string | `info` | Verbosity: `debug`, `info`, `warn`, or `error`. |
+| `to_file` | bool | `true` | Write audit logs to `~/.scoot/logs/audit.jsonl`. |
+
+```toml
+[audit]
+level = "info"
+to_file = true
+```
+
+---
+
+## `[schedule]`
+
+Unattended scheduled jobs. **Disabled by default** — autonomous execution must
+be explicitly enabled. See [Scheduling & Daemon](scheduling.md).
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enabled` | bool | `false` | Enable the scheduler / daemon loop. |
+| `poll_ms` | u64 | `1000` | Scheduler polling interval, in milliseconds. |
+| `jobs` | list of table | `[]` | Scheduled job definitions (see below). |
+
+### `[[schedule.jobs]]`
+
+Each job is an array-of-tables entry with **exactly one** trigger.
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `id` | string | — | Stable job identifier (required). |
+| `goal` | string | `""` | The natural-language goal the agent runs. |
+| `every_sec` | u64? | unset | Trigger: fixed interval in seconds. |
+| `at_unix` | i64? | unset | Trigger: a fixed Unix-time instant. |
+| `cron` | string? | unset | Trigger: cron expression — **parsed but not supported yet**. |
+| `mode` | string | `readonly` | Execution policy: `readonly` (default, safe) or `unrestricted`. |
+
+**Exactly one** of `every_sec` / `at_unix` / `cron` must be set; otherwise the
+job is invalid and skipped with a warning (shown as `INACTIVE` in
+`schedule list`). `cron` jobs never fire until cron support lands.
+
+**Safety:** scheduled jobs default to `readonly`, and `guarded` is coerced to
+effective `readonly` at execution time. Use `unrestricted` only with deliberate
+acceptance of unattended write/network risk.
+
+```toml
+[schedule]
+enabled = true
+poll_ms = 1000
+
+[[schedule.jobs]]
+id = "disk-check"
+goal = "Inspect disk usage and summarize anomalies"
+every_sec = 300
+mode = "readonly"
+
+[[schedule.jobs]]
+id = "morning-brief"
+goal = "Prepare today's task brief"
+at_unix = 1893456000
+mode = "readonly"
+```
+
+---
 
 ## Secrets
 
-Never put plaintext API keys in config. Use:
+**Never put a plaintext API key in `config.toml`/`config.json`.** Scoot resolves
+the backend token from three sources, tried in order:
 
-1. environment variable,
-2. private token file,
-3. credential command.
+1. **Environment variable** named by `backend.api_key_env` (default `OPENAI_API_KEY`).
+2. **Token file** at `backend.api_key_file`, or `~/.scoot/token` if unset. The
+   file **must be mode `0600`**; Scoot refuses to read it if permissions are too
+   open.
+3. **Credential command** in `backend.api_key_cmd` (e.g. `pass show openai`).
+   Keep it bounded and non-interactive.
 
+The resolved value is never written back to disk, printed by `config`/`doctor`,
+or recorded in audit logs — only the *source* is reported. See the [Agent
+Guide](agent.md) for the secret-handling iron rule.
+
+```sh
+# Source 1 — environment:
+export OPENAI_API_KEY="sk-..."
+
+# Source 2 — private token file:
+umask 077
+printf '%s' "sk-..." > ~/.scoot/token
+
+# Source 3 — credential command (in config):
+#   api_key_cmd = "pass show openai"
+```
+
+## JSON Configuration
+
+If you prefer JSON, create `config.json` in the runtime directory (used only
+when `config.toml` is absent). The structure mirrors the TOML sections:
+
+```json
+{
+  "backend": { "base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini" },
+  "agent":   { "max_turns": 32 },
+  "tools":   { "policy": "guarded", "timeout_ms": 30000 }
+}
+```
+
+## Annotated Example
+
+The repository ships a fully commented [`config.example.toml`](https://github.com/jamiesun/scoot/blob/main/config.example.toml).
+Copy it and edit:
+
+```sh
+cp config.example.toml ~/.scoot/config.toml
+```

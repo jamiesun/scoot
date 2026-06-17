@@ -2,11 +2,11 @@
 
 权威英文 Agent 指南：
 
-- [`AGENT.md`](../../../AGENT.md)
+- [`AGENT.md`](https://github.com/jamiesun/scoot/blob/main/AGENT.md)
 
 权威中文 Agent 指南：
 
-- [`docs/AGENT.zh.md`](../../../docs/AGENT.zh.md)
+- [`docs/AGENT.zh.md`](https://github.com/jamiesun/scoot/blob/main/docs/AGENT.zh.md)
 
 ## 关键规则
 
