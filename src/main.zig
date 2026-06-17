@@ -17,6 +17,8 @@ const usage =
     \\                       解释某个工具动作在策略档下会被允许还是拒绝
     \\  skills               列出已发现的技能（name / 描述 / 目录）
     \\  skills check [dir]   校验本地 skill 目录；缺省扫描配置的 skill 搜索路径
+    \\  skills pack <dir> [out.tar]
+    \\                       校验并导出 skill tar 包，包内带 .scoot-skill.json 审查清单
     \\  schedule [list|run]  列出 / 运行调度任务（无人值守，强制只读安全档）
     \\
     \\选项:
@@ -108,8 +110,21 @@ pub fn main(init: std.process.Init) !void {
                         target = args[i];
                     }
                     cmd_skills = .{ .check = target };
+                } else if (eql(args[i], "pack")) {
+                    if (i + 1 >= args.len or std.mem.startsWith(u8, args[i + 1], "-")) {
+                        try out.writeAll("error: skills pack 需要 skill 目录参数\n");
+                        die(out, 2);
+                    }
+                    i += 1;
+                    const dir = args[i];
+                    var output: ?[]const u8 = null;
+                    if (i + 1 < args.len and !std.mem.startsWith(u8, args[i + 1], "-")) {
+                        i += 1;
+                        output = args[i];
+                    }
+                    cmd_skills = .{ .pack = .{ .dir = dir, .output = output } };
                 } else {
-                    try out.print("error: 未知 skills 子命令 '{s}'（可用：check）\n", .{args[i]});
+                    try out.print("error: 未知 skills 子命令 '{s}'（可用：check / pack）\n", .{args[i]});
                     die(out, 2);
                 }
             } else {
@@ -196,6 +211,7 @@ pub fn main(init: std.process.Init) !void {
         switch (cmd) {
             .list => try printSkills(out, arena, io, cfg),
             .check => |target| try checkSkills(out, arena, io, cfg, target),
+            .pack => |sp| try packSkillCommand(out, arena, io, sp),
         }
         return;
     }
@@ -280,6 +296,12 @@ const PolicyCheckCommand = struct {
 const SkillsCommand = union(enum) {
     list,
     check: ?[]const u8,
+    pack: SkillPackCommand,
+};
+
+const SkillPackCommand = struct {
+    dir: []const u8,
+    output: ?[]const u8 = null,
 };
 
 fn parsePolicyCommand(out: *Io.Writer, args: []const []const u8, i: *usize) PolicyCheckCommand {
@@ -809,6 +831,178 @@ fn checkOneSkill(
     }
 }
 
+const SkillPackFile = struct {
+    rel: []const u8,
+    size: u64,
+};
+
+const SkillPackResult = struct {
+    name: []const u8,
+    output: []const u8,
+    file_count: usize,
+    total_bytes: u64,
+    skipped_hidden: usize,
+};
+
+/// `scoot skills pack <dir> [out.tar]`：先校验，再导出可审查 tar 包。只读 skill 目录，不执行脚本。
+fn packSkillCommand(
+    out: *Io.Writer,
+    arena: std.mem.Allocator,
+    io: std.Io,
+    cmd: SkillPackCommand,
+) !void {
+    const result = packSkill(arena, io, cmd.dir, cmd.output) catch |err| switch (err) {
+        error.InvalidSkill => {
+            try out.print("FAIL {s}: invalid skill; run `scoot skills check {s}` for details\n", .{ cmd.dir, cmd.dir });
+            die(out, 1);
+        },
+        error.PathAlreadyExists => {
+            const output = cmd.output orelse "默认输出文件";
+            try out.print("error: 输出文件已存在：{s}\n", .{output});
+            die(out, 1);
+        },
+        error.UnsupportedSkillPackageEntry => {
+            try out.writeAll("error: skill 目录包含不支持打包的文件类型（例如符号链接或设备文件）\n");
+            die(out, 1);
+        },
+        else => return err,
+    };
+
+    try out.print(
+        "OK packed {s} -> {s}\nfiles={d} bytes={d} skipped_hidden={d}\n",
+        .{ result.name, result.output, result.file_count, result.total_bytes, result.skipped_hidden },
+    );
+}
+
+fn packSkill(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    dir: []const u8,
+    output_override: ?[]const u8,
+) !SkillPackResult {
+    const validation = try scoot.skill.validateDir(arena, io, dir);
+    const meta = switch (validation) {
+        .valid => |m| m,
+        .invalid => return error.InvalidSkill,
+    };
+
+    var files: std.ArrayList(SkillPackFile) = .empty;
+    var skipped_hidden: usize = 0;
+    try collectSkillPackFiles(arena, io, dir, "", &files, &skipped_hidden);
+    std.mem.sort(SkillPackFile, files.items, {}, struct {
+        fn lessThan(_: void, a: SkillPackFile, b: SkillPackFile) bool {
+            return std.mem.lessThan(u8, a.rel, b.rel);
+        }
+    }.lessThan);
+
+    var total_bytes: u64 = 0;
+    for (files.items) |f| total_bytes += f.size;
+
+    const output = output_override orelse try std.fmt.allocPrint(arena, "{s}.scoot-skill.tar", .{meta.name});
+    const manifest = try skillPackManifest(arena, meta, files.items, total_bytes, skipped_hidden);
+
+    const cwd = Io.Dir.cwd();
+    var archive = try cwd.createFile(io, output, .{ .truncate = false, .exclusive = true });
+    defer archive.close(io);
+    var archive_buf: [8192]u8 = undefined;
+    var fw = archive.writer(io, &archive_buf);
+    const aw = &fw.interface;
+
+    var tw: std.tar.Writer = .{ .underlying_writer = aw };
+    try tw.setRoot(meta.name);
+    try tw.writeFileBytes(".scoot-skill.json", manifest, .{ .mode = 0o644, .mtime = 0 });
+    for (files.items) |f| {
+        const full = try std.fs.path.join(arena, &.{ dir, f.rel });
+        const content = try cwd.readFileAlloc(io, full, arena, .limited(8 << 20));
+        try tw.writeFileBytes(f.rel, content, .{ .mode = 0o644, .mtime = 0 });
+    }
+    try tw.finishPedantically();
+    try aw.flush();
+
+    return .{
+        .name = meta.name,
+        .output = output,
+        .file_count = files.items.len,
+        .total_bytes = total_bytes,
+        .skipped_hidden = skipped_hidden,
+    };
+}
+
+fn collectSkillPackFiles(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    root: []const u8,
+    rel: []const u8,
+    files: *std.ArrayList(SkillPackFile),
+    skipped_hidden: *usize,
+) !void {
+    const cwd = Io.Dir.cwd();
+    const here = if (rel.len == 0) root else try std.fs.path.join(arena, &.{ root, rel });
+    var dir = try cwd.openDir(io, here, .{ .iterate = true });
+    defer dir.close(io);
+
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.name.len == 0 or entry.name[0] == '.') {
+            skipped_hidden.* += 1;
+            continue;
+        }
+        const child_rel = if (rel.len == 0)
+            try arena.dupe(u8, entry.name)
+        else
+            try std.fmt.allocPrint(arena, "{s}/{s}", .{ rel, entry.name });
+
+        switch (entry.kind) {
+            .directory => try collectSkillPackFiles(arena, io, root, child_rel, files, skipped_hidden),
+            .file => {
+                const full = try std.fs.path.join(arena, &.{ root, child_rel });
+                const stat = try cwd.statFile(io, full, .{});
+                try files.append(arena, .{ .rel = child_rel, .size = stat.size });
+            },
+            else => return error.UnsupportedSkillPackageEntry,
+        }
+    }
+}
+
+const SkillPackManifestFile = struct {
+    path: []const u8,
+    size: u64,
+};
+
+const SkillPackManifest = struct {
+    format: []const u8 = "scoot.skill.package.v1",
+    name: []const u8,
+    description: []const u8,
+    files: []const SkillPackManifestFile,
+    file_count: usize,
+    total_bytes: u64,
+    skipped_hidden: usize,
+    policy_note: []const u8 = "Skill instructions and scripts do not bypass Scoot policy gates.",
+};
+
+fn skillPackManifest(
+    arena: std.mem.Allocator,
+    meta: scoot.skill.Meta,
+    files: []const SkillPackFile,
+    total_bytes: u64,
+    skipped_hidden: usize,
+) ![]const u8 {
+    const manifest_files = try arena.alloc(SkillPackManifestFile, files.len);
+    for (files, 0..) |f, i| manifest_files[i] = .{ .path = f.rel, .size = f.size };
+
+    var aw = std.Io.Writer.Allocating.init(arena);
+    try std.json.Stringify.value(SkillPackManifest{
+        .name = meta.name,
+        .description = meta.description,
+        .files = manifest_files,
+        .file_count = files.len,
+        .total_bytes = total_bytes,
+        .skipped_hidden = skipped_hidden,
+    }, .{ .whitespace = .indent_2 }, &aw.writer);
+    try aw.writer.writeByte('\n');
+    return aw.written();
+}
+
 /// 把触发器渲染为人类可读描述（供 `schedule list`）。
 fn triggerLabel(buf: []u8, trig: scoot.schedule.Trigger) []const u8 {
     return switch (trig) {
@@ -1267,6 +1461,64 @@ test "policyDecisionForAction: 复用工具策略语义" {
         .deny => {},
         .allow => return error.ExpectedDeny,
     }
+}
+
+test "packSkill: 导出 tar 包并写入审查 manifest" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cwd = Io.Dir.cwd();
+    const root = "/tmp/scoot_skill_pack_ok";
+    const out_path = "/tmp/scoot_skill_pack_ok.tar";
+    cwd.deleteTree(io, root) catch {};
+    cwd.deleteFile(io, out_path) catch {};
+    defer cwd.deleteTree(io, root) catch {};
+    defer cwd.deleteFile(io, out_path) catch {};
+
+    try cwd.createDirPath(io, root ++ "/scripts");
+    try cwd.writeFile(io, .{
+        .sub_path = root ++ "/SKILL.md",
+        .data = "---\nname: pack-ok\ndescription: Pack test skill.\n---\n# Pack\n",
+    });
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/scripts/run.sh", .data = "echo ok\n" });
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/.env", .data = "SECRET=must-not-package\n" });
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const result = try packSkill(arena, io, root, out_path);
+    try std.testing.expectEqualStrings("pack-ok", result.name);
+    try std.testing.expectEqual(@as(usize, 2), result.file_count);
+    try std.testing.expectEqual(@as(usize, 1), result.skipped_hidden);
+
+    const archive = try cwd.readFileAlloc(io, out_path, arena, .limited(1 << 20));
+    try std.testing.expect(std.mem.indexOf(u8, archive, "scoot.skill.package.v1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, archive, "pack-ok/.scoot-skill.json") != null);
+    try std.testing.expect(std.mem.indexOf(u8, archive, "pack-ok/SKILL.md") != null);
+    try std.testing.expect(std.mem.indexOf(u8, archive, "pack-ok/scripts/run.sh") != null);
+    try std.testing.expect(std.mem.indexOf(u8, archive, "must-not-package") == null);
+}
+
+test "packSkill: 无效 skill 不打包" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cwd = Io.Dir.cwd();
+    const root = "/tmp/scoot_skill_pack_invalid";
+    const out_path = "/tmp/scoot_skill_pack_invalid.tar";
+    cwd.deleteTree(io, root) catch {};
+    cwd.deleteFile(io, out_path) catch {};
+    defer cwd.deleteTree(io, root) catch {};
+    defer cwd.deleteFile(io, out_path) catch {};
+
+    try cwd.createDirPath(io, root);
+    try cwd.writeFile(io, .{
+        .sub_path = root ++ "/SKILL.md",
+        .data = "---\nname: no-description\n---\n# Invalid\n",
+    });
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    try std.testing.expectError(error.InvalidSkill, packSkill(arena_state.allocator(), io, root, out_path));
+    try std.testing.expect(!fileExists(io, out_path));
 }
 
 test "parsePolicyModeStrict: 未知策略不静默回落" {
