@@ -46,6 +46,8 @@ Run the built binary:
 ./zig-out/bin/scoot --scoot-home /tmp/scoot-test doctor
 ./zig-out/bin/scoot policy check bash "rm -rf /" --mode guarded
 ./zig-out/bin/scoot skills
+./zig-out/bin/scoot skills check
+./zig-out/bin/scoot skills check docs/examples/skills/minimal
 ./zig-out/bin/scoot schedule list
 ./zig-out/bin/scoot -e "count Zig source files in this repository"
 ./zig-out/bin/scoot --trace -e "count Zig source files in this repository"
@@ -54,6 +56,10 @@ Run the built binary:
 `--trace` is for one-shot CLI debugging. It prints the ReACT execution trace to stderr while keeping the final answer on stdout.
 
 `doctor` performs local health checks without printing secrets. `--scoot-home` overrides the runtime directory for isolated tests. `policy check` dry-runs a tool action against `guarded`, `readonly`, or `unrestricted` policy mode.
+
+`skills check [dir]` validates local skill structure without executing skill scripts. A valid skill directory contains `SKILL.md` with YAML front matter including non-empty `name` and `description`; unsupported compatibility declarations fail clearly until Scoot defines those gates.
+
+A minimal template is available at [docs/examples/skills/minimal/SKILL.md](docs/examples/skills/minimal/SKILL.md).
 
 ## Configuration
 

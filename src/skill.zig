@@ -40,9 +40,16 @@ pub const Skill = struct {
 pub const Meta = struct {
     name: []const u8,
     description: []const u8,
+    compatibility_key: []const u8 = "",
+    compatibility: []const u8 = "",
 };
 
-/// 解析 SKILL.md 的 YAML front-matter，仅提取 name / description。
+pub const Validation = union(enum) {
+    valid: Meta,
+    invalid: []const u8,
+};
+
+/// 解析 SKILL.md 的 YAML front-matter，仅提取 name / description 及兼容性声明。
 /// 返回 null 表示「没有合法 front-matter 或缺 name」——该目录不是 skill，调用方应跳过。
 /// 返回的切片借用 `src`，调用方需在使用期间保证 `src` 存活。
 /// 防弹：任意非法/截断输入只会得到 null，绝不越界或 panic。
@@ -52,6 +59,8 @@ pub fn parseFrontMatter(src: []const u8) ?Meta {
 
     var name: []const u8 = "";
     var description: []const u8 = "";
+    var compatibility_key: []const u8 = "";
+    var compatibility: []const u8 = "";
     var closed = false;
 
     var lines = std.mem.splitScalar(u8, after_open, '\n');
@@ -68,12 +77,59 @@ pub fn parseFrontMatter(src: []const u8) ?Meta {
             name = val;
         } else if (std.ascii.eqlIgnoreCase(key, "description")) {
             description = val;
+        } else if (std.ascii.eqlIgnoreCase(key, "scoot_version") or
+            std.ascii.eqlIgnoreCase(key, "compatibility") or
+            std.ascii.eqlIgnoreCase(key, "requires_scoot"))
+        {
+            compatibility_key = key;
+            compatibility = val;
         }
     }
 
     if (!closed) return null; // 缺闭合栅栏 = 畸形 front-matter，整体作废
     if (name.len == 0) return null; // 无名技能无法被模型选用，跳过
-    return .{ .name = name, .description = description };
+    return .{
+        .name = name,
+        .description = description,
+        .compatibility_key = compatibility_key,
+        .compatibility = compatibility,
+    };
+}
+
+/// 严格校验一个 skill 目录。与 discover 不同，这里面向作者/审查者，必须给出清晰失败。
+pub fn validateDir(arena: std.mem.Allocator, io: std.Io, dir: []const u8) !Validation {
+    const cwd = std.Io.Dir.cwd();
+    const md_path = try std.fs.path.join(arena, &.{ dir, "SKILL.md" });
+    const bytes = cwd.readFileAlloc(io, md_path, arena, skill_read_limit) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return .{ .invalid = "missing SKILL.md" },
+        else => return .{ .invalid = try std.fmt.allocPrint(arena, "cannot read SKILL.md: {s}", .{@errorName(err)}) },
+    };
+    const meta = parseFrontMatter(bytes) orelse return .{
+        .invalid = "SKILL.md must start with YAML front matter containing a non-empty name",
+    };
+    if (!isValidName(meta.name)) return .{
+        .invalid = "name must use only ASCII letters, digits, '.', '_' or '-'",
+    };
+    if (meta.description.len == 0) return .{
+        .invalid = "description is required",
+    };
+    if (meta.compatibility_key.len != 0) return .{
+        .invalid = try std.fmt.allocPrint(
+            arena,
+            "unsupported compatibility declaration `{s}`; omit it until Scoot defines skill compatibility gates",
+            .{meta.compatibility_key},
+        ),
+    };
+    return .{ .valid = meta };
+}
+
+pub fn isValidName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 64) return false;
+    for (name) |c| {
+        if (std.ascii.isAlphanumeric(c) or c == '.' or c == '_' or c == '-') continue;
+        return false;
+    }
+    return true;
 }
 
 /// 若 `s` 以独占一行的 "---" 开头，返回其后的剩余文本；否则 null。
@@ -215,6 +271,21 @@ test "parseFrontMatter: 去引号 + 忽略未知键 + 冒号在值中" {
     try std.testing.expectEqualStrings("比例 a:b 的部署助手", m.description);
 }
 
+test "parseFrontMatter: 识别兼容性声明供校验阶段拒绝" {
+    const src =
+        \\---
+        \\name: future
+        \\description: 未来版本技能
+        \\scoot_version: ">=1.0.0"
+        \\---
+        \\body
+    ;
+    const m = parseFrontMatter(src) orelse return error.TestUnexpectedNull;
+    try std.testing.expectEqualStrings("future", m.name);
+    try std.testing.expectEqualStrings("scoot_version", m.compatibility_key);
+    try std.testing.expectEqualStrings(">=1.0.0", m.compatibility);
+}
+
 test "parseFrontMatter: CRLF 行尾" {
     const src = "---\r\nname: win\r\ndescription: 处理 windows 行尾\r\n---\r\nbody\r\n";
     const m = parseFrontMatter(src) orelse return error.TestUnexpectedNull;
@@ -289,6 +360,86 @@ test "Registry: 路径不存在则静默跳过，清单为空" {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     try std.testing.expectEqualStrings("", try reg.manifest(arena.allocator()));
+}
+
+test "validateDir: 接受最小合法 skill 目录" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const root = "/tmp/scoot_skill_validate_good";
+    cwd.deleteTree(io, root) catch {};
+    defer cwd.deleteTree(io, root) catch {};
+
+    try cwd.createDirPath(io, root);
+    try cwd.writeFile(io, .{
+        .sub_path = root ++ "/SKILL.md",
+        .data = "---\nname: good-skill\ndescription: A valid local skill.\n---\n# Good\n",
+    });
+
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const res = try validateDir(arena.allocator(), io, root);
+    const meta = switch (res) {
+        .valid => |m| m,
+        .invalid => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectEqualStrings("good-skill", meta.name);
+}
+
+test "validateDir: 拒绝缺失 description、非法 name 与兼容性声明" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const root = "/tmp/scoot_skill_validate_bad";
+    cwd.deleteTree(io, root) catch {};
+    defer cwd.deleteTree(io, root) catch {};
+
+    try cwd.createDirPath(io, root ++ "/no_desc");
+    try cwd.writeFile(io, .{
+        .sub_path = root ++ "/no_desc/SKILL.md",
+        .data = "---\nname: no-desc\n---\n# Missing description\n",
+    });
+    try cwd.createDirPath(io, root ++ "/bad_name");
+    try cwd.writeFile(io, .{
+        .sub_path = root ++ "/bad_name/SKILL.md",
+        .data = "---\nname: bad/name\ndescription: Invalid name.\n---\n# Bad\n",
+    });
+    try cwd.createDirPath(io, root ++ "/future");
+    try cwd.writeFile(io, .{
+        .sub_path = root ++ "/future/SKILL.md",
+        .data = "---\nname: future\ndescription: Future gate.\nscoot_version: \">=1.0.0\"\n---\n# Future\n",
+    });
+
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+
+    const no_desc = try validateDir(arena.allocator(), io, root ++ "/no_desc");
+    switch (no_desc) {
+        .valid => return error.TestUnexpectedResult,
+        .invalid => |msg| try std.testing.expectEqualStrings("description is required", msg),
+    }
+
+    const bad_name = try validateDir(arena.allocator(), io, root ++ "/bad_name");
+    switch (bad_name) {
+        .valid => return error.TestUnexpectedResult,
+        .invalid => |msg| try std.testing.expect(std.mem.indexOf(u8, msg, "name must") != null),
+    }
+
+    const future = try validateDir(arena.allocator(), io, root ++ "/future");
+    switch (future) {
+        .valid => return error.TestUnexpectedResult,
+        .invalid => |msg| try std.testing.expect(std.mem.indexOf(u8, msg, "unsupported compatibility") != null),
+    }
+}
+
+test "validateDir: 缺 SKILL.md 给出明确失败" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const res = try validateDir(arena.allocator(), std.testing.io, "/tmp/scoot_skill_missing_xyz");
+    switch (res) {
+        .valid => return error.TestUnexpectedResult,
+        .invalid => |msg| try std.testing.expectEqualStrings("missing SKILL.md", msg),
+    }
 }
 
 test {
