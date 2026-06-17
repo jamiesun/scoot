@@ -17,6 +17,7 @@ const usage =
     \\
     \\选项:
     \\  -e, --eval <prompt>  单次执行一个目标后退出
+    \\  --trace              在 -e/--eval 模式下把执行轨迹打印到 stderr
     \\  --ticks <N>          schedule run 仅跑 N 轮后退出（默认 0=持续运行）
     \\  -h, --help           显示本帮助
     \\  -v, --version        显示版本号
@@ -35,9 +36,15 @@ pub fn main(init: std.process.Init) !void {
     const out = &stdout_writer.interface;
     defer out.flush() catch {};
 
+    var stderr_buffer: [4096]u8 = undefined;
+    var stderr_writer: Io.File.Writer = .init(.stderr(), io, &stderr_buffer);
+    const err_out = &stderr_writer.interface;
+    defer err_out.flush() catch {};
+
     const args = try init.minimal.args.toSlice(arena);
 
     var eval_prompt: ?[]const u8 = null;
+    var trace = false;
     var cmd_config = false;
     var cmd_skills = false;
     var cmd_schedule: ?[]const u8 = null; // null=未请求；否则为子动作 list/run
@@ -58,6 +65,8 @@ pub fn main(init: std.process.Init) !void {
                 die(out, 2);
             }
             eval_prompt = args[i];
+        } else if (eql(arg, "--trace")) {
+            trace = true;
         } else if (eql(arg, "--ticks")) {
             i += 1;
             if (i >= args.len) {
@@ -87,6 +96,11 @@ pub fn main(init: std.process.Init) !void {
             try out.writeAll(usage);
             die(out, 2);
         }
+    }
+
+    if (trace and eval_prompt == null) {
+        try out.writeAll("error: --trace 目前仅支持 -e/--eval 单次执行模式\n");
+        die(out, 2);
     }
 
     const dirs = scoot.paths.Paths.resolve(arena, env) catch |err| switch (err) {
@@ -164,6 +178,7 @@ pub fn main(init: std.process.Init) !void {
         ag.tool_timeout_ms = cfg.tools.timeout_ms;
         ag.policy_mode = scoot.policy.Mode.fromString(cfg.tools.policy);
         ag.ca_file = cfg.backend.ca_file;
+        if (trace) ag.trace = err_out;
 
         // 审计留痕（铁律：可审计胜过黑盒）。打不开则降级为「明示警告 + 不留痕」。
         var sink: AuditSink = .{};
@@ -175,6 +190,7 @@ pub fn main(init: std.process.Init) !void {
             if (ag.audit) |lg| lg.log(.system_error, @errorName(err)) catch {};
             finalizeRun(io, &sess, cfg.dirs.sessions_dir, &sink);
             try out.print("[scoot] 调用后端失败：{s}\n", .{@errorName(err)});
+            try printBackendErrorDetail(out, &client);
             try out.print(
                 "        后端 {s}（model={s}）。请确认 OpenAI 兼容服务在运行，必要时设置 {s}。\n",
                 .{ cfg.backend.base_url, cfg.backend.model, cfg.backend.api_key_env },
@@ -187,6 +203,22 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try runRepl(out, arena, io, env, cfg);
+}
+
+fn printBackendErrorDetail(out: *Io.Writer, client: *const scoot.llm.Client) !void {
+    const body = client.lastErrorBody();
+    if (client.last_error_status == 0 and body.len == 0) return;
+
+    try out.print("        后端响应 status={d}", .{client.last_error_status});
+    if (body.len == 0) {
+        try out.writeAll("，无响应体。\n");
+        return;
+    }
+    try out.print("，body（前 {d} 字节{s}）：\n{s}\n", .{
+        body.len,
+        if (client.last_error_body_truncated) "，已截断" else "",
+        body,
+    });
 }
 
 fn eql(a: []const u8, b: []const u8) bool {

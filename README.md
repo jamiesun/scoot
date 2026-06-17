@@ -45,7 +45,10 @@ Run the built binary:
 ./zig-out/bin/scoot skills
 ./zig-out/bin/scoot schedule list
 ./zig-out/bin/scoot -e "count Zig source files in this repository"
+./zig-out/bin/scoot --trace -e "count Zig source files in this repository"
 ```
+
+`--trace` is for one-shot CLI debugging. It prints the ReACT execution trace to stderr while keeping the final answer on stdout.
 
 ## Configuration
 

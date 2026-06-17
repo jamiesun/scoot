@@ -114,6 +114,8 @@ pub const Agent = struct {
     policy_mode: policy.Mode = .guarded,
     /// 自定义 CA bundle（PEM）绝对路径，传给 http_request 工具；null = 系统根证书。
     ca_file: ?[]const u8 = null,
+    /// 可选 CLI 执行轨迹输出。仅用于显式调试；最终答复仍由调用方写 stdout。
+    trace: ?*std.Io.Writer = null,
 
     /// 用真实 LLM 后端构造 Agent。
     pub fn initClient(client: *llm.Client) Agent {
@@ -149,14 +151,17 @@ pub const Agent = struct {
             // 防弹解析（铁律 #4）：模型没吐合法步骤时不 panic，把错误作为观察回灌触发重试。
             const step = parseStep(arena, completion.content) catch {
                 if (self.audit) |lg| lg.log(.system_error, "模型输出不是合法步骤 JSON，已回灌纠错并重试") catch {};
+                self.traceMalformed(turn + 1);
                 try sess.append(backing, .user, malformed_hint);
                 continue;
             };
             if (self.audit) |lg| lg.log(.thought, step.thought) catch {};
+            self.traceStep(turn + 1, step);
 
             switch (step.action) {
                 .final => {
                     if (self.audit) |lg| lg.log(.final, step.action_input) catch {};
+                    self.traceFinal(turn + 1, step.action_input);
                     return try backing.dupe(u8, step.action_input);
                 },
                 // 其余皆为工具类动作（bash + 内建 file_*）：统一「留痕 → 执行护栏 → 执行/回灌」。
@@ -165,6 +170,7 @@ pub const Agent = struct {
                     // 铁律：模型产出的动作必须先过执行护栏，绝不直接落到系统上。
                     switch (self.guard(arena, step.action, step.action_input)) {
                         .deny => |reason| {
+                            self.tracePolicyDeny(turn + 1, reason);
                             const denied = try std.fmt.allocPrint(
                                 arena,
                                 "[观察] 动作被执行护栏拒绝（{s} 模式）：{s}。请改用更安全或只读的方式达成目标。",
@@ -174,9 +180,11 @@ pub const Agent = struct {
                             try sess.append(backing, .user, denied);
                         },
                         .allow => {
+                            self.tracePolicyAllow(turn + 1);
                             const observation = self.execTool(arena, step.action, step.action_input) catch |err|
                                 try toolErrorObservation(arena, err);
                             if (self.audit) |lg| lg.log(.observation, observation) catch {};
+                            self.traceObservation(turn + 1, observation);
                             try sess.append(backing, .user, observation);
                         },
                     }
@@ -270,6 +278,55 @@ pub const Agent = struct {
         const result = try tools.bash.run(arena, self.io, command, .{ .timeout_ms = self.tool_timeout_ms });
         return formatObservation(arena, result);
     }
+
+    fn traceMalformed(self: *Agent, turn: u32) void {
+        const w = self.trace orelse return;
+        w.print("[trace {d}] malformed model step; retrying\n", .{turn}) catch return;
+        w.flush() catch {};
+    }
+
+    fn traceStep(self: *Agent, turn: u32, step: Step) void {
+        const w = self.trace orelse return;
+        w.print("[trace {d}] reason: ", .{turn}) catch return;
+        traceClipped(w, step.thought, trace_reason_cap) catch return;
+        w.print("\n[trace {d}] action: {s}", .{ turn, @tagName(step.action) }) catch return;
+        if (step.action != .final and step.action_input.len > 0) {
+            w.writeAll(" ") catch return;
+            traceClipped(w, step.action_input, trace_action_input_cap) catch return;
+        }
+        w.writeAll("\n") catch return;
+        w.flush() catch {};
+    }
+
+    fn tracePolicyAllow(self: *Agent, turn: u32) void {
+        const w = self.trace orelse return;
+        w.print("[trace {d}] policy: allow ({s})\n", .{ turn, @tagName(self.policy_mode) }) catch return;
+        w.flush() catch {};
+    }
+
+    fn tracePolicyDeny(self: *Agent, turn: u32, reason: []const u8) void {
+        const w = self.trace orelse return;
+        w.print("[trace {d}] policy: deny ({s}) ", .{ turn, @tagName(self.policy_mode) }) catch return;
+        traceClipped(w, reason, trace_reason_cap) catch return;
+        w.writeAll("\n") catch return;
+        w.flush() catch {};
+    }
+
+    fn traceObservation(self: *Agent, turn: u32, observation: []const u8) void {
+        const w = self.trace orelse return;
+        w.print("[trace {d}] observe: ", .{turn}) catch return;
+        traceClipped(w, observation, trace_observation_cap) catch return;
+        w.writeAll("\n") catch return;
+        w.flush() catch {};
+    }
+
+    fn traceFinal(self: *Agent, turn: u32, reply: []const u8) void {
+        const w = self.trace orelse return;
+        w.print("[trace {d}] final: ", .{turn}) catch return;
+        traceClipped(w, reply, trace_final_cap) catch return;
+        w.writeAll("\n") catch return;
+        w.flush() catch {};
+    }
 };
 
 /// 转调真实后端的默认补全实现。
@@ -292,6 +349,12 @@ const observation_stream_cap = 2000;
 /// file_read 观察的截断上限：比 bash 输出更宽（文件内容是模型主动读取、相对结构化，
 /// 给更大窗口便于后续 file_edit 看清确切文本），但仍设上限挡住超大文件撑爆上下文。
 const file_read_observation_cap = 8000;
+
+/// CLI trace 只展示执行轨迹摘要，避免海量工具输出刷屏。
+const trace_reason_cap = 240;
+const trace_action_input_cap = 240;
+const trace_observation_cap = 600;
+const trace_final_cap = 240;
 
 /// 防弹解析一个 ReACT 步骤。非法 JSON → MalformedStep；未知 action → UnknownAction。
 pub fn parseStep(arena: std.mem.Allocator, content: []const u8) !Step {
@@ -398,6 +461,15 @@ fn clipTo(arena: std.mem.Allocator, s: []const u8, cap: usize) ![]const u8 {
         "{s}\n…（输出已截断，共 {d} 字节）",
         .{ s[0..cap], s.len },
     );
+}
+
+/// 往 trace writer 写入限长文本；超出时附带剩余字节数。
+fn traceClipped(w: *std.Io.Writer, s: []const u8, cap: usize) !void {
+    const n = if (s.len > cap) cap else s.len;
+    try w.writeAll(s[0..n]);
+    if (s.len > n) {
+        try w.print(" ...(+{d} bytes)", .{s.len - n});
+    }
 }
 
 test "parseStep 解析合法步骤" {
@@ -570,6 +642,33 @@ test "run: 审计日志按序记录 thought/tool_call/observation/final 链路" 
         const v = try std.json.parseFromSlice(std.json.Value, gpa, line, .{});
         v.deinit();
     }
+}
+
+test "run: trace 输出 reason/action/policy/observation/final 到注入 writer" {
+    const gpa = std.testing.allocator;
+    var brain = ScriptedBrain{ .steps = &.{
+        "{\"thought\":\"查看\",\"action\":\"bash\",\"action_input\":\"printf OK\"}",
+        "{\"thought\":\"完成\",\"action\":\"final\",\"action_input\":\"done\"}",
+    } };
+    var ag = testAgent(&brain, 16);
+
+    var tracebuf: [4096]u8 = undefined;
+    var tw = std.Io.Writer.fixed(&tracebuf);
+    ag.trace = &tw;
+
+    var sess = session.Session.init("t");
+    defer sess.deinit(gpa);
+    try sess.append(gpa, .user, "go");
+    const reply = try ag.run(gpa, &sess);
+    defer gpa.free(reply);
+
+    const trace = tw.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, trace, "[trace 1] reason: 查看") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "[trace 1] action: bash printf OK") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "[trace 1] policy: allow") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "[trace 1] observe: ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "[trace 2] action: final") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "[trace 2] final: done") != null);
 }
 
 test "run: 危险命令被执行护栏拦截——不执行、留痕 policy_deny、回灌后改道收敛" {
