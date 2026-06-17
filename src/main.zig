@@ -349,6 +349,12 @@ const PolicyHttpArgs = struct {
 const PolicyFileReadArgs = struct { path: []const u8 };
 const PolicyGrepArgs = struct { pattern: []const u8, path: []const u8 };
 const PolicyGlobArgs = struct { pattern: []const u8, root: []const u8 = "." };
+const PolicyParallelCallArgs = struct {
+    action: []const u8,
+    input: []const u8 = "",
+    action_input: []const u8 = "",
+};
+const PolicyParallelArgs = struct { calls: []const PolicyParallelCallArgs };
 
 fn policyDecisionForAction(
     arena: std.mem.Allocator,
@@ -370,8 +376,50 @@ fn policyDecisionForAction(
                 break :blk scoot.policy.evaluateTool(.net_write, mode);
             break :blk scoot.policy.evaluateTool(if (scoot.tools.http.isWrite(method)) .net_write else .net_read, mode);
         },
+        .parallel => policyDecisionForParallel(arena, mode, input),
         .final => .{ .deny = "final 不是可执行工具动作" },
     };
+}
+
+fn policyDecisionForParallel(
+    arena: std.mem.Allocator,
+    mode: scoot.policy.Mode,
+    input: []const u8,
+) scoot.policy.Decision {
+    const args = std.json.parseFromSliceLeaky(PolicyParallelArgs, arena, input, .{
+        .ignore_unknown_fields = true,
+    }) catch return .{ .deny = "parallel 的 action_input 必须是 {\"calls\":[...]} JSON" };
+    if (args.calls.len == 0) return .{ .deny = "parallel 至少需要 1 个调用" };
+    if (args.calls.len > 4) return .{ .deny = "parallel 超过最大并发调用数 4" };
+    for (args.calls, 0..) |call, idx| {
+        const child = std.meta.stringToEnum(scoot.agent.Action, call.action) orelse
+            return .{ .deny = "parallel 包含未知 action" };
+        const child_input = if (call.input.len != 0) call.input else call.action_input;
+        if (child_input.len == 0) return .{ .deny = "parallel 子调用缺少 input" };
+        switch (child) {
+            .file_read, .grep, .glob => {},
+            .http_request => {
+                const http_args = std.json.parseFromSliceLeaky(PolicyHttpArgs, arena, child_input, .{
+                    .ignore_unknown_fields = true,
+                }) catch return .{ .deny = "parallel 无法解析 http_request 参数" };
+                const method = scoot.tools.http.methodFromString(http_args.method) orelse
+                    return .{ .deny = "parallel http_request method 无法识别" };
+                if (scoot.tools.http.isWrite(method))
+                    return .{ .deny = "parallel 只允许 HTTP GET/HEAD，不允许写类 HTTP 方法" };
+            },
+            .bash => return .{ .deny = "parallel 禁止 bash；请使用结构化只读工具" },
+            .file_write, .file_edit => return .{ .deny = "parallel 禁止写文件或编辑文件" },
+            .parallel => return .{ .deny = "parallel 禁止嵌套 parallel" },
+            .final => return .{ .deny = "parallel 子调用不能是 final" },
+        }
+        switch (policyDecisionForAction(arena, mode, child, child_input)) {
+            .allow => {},
+            .deny => |reason| return .{
+                .deny = std.fmt.allocPrint(arena, "parallel 子调用 #{d} 被拒绝：{s}", .{ idx + 1, reason }) catch reason,
+            },
+        }
+    }
+    return .allow;
 }
 
 fn policyDecisionForReadPath(
@@ -1204,6 +1252,18 @@ test "policyDecisionForAction: 复用工具策略语义" {
         .allow => return error.ExpectedDeny,
     }
     switch (policyDecisionForAction(arena, .readonly, .http_request, "{\"method\":\"POST\",\"url\":\"https://example.com\"}")) {
+        .deny => {},
+        .allow => return error.ExpectedDeny,
+    }
+    switch (policyDecisionForAction(arena, .readonly, .parallel, "{\"calls\":[{\"action\":\"file_read\",\"input\":\"{\\\"path\\\":\\\"README.md\\\"}\"}]}")) {
+        .allow => {},
+        .deny => return error.ExpectedAllow,
+    }
+    switch (policyDecisionForAction(arena, .readonly, .parallel, "{\"calls\":[{\"action\":\"http_request\",\"input\":\"{\\\"method\\\":\\\"GET\\\",\\\"url\\\":\\\"https://example.com\\\"}\"}]}")) {
+        .deny => {},
+        .allow => return error.ExpectedDeny,
+    }
+    switch (policyDecisionForAction(arena, .guarded, .parallel, "{\"calls\":[{\"action\":\"file_write\",\"input\":\"{\\\"path\\\":\\\"x\\\",\\\"content\\\":\\\"y\\\"}\"}]}")) {
         .deny => {},
         .allow => return error.ExpectedDeny,
     }

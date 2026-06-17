@@ -61,6 +61,8 @@ Run the built binary:
 
 A minimal template is available at [docs/examples/skills/minimal/SKILL.md](docs/examples/skills/minimal/SKILL.md).
 
+The agent can also use a bounded `parallel` action for 1-4 independent read-only tool calls. It preserves observation order, rejects shell/write/nested calls, and still routes every child call through the normal policy gate.
+
 ## Configuration
 
 Use `--scoot-home` or `SCOOT_HOME` to choose a runtime directory. `--scoot-home` has priority over the environment variable. By default Scoot uses `~/.scoot`.

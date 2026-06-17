@@ -5,7 +5,7 @@
 //!     强制 json_schema 让模型产出一个结构化「步骤」：{thought, action, action_input}。
 //!     这既守住铁律 #2（始终 response_format=json_schema + strict），又对任何
 //!     OpenAI 兼容后端（含简陋本地模型）稳健，且复用已验证的防弹解析路径。
-//!   - action ∈ {bash, final}：bash 走统一工具沙盒（带硬超时）执行，输出作为
+//!   - action ∈ {bash, file_read, ..., parallel, final}：工具走统一护栏（带硬超时）执行，输出作为
 //!     「观察」回灌；final 即终态答复。
 //!
 //! 内存策略：每个推理回合派生局部 ArenaAllocator，回合末整体 deinit 重置，
@@ -29,7 +29,7 @@ pub const Mode = enum {
 /// 每回合的结构化输出 Schema（铁律 #2）：强制模型只产出一个 ReACT 步骤。
 /// `action` 用 enum 收口到已知动作，`additionalProperties:false` + 全 required 满足 strict。
 const react_schema =
-    \\{"type":"object","properties":{"thought":{"type":"string"},"action":{"type":"string","enum":["bash","file_read","file_write","file_edit","grep","glob","http_request","final"]},"action_input":{"type":"string"}},"required":["thought","action","action_input"],"additionalProperties":false}
+    \\{"type":"object","properties":{"thought":{"type":"string"},"action":{"type":"string","enum":["bash","file_read","file_write","file_edit","grep","glob","http_request","parallel","final"]},"action_input":{"type":"string"}},"required":["thought","action","action_input"],"additionalProperties":false}
 ;
 
 /// 注入会话的系统提示：向模型讲清 ReACT 协议与工具约束。
@@ -49,6 +49,7 @@ pub const system_prompt =
     \\  - "grep"：在某个文件内按正则逐行搜索，返回命中行号与原文；action_input 是 JSON 对象 {"pattern":"正则","path":"文件路径"}。支持子集：. ^ $ * + ? [] () | \d \w \s（不支持捕获组/反向引用/lookaround/惰性量词）。
     \\  - "glob"：在目录子树下按通配模式列出匹配的文件路径；action_input 是 JSON 对象 {"pattern":"通配模式","root":"起始目录（可选，默认 .）"}。* ? [] 不跨 /，** 跨目录层级。返回的路径可直接喂给 file_read / grep。
     \\  - "http_request"：发起一次 HTTP/HTTPS 请求；action_input 是 JSON 对象 {"method":"GET","url":"https://...","body":"可选请求体"}。method 取 GET/POST/PUT/DELETE/HEAD/PATCH。返回状态码与响应体；带硬超时，绝不挂死。
+    \\  - "parallel"：并发执行 1-4 个彼此独立的只读调用；action_input 是 JSON 对象 {"calls":[{"action":"file_read","input":"{\"path\":\"README.md\"}"},{"action":"grep","input":"{\"pattern\":\"Scoot\",\"path\":\"AGENT.md\"}"}]}。只允许 file_read / grep / glob / HTTP GET 或 HEAD；禁止 bash、写操作、嵌套 parallel。
     \\  - "final"：给出最终答复；action_input 是给用户的答复文本。
     \\
     \\工作方式：
@@ -62,7 +63,7 @@ pub const system_prompt =
 ;
 
 /// 模型可选的动作。
-pub const Action = enum { bash, file_read, file_write, file_edit, grep, glob, http_request, final };
+pub const Action = enum { bash, file_read, file_write, file_edit, grep, glob, http_request, parallel, final };
 
 /// 一个解析后的 ReACT 步骤。
 pub const Step = struct {
@@ -80,6 +81,12 @@ const FileEditArgs = struct { path: []const u8, old: []const u8, new: []const u8
 const GrepArgs = struct { pattern: []const u8, path: []const u8 };
 const GlobArgs = struct { pattern: []const u8, root: []const u8 = "." };
 const HttpArgs = struct { method: []const u8 = "GET", url: []const u8, body: ?[]const u8 = null };
+const ParallelCallArgs = struct {
+    action: []const u8,
+    input: []const u8 = "",
+    action_input: []const u8 = "",
+};
+const ParallelArgs = struct { calls: []const ParallelCallArgs };
 
 /// 防弹解析工具参数 JSON：失败统一收口为 error.MalformedArgs，由调用处回灌纠错
 /// （铁律 #4：绝不信任模型输出，畸形参数不 panic 而是反馈让模型重试）。
@@ -203,6 +210,7 @@ pub const Agent = struct {
             .file_read, .grep, .glob => self.guardLocalRead(arena, action, input),
             .file_write, .file_edit => policy.evaluateTool(.write, self.policy_mode),
             .http_request => self.guardHttp(arena, input),
+            .parallel => self.guardParallel(arena, input),
             .final => unreachable,
         };
     }
@@ -246,6 +254,43 @@ pub const Agent = struct {
             break :blk if (tools.http.isWrite(m)) .net_write else .net_read;
         };
         return policy.evaluateTool(cap, self.policy_mode);
+    }
+
+    fn guardParallel(self: *Agent, arena: std.mem.Allocator, input: []const u8) policy.Decision {
+        const args = parseToolArgs(ParallelArgs, arena, input) catch
+            return .{ .deny = "parallel 的 action_input 必须是 {\"calls\":[...]} JSON" };
+        if (args.calls.len == 0) return .{ .deny = "parallel 至少需要 1 个调用" };
+        if (args.calls.len > max_parallel_calls) return .{ .deny = "parallel 超过最大并发调用数 4" };
+
+        for (args.calls, 0..) |call, idx| {
+            const child = std.meta.stringToEnum(Action, call.action) orelse
+                return .{ .deny = "parallel 包含未知 action" };
+            const child_input = parallelCallInput(call);
+            if (child_input.len == 0)
+                return .{ .deny = "parallel 子调用缺少 input" };
+            switch (child) {
+                .file_read, .grep, .glob => {},
+                .http_request => {
+                    const http_args = parseToolArgs(HttpArgs, arena, child_input) catch
+                        return .{ .deny = "parallel 无法解析 http_request 参数" };
+                    const method = tools.http.methodFromString(http_args.method) orelse
+                        return .{ .deny = "parallel http_request method 无法识别" };
+                    if (tools.http.isWrite(method))
+                        return .{ .deny = "parallel 只允许 HTTP GET/HEAD，不允许写类 HTTP 方法" };
+                },
+                .bash => return .{ .deny = "parallel 禁止 bash；请使用结构化只读工具" },
+                .file_write, .file_edit => return .{ .deny = "parallel 禁止写文件或编辑文件" },
+                .parallel => return .{ .deny = "parallel 禁止嵌套 parallel" },
+                .final => return .{ .deny = "parallel 子调用不能是 final" },
+            }
+            switch (self.guard(arena, child, child_input)) {
+                .allow => {},
+                .deny => |reason| return .{
+                    .deny = std.fmt.allocPrint(arena, "parallel 子调用 #{d} 被拒绝：{s}", .{ idx + 1, reason }) catch reason,
+                },
+            }
+        }
+        return .allow;
     }
 
     /// 执行一个已过护栏的工具动作，返回回灌给模型的「观察」文本（arena 拥有）。
@@ -300,8 +345,56 @@ pub const Agent = struct {
                 });
                 break :blk try formatHttpResponse(arena, args.url, resp);
             },
+            .parallel => try self.execParallel(arena, input),
             .final => unreachable,
         };
+    }
+
+    fn execParallel(self: *Agent, arena: std.mem.Allocator, input: []const u8) ![]const u8 {
+        const args = try parseToolArgs(ParallelArgs, arena, input);
+        if (args.calls.len == 0 or args.calls.len > max_parallel_calls) return error.MalformedArgs;
+
+        var workers = try arena.alloc(ParallelWorker, args.calls.len);
+        var threads = try arena.alloc(std.Thread, args.calls.len);
+        var spawned: usize = 0;
+        errdefer {
+            for (threads[0..spawned]) |t| t.join();
+            for (workers[0..spawned]) |*w| w.arena_state.deinit();
+        }
+
+        for (args.calls, 0..) |call, idx| {
+            const action = std.meta.stringToEnum(Action, call.action) orelse return error.UnknownAction;
+            const child_input = parallelCallInput(call);
+            workers[idx] = ParallelWorker{
+                .io = self.io,
+                .action = action,
+                .input = child_input,
+                .tool_timeout_ms = self.tool_timeout_ms,
+                .ca_file = self.ca_file,
+                .arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator),
+            };
+            if (self.audit) |lg| {
+                const line = try std.fmt.allocPrint(arena, "parallel[{d}] {s} {s}", .{ idx + 1, @tagName(action), child_input });
+                lg.log(.tool_call, line) catch {};
+            }
+            self.traceParallelCall(idx + 1, action, child_input);
+            threads[idx] = try std.Thread.spawn(.{}, runParallelWorker, .{&workers[idx]});
+            spawned += 1;
+        }
+        for (threads[0..spawned]) |t| t.join();
+        defer for (workers) |*w| w.arena_state.deinit();
+
+        var buf: std.ArrayList(u8) = .empty;
+        try buf.appendSlice(arena, try std.fmt.allocPrint(arena, "[观察] parallel 完成 {d} 个只读调用：\n", .{args.calls.len}));
+        for (workers, 0..) |*w, idx| {
+            const obs = w.observation;
+            if (self.audit) |lg| lg.log(.observation, obs) catch {};
+            self.traceParallelResult(idx + 1, obs);
+            try buf.appendSlice(arena, try std.fmt.allocPrint(arena, "\n[{d}] {s}\n", .{ idx + 1, @tagName(w.action) }));
+            try buf.appendSlice(arena, obs);
+            try buf.append(arena, '\n');
+        }
+        return clipTo(arena, buf.items, parallel_observation_cap);
     }
 
     /// 执行一条 bash 命令（带硬超时）并格式化成「观察」文本（arena 拥有）。
@@ -351,6 +444,22 @@ pub const Agent = struct {
         w.flush() catch {};
     }
 
+    fn traceParallelCall(self: *Agent, idx: usize, action: Action, input: []const u8) void {
+        const w = self.trace orelse return;
+        w.print("[trace parallel {d}] action: {s} ", .{ idx, @tagName(action) }) catch return;
+        traceClipped(w, input, trace_action_input_cap) catch return;
+        w.writeAll("\n") catch return;
+        w.flush() catch {};
+    }
+
+    fn traceParallelResult(self: *Agent, idx: usize, observation: []const u8) void {
+        const w = self.trace orelse return;
+        w.print("[trace parallel {d}] observe: ", .{idx}) catch return;
+        traceClipped(w, observation, trace_observation_cap) catch return;
+        w.writeAll("\n") catch return;
+        w.flush() catch {};
+    }
+
     fn traceFinal(self: *Agent, turn: u32, reply: []const u8) void {
         const w = self.trace orelse return;
         w.print("[trace {d}] final: ", .{turn}) catch return;
@@ -381,6 +490,10 @@ const observation_stream_cap = 2000;
 /// 给更大窗口便于后续 file_edit 看清确切文本），但仍设上限挡住超大文件撑爆上下文。
 const file_read_observation_cap = 8000;
 
+/// parallel v0 是显式 fan-out，不是 DAG 执行器。小上限避免拖垮本地 runtime。
+const max_parallel_calls = 4;
+const parallel_observation_cap = 12_000;
+
 /// CLI trace 只展示执行轨迹摘要，避免海量工具输出刷屏。
 const trace_reason_cap = 240;
 const trace_action_input_cap = 240;
@@ -409,6 +522,8 @@ fn toolErrorObservation(arena: std.mem.Allocator, err: anyerror) ![]u8 {
     const hint = switch (err) {
         error.MalformedArgs => "action_input 不是合法的参数 JSON。file_read 用 {\"path\":\"...\"}；file_write 用 {\"path\":\"...\",\"content\":\"...\"}；file_edit 用 {\"path\":\"...\",\"old\":\"...\",\"new\":\"...\"}；grep 用 {\"pattern\":\"...\",\"path\":\"...\"}；glob 用 {\"pattern\":\"...\"}；http_request 用 {\"method\":\"GET\",\"url\":\"...\"}。",
         error.UnknownMethod => "http_request 的 method 无法识别。请用 GET/POST/PUT/DELETE/HEAD/PATCH 之一。",
+        error.ParallelWriteHttp => "parallel 只允许 HTTP GET/HEAD，不允许 POST/PUT/PATCH/DELETE。",
+        error.UnsupportedParallelAction => "parallel 只允许 file_read / grep / glob / HTTP GET 或 HEAD。",
         error.PatternNotFound => "file_edit 的 old 文本未在文件中找到。请先用 file_read 读出确切文本再编辑。",
         error.AmbiguousMatch => "file_edit 的 old 文本在文件中出现多次。请提供更长、唯一的上下文片段以定位。",
         error.EmptyPattern => "file_edit 的 old 不能为空。",
@@ -503,6 +618,68 @@ fn traceClipped(w: *std.Io.Writer, s: []const u8, cap: usize) !void {
     }
 }
 
+fn parallelCallInput(call: ParallelCallArgs) []const u8 {
+    return if (call.input.len != 0) call.input else call.action_input;
+}
+
+const ParallelWorker = struct {
+    io: std.Io,
+    action: Action,
+    input: []const u8,
+    tool_timeout_ms: u64,
+    ca_file: ?[]const u8,
+    arena_state: std.heap.ArenaAllocator,
+    observation: []const u8 = "[观察] parallel 子调用未执行。",
+};
+
+fn runParallelWorker(worker: *ParallelWorker) void {
+    const arena = worker.arena_state.allocator();
+    worker.observation = execReadTool(arena, worker.io, worker.action, worker.input, worker.tool_timeout_ms, worker.ca_file) catch |err|
+        toolErrorObservation(arena, err) catch "[观察] 工具执行失败，且错误格式化失败。";
+}
+
+fn execReadTool(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    action: Action,
+    input: []const u8,
+    tool_timeout_ms: u64,
+    ca_file: ?[]const u8,
+) ![]const u8 {
+    return switch (action) {
+        .file_read => blk: {
+            const args = try parseToolArgs(FileReadArgs, arena, input);
+            const content = try tools.file.read(arena, io, args.path, tools.file.default_read_limit);
+            break :blk try std.fmt.allocPrint(
+                arena,
+                "[观察] 读取 {s}（{d} 字节）：\n{s}",
+                .{ args.path, content.len, try clipTo(arena, content, file_read_observation_cap) },
+            );
+        },
+        .grep => blk: {
+            const args = try parseToolArgs(GrepArgs, arena, input);
+            const hits = try tools.search.grepFile(arena, io, args.pattern, args.path, tools.search.default_max_hits);
+            break :blk try formatGrepHits(arena, args.path, hits);
+        },
+        .glob => blk: {
+            const args = try parseToolArgs(GlobArgs, arena, input);
+            const paths = try tools.search.glob(arena, io, args.pattern, args.root, tools.search.default_max_results);
+            break :blk try formatGlobPaths(arena, args.pattern, paths);
+        },
+        .http_request => blk: {
+            const args = try parseToolArgs(HttpArgs, arena, input);
+            const method = tools.http.methodFromString(args.method) orelse return error.UnknownMethod;
+            if (tools.http.isWrite(method)) return error.ParallelWriteHttp;
+            const resp = try tools.http.request(arena, io, method, args.url, args.body, .{
+                .timeout_ms = tool_timeout_ms,
+                .ca_file = ca_file,
+            });
+            break :blk try formatHttpResponse(arena, args.url, resp);
+        },
+        else => error.UnsupportedParallelAction,
+    };
+}
+
 test "parseStep 解析合法步骤" {
     const gpa = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(gpa);
@@ -516,6 +693,9 @@ test "parseStep 解析合法步骤" {
     const f = try parseStep(arena, "{\"thought\":\"好了\",\"action\":\"final\",\"action_input\":\"完成\"}");
     try std.testing.expectEqual(Action.final, f.action);
     try std.testing.expectEqualStrings("完成", f.action_input);
+
+    const p = try parseStep(arena, "{\"thought\":\"并发读\",\"action\":\"parallel\",\"action_input\":\"{\\\"calls\\\":[]}\"}");
+    try std.testing.expectEqual(Action.parallel, p.action);
 }
 
 test "parseStep 防弹：非法 JSON 与未知动作" {
@@ -604,6 +784,94 @@ test "run: ReACT 循环执行 bash 工具后给出最终答复" {
             std.mem.indexOf(u8, m.content, "观察") != null) saw_observation = true;
     }
     try std.testing.expect(saw_observation);
+}
+
+test "run: parallel 并发执行本地只读工具并按输入顺序回灌" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const root = "/tmp/scoot_agent_parallel";
+    cwd.deleteTree(io, root) catch {};
+    defer cwd.deleteTree(io, root) catch {};
+    try cwd.createDirPath(io, root);
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/a.txt", .data = "alpha-A" });
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/b.txt", .data = "first\nneedle-B\nlast" });
+
+    const step =
+        \\{"thought":"并发读取","action":"parallel","action_input":"{\"calls\":[{\"action\":\"file_read\",\"input\":\"{\\\"path\\\":\\\"/tmp/scoot_agent_parallel/a.txt\\\"}\"},{\"action\":\"grep\",\"input\":\"{\\\"pattern\\\":\\\"needle\\\",\\\"path\\\":\\\"/tmp/scoot_agent_parallel/b.txt\\\"}\"}]}"}
+    ;
+
+    var brain = ScriptedBrain{ .steps = &.{
+        step,
+        "{\"thought\":\"已读完\",\"action\":\"final\",\"action_input\":\"done\"}",
+    } };
+    var ag = testAgent(&brain, 16);
+
+    var sess = session.Session.init("test");
+    defer sess.deinit(gpa);
+    try sess.append(gpa, .user, "并发读两个文件");
+
+    const reply = try ag.run(gpa, &sess);
+    defer gpa.free(reply);
+    try std.testing.expectEqualStrings("done", reply);
+
+    var observation: []const u8 = "";
+    for (sess.items()) |m| {
+        if (std.mem.indexOf(u8, m.content, "parallel 完成 2 个只读调用") != null) {
+            observation = m.content;
+            break;
+        }
+    }
+    try std.testing.expect(observation.len > 0);
+    const first = std.mem.indexOf(u8, observation, "[1] file_read") orelse return error.MissingFirstObservation;
+    const second = std.mem.indexOf(u8, observation, "[2] grep") orelse return error.MissingSecondObservation;
+    try std.testing.expect(first < second);
+    try std.testing.expect(std.mem.indexOf(u8, observation, "alpha-A") != null);
+    try std.testing.expect(std.mem.indexOf(u8, observation, "needle-B") != null);
+}
+
+test "guard: parallel 只允许受策略约束的只读子调用" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var brain = ScriptedBrain{ .steps = &.{} };
+    var ag = testAgent(&brain, 1);
+
+    const write_call =
+        \\{"calls":[{"action":"file_write","input":"{\"path\":\"x\",\"content\":\"y\"}"}]}
+    ;
+    switch (ag.guard(arena, .parallel, write_call)) {
+        .deny => {},
+        .allow => return error.ExpectedDeny,
+    }
+
+    const nested_call =
+        \\{"calls":[{"action":"parallel","input":"{\"calls\":[]}"}]}
+    ;
+    switch (ag.guard(arena, .parallel, nested_call)) {
+        .deny => {},
+        .allow => return error.ExpectedDeny,
+    }
+
+    const http_get =
+        \\{"calls":[{"action":"http_request","input":"{\"method\":\"GET\",\"url\":\"https://example.com\"}"}]}
+    ;
+    ag.policy_mode = .readonly;
+    switch (ag.guard(arena, .parallel, http_get)) {
+        .deny => {},
+        .allow => return error.ExpectedDeny,
+    }
+
+    const http_post =
+        \\{"calls":[{"action":"http_request","input":"{\"method\":\"POST\",\"url\":\"https://example.com\"}"}]}
+    ;
+    ag.policy_mode = .guarded;
+    switch (ag.guard(arena, .parallel, http_post)) {
+        .deny => {},
+        .allow => return error.ExpectedDeny,
+    }
 }
 
 test "run: 非法步骤触发自纠重试后仍能收敛" {
