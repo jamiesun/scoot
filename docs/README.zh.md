@@ -42,6 +42,8 @@ zig build run -- --version
 ```sh
 ./zig-out/bin/scoot --help
 ./zig-out/bin/scoot config
+./zig-out/bin/scoot doctor
+./zig-out/bin/scoot policy check bash "rm -rf /" --mode guarded
 ./zig-out/bin/scoot skills
 ./zig-out/bin/scoot schedule list
 ./zig-out/bin/scoot -e "统计当前仓库中的 Zig 源文件数量"
@@ -49,6 +51,8 @@ zig build run -- --version
 ```
 
 `--trace` 用于单次 CLI 调试：ReACT 执行轨迹打印到 stderr，最终答复仍保持在 stdout。
+
+`doctor` 执行本地健康检查且不会打印密钥。`policy check` 可在 `guarded`、`readonly` 或 `unrestricted` 策略档下 dry-run 某个工具动作。
 
 ## 配置
 
