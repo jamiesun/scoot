@@ -12,6 +12,9 @@ const usage =
     \\命令:
     \\  repl                 进入交互式 REPL（默认；/exit 退出）
     \\  config               打印解析后的运行目录与后端配置
+    \\  doctor               检查本地运行环境、配置、密钥来源与审计路径
+    \\  policy check <action> <input> [--mode <mode>]
+    \\                       解释某个工具动作在策略档下会被允许还是拒绝
     \\  skills               列出已发现的技能（name / 描述 / 目录）
     \\  schedule [list|run]  列出 / 运行调度任务（无人值守，强制只读安全档）
     \\
@@ -46,6 +49,8 @@ pub fn main(init: std.process.Init) !void {
     var eval_prompt: ?[]const u8 = null;
     var trace = false;
     var cmd_config = false;
+    var cmd_doctor = false;
+    var cmd_policy_check: ?PolicyCheckCommand = null;
     var cmd_skills = false;
     var cmd_schedule: ?[]const u8 = null; // null=未请求；否则为子动作 list/run
     var schedule_ticks: usize = 0; // 0=持续运行
@@ -79,6 +84,10 @@ pub fn main(init: std.process.Init) !void {
             };
         } else if (eql(arg, "config")) {
             cmd_config = true;
+        } else if (eql(arg, "doctor")) {
+            cmd_doctor = true;
+        } else if (eql(arg, "policy")) {
+            cmd_policy_check = parsePolicyCommand(out, args, &i);
         } else if (eql(arg, "skills")) {
             cmd_skills = true;
         } else if (eql(arg, "schedule")) {
@@ -142,6 +151,16 @@ pub fn main(init: std.process.Init) !void {
         if (cfg.backend.ca_file) |ca| try out.print("  CA:       {s}\n", .{ca});
         if (cfg.backend.extra_body) |eb| try out.print("  扩展参数: {f}\n", .{std.json.fmt(eb, .{})});
         try out.print("token 来源: env[{s}] > file > cmd（明文不入库）\n", .{cfg.backend.api_key_env});
+        return;
+    }
+
+    if (cmd_doctor) {
+        try runDoctor(out, arena, io, env, cfg);
+        return;
+    }
+
+    if (cmd_policy_check) |pc| {
+        try runPolicyCheck(out, arena, cfg, pc);
         return;
     }
 
@@ -219,6 +238,292 @@ fn printBackendErrorDetail(out: *Io.Writer, client: *const scoot.llm.Client) !vo
         if (client.last_error_body_truncated) "，已截断" else "",
         body,
     });
+}
+
+const PolicyCheckCommand = struct {
+    action: []const u8,
+    input: []const u8,
+    mode: ?[]const u8 = null,
+};
+
+fn parsePolicyCommand(out: *Io.Writer, args: []const []const u8, i: *usize) PolicyCheckCommand {
+    if (i.* + 1 >= args.len or !eql(args[i.* + 1], "check")) {
+        out.writeAll("error: policy 仅支持子命令：check <action> <input> [--mode <mode>]\n") catch {};
+        die(out, 2);
+    }
+    if (i.* + 3 >= args.len) {
+        out.writeAll("error: policy check 需要 action 和 input 参数\n") catch {};
+        die(out, 2);
+    }
+
+    var pc = PolicyCheckCommand{
+        .action = args[i.* + 2],
+        .input = args[i.* + 3],
+    };
+    var j = i.* + 4;
+    while (j < args.len) : (j += 1) {
+        if (eql(args[j], "--mode")) {
+            j += 1;
+            if (j >= args.len) {
+                out.writeAll("error: --mode 需要 guarded/readonly/unrestricted 参数\n") catch {};
+                die(out, 2);
+            }
+            pc.mode = args[j];
+        } else {
+            out.print("error: policy check 未知参数 '{s}'\n", .{args[j]}) catch {};
+            die(out, 2);
+        }
+    }
+    i.* = args.len - 1;
+    return pc;
+}
+
+fn runPolicyCheck(out: *Io.Writer, arena: std.mem.Allocator, cfg: scoot.config.Config, pc: PolicyCheckCommand) !void {
+    const mode_text = pc.mode orelse cfg.tools.policy;
+    const mode = parsePolicyModeStrict(mode_text) orelse {
+        try out.print("error: 未知策略档 '{s}'（可用：guarded / readonly / unrestricted）\n", .{mode_text});
+        die(out, 2);
+    };
+    const action = std.meta.stringToEnum(scoot.agent.Action, pc.action) orelse {
+        try out.print("error: 未知 action '{s}'\n", .{pc.action});
+        die(out, 2);
+    };
+    const decision = policyDecisionForAction(arena, mode, action, pc.input);
+
+    try out.print("mode={s}\n", .{@tagName(mode)});
+    try out.print("action={s}\n", .{@tagName(action)});
+    switch (decision) {
+        .allow => try out.writeAll("decision=allow\n"),
+        .deny => |reason| try out.print("decision=deny\nreason={s}\n", .{reason}),
+    }
+}
+
+fn parsePolicyModeStrict(s: []const u8) ?scoot.policy.Mode {
+    if (eql(s, "guarded")) return .guarded;
+    if (eql(s, "readonly")) return .readonly;
+    if (eql(s, "unrestricted") or eql(s, "yolo")) return .unrestricted;
+    return null;
+}
+
+const PolicyHttpArgs = struct {
+    url: []const u8,
+    method: []const u8 = "GET",
+    body: ?[]const u8 = null,
+};
+
+fn policyDecisionForAction(
+    arena: std.mem.Allocator,
+    mode: scoot.policy.Mode,
+    action: scoot.agent.Action,
+    input: []const u8,
+) scoot.policy.Decision {
+    return switch (action) {
+        .bash => scoot.policy.evaluate(arena, input, mode),
+        .file_read, .grep, .glob => scoot.policy.evaluateTool(.read, mode),
+        .file_write, .file_edit => scoot.policy.evaluateTool(.write, mode),
+        .http_request => blk: {
+            const args = std.json.parseFromSliceLeaky(PolicyHttpArgs, arena, input, .{
+                .ignore_unknown_fields = true,
+            }) catch break :blk scoot.policy.evaluateTool(.net_write, mode);
+            const method = scoot.tools.http.methodFromString(args.method) orelse
+                break :blk scoot.policy.evaluateTool(.net_write, mode);
+            break :blk scoot.policy.evaluateTool(if (scoot.tools.http.isWrite(method)) .net_write else .net_read, mode);
+        },
+        .final => .{ .deny = "final 不是可执行工具动作" },
+    };
+}
+
+const Doctor = struct {
+    out: *Io.Writer,
+    failures: usize = 0,
+    warnings: usize = 0,
+
+    fn ok(self: *Doctor, name: []const u8, detail: []const u8) !void {
+        try self.out.print("OK\t{s}\t{s}\n", .{ name, detail });
+    }
+
+    fn info(self: *Doctor, name: []const u8, detail: []const u8) !void {
+        try self.out.print("INFO\t{s}\t{s}\n", .{ name, detail });
+    }
+
+    fn warn(self: *Doctor, name: []const u8, detail: []const u8) !void {
+        self.warnings += 1;
+        try self.out.print("WARN\t{s}\t{s}\n", .{ name, detail });
+    }
+
+    fn fail(self: *Doctor, name: []const u8, detail: []const u8) !void {
+        self.failures += 1;
+        try self.out.print("FAIL\t{s}\t{s}\n", .{ name, detail });
+    }
+};
+
+fn runDoctor(
+    out: *Io.Writer,
+    arena: std.mem.Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+    cfg: scoot.config.Config,
+) !void {
+    var d = Doctor{ .out = out };
+    try out.writeAll("scoot doctor\n");
+
+    try d.ok("runtime.home", cfg.dirs.home);
+    try checkConfigFile(&d, io, cfg);
+    try checkWritablePath(&d, arena, io, "runtime.logs", cfg.dirs.logs_dir);
+    try checkWritablePath(&d, arena, io, "runtime.sessions", cfg.dirs.sessions_dir);
+    try checkBackendConfig(&d, io, cfg);
+    try checkPolicyConfig(&d, arena, cfg);
+    try checkAgentConfig(&d, arena, cfg);
+    try checkTokenSource(&d, arena, io, env, cfg);
+    try checkSkillsConfig(&d, arena, io, cfg);
+    try checkScheduleConfig(&d, cfg);
+
+    try d.info("backend.reachability", "skipped; doctor 第一版不主动触网");
+    try out.print("summary\tfailures={d}\twarnings={d}\n", .{ d.failures, d.warnings });
+    if (d.failures != 0) die(out, 1);
+}
+
+fn checkConfigFile(d: *Doctor, io: std.Io, cfg: scoot.config.Config) !void {
+    if (fileExists(io, cfg.active_config_file)) {
+        try d.ok("config.file", cfg.active_config_file);
+    } else {
+        try d.warn("config.file", "未找到配置文件，当前使用内置默认值");
+    }
+}
+
+fn checkWritablePath(
+    d: *Doctor,
+    arena: std.mem.Allocator,
+    io: std.Io,
+    name: []const u8,
+    dir: []const u8,
+) !void {
+    const path = try std.fs.path.join(arena, &.{ dir, ".scoot-doctor-write-test" });
+    const cwd = Io.Dir.cwd();
+    var f = cwd.createFile(io, path, .{ .truncate = true }) catch |err| {
+        try d.fail(name, try std.fmt.allocPrint(arena, "{s}: {s}", .{ dir, @errorName(err) }));
+        return;
+    };
+    f.close(io);
+    cwd.deleteFile(io, path) catch {};
+    try d.ok(name, dir);
+}
+
+fn checkBackendConfig(d: *Doctor, io: std.Io, cfg: scoot.config.Config) !void {
+    if (!startsWithHttp(cfg.backend.base_url)) {
+        try d.fail("backend.base_url", "必须以 http:// 或 https:// 开头");
+    } else {
+        try d.ok("backend.base_url", cfg.backend.base_url);
+    }
+    if (cfg.backend.model.len == 0) {
+        try d.fail("backend.model", "model 不能为空");
+    } else {
+        try d.ok("backend.model", cfg.backend.model);
+    }
+    if (cfg.backend.ca_file) |ca| {
+        if (fileExists(io, ca)) {
+            try d.ok("backend.ca_file", ca);
+        } else {
+            try d.fail("backend.ca_file", "配置了 CA 文件但路径不可读");
+        }
+    }
+}
+
+fn checkPolicyConfig(d: *Doctor, arena: std.mem.Allocator, cfg: scoot.config.Config) !void {
+    if (parsePolicyModeStrict(cfg.tools.policy)) |mode| {
+        try d.ok("tools.policy", @tagName(mode));
+    } else {
+        try d.fail("tools.policy", "未知策略档；可用 guarded / readonly / unrestricted");
+    }
+    if (cfg.tools.timeout_ms == 0) {
+        try d.warn("tools.timeout_ms", "0 表示工具无硬超时，不建议用于 agent 运行");
+    } else {
+        try d.ok("tools.timeout_ms", try std.fmt.allocPrint(arena, "{d}ms", .{cfg.tools.timeout_ms}));
+    }
+}
+
+fn checkAgentConfig(d: *Doctor, arena: std.mem.Allocator, cfg: scoot.config.Config) !void {
+    if (cfg.agent.max_turns == 0) {
+        try d.fail("agent.max_turns", "max_turns 必须大于 0");
+    } else {
+        try d.ok("agent.max_turns", try std.fmt.allocPrint(arena, "{d}", .{cfg.agent.max_turns}));
+    }
+}
+
+fn checkTokenSource(
+    d: *Doctor,
+    arena: std.mem.Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+    cfg: scoot.config.Config,
+) !void {
+    const token = cfg.resolveToken(arena, io, env) catch |err| switch (err) {
+        error.NoApiKey => {
+            try d.warn("token", "未找到 token；本地无鉴权后端可忽略");
+            return;
+        },
+        error.InsecurePermissions => {
+            try d.fail("token", "token 文件权限过宽，已拒绝读取；请 chmod 600");
+            return;
+        },
+        else => {
+            try d.warn("token", @errorName(err));
+            return;
+        },
+    };
+    try d.ok("token", try std.fmt.allocPrint(arena, "source={s} value={s}", .{
+        @tagName(token.source),
+        scoot.secret.redact(token.value),
+    }));
+}
+
+fn checkSkillsConfig(d: *Doctor, arena: std.mem.Allocator, io: std.Io, cfg: scoot.config.Config) !void {
+    if (!cfg.skills.enabled) {
+        try d.info("skills", "disabled");
+        return;
+    }
+    const paths = cfg.skillPaths(arena) catch |err| {
+        try d.fail("skills.paths", @errorName(err));
+        return;
+    };
+    for (paths) |p| {
+        if (dirExists(io, p)) {
+            try d.ok("skills.path", p);
+        } else {
+            try d.warn("skills.path", try std.fmt.allocPrint(arena, "{s} 不存在", .{p}));
+        }
+    }
+}
+
+fn checkScheduleConfig(d: *Doctor, cfg: scoot.config.Config) !void {
+    if (!cfg.schedule.enabled) {
+        try d.info("schedule", "disabled");
+        return;
+    }
+    var invalid: usize = 0;
+    for (cfg.schedule.jobs) |job| {
+        if (job.toJob() == null) invalid += 1;
+    }
+    if (invalid == 0) {
+        try d.ok("schedule.jobs", "all valid");
+    } else {
+        try d.warn("schedule.jobs", "存在非法任务触发器，运行时会跳过");
+    }
+}
+
+fn fileExists(io: std.Io, path: []const u8) bool {
+    _ = std.Io.Dir.cwd().statFile(io, path, .{}) catch return false;
+    return true;
+}
+
+fn dirExists(io: std.Io, path: []const u8) bool {
+    var d = std.Io.Dir.cwd().openDir(io, path, .{}) catch return false;
+    d.close(io);
+    return true;
+}
+
+fn startsWithHttp(s: []const u8) bool {
+    return std.mem.startsWith(u8, s, "http://") or std.mem.startsWith(u8, s, "https://");
 }
 
 fn eql(a: []const u8, b: []const u8) bool {
@@ -684,6 +989,41 @@ test "readLine: 含换行/无尾换行/空输入" {
 
     var in3 = Io.Reader.fixed("");
     try std.testing.expect((try readLine(&in3)) == null);
+}
+
+test "policyDecisionForAction: 复用工具策略语义" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    switch (policyDecisionForAction(arena, .guarded, .bash, "rm -rf /")) {
+        .deny => {},
+        .allow => return error.ExpectedDeny,
+    }
+    switch (policyDecisionForAction(arena, .readonly, .file_read, "{\"path\":\"README.md\"}")) {
+        .allow => {},
+        .deny => return error.ExpectedAllow,
+    }
+    switch (policyDecisionForAction(arena, .readonly, .file_write, "{\"path\":\"x\",\"content\":\"y\"}")) {
+        .deny => {},
+        .allow => return error.ExpectedDeny,
+    }
+    switch (policyDecisionForAction(arena, .readonly, .http_request, "{\"method\":\"GET\",\"url\":\"https://example.com\"}")) {
+        .allow => {},
+        .deny => return error.ExpectedAllow,
+    }
+    switch (policyDecisionForAction(arena, .readonly, .http_request, "{\"method\":\"POST\",\"url\":\"https://example.com\"}")) {
+        .deny => {},
+        .allow => return error.ExpectedDeny,
+    }
+}
+
+test "parsePolicyModeStrict: 未知策略不静默回落" {
+    try std.testing.expectEqual(scoot.policy.Mode.guarded, parsePolicyModeStrict("guarded").?);
+    try std.testing.expectEqual(scoot.policy.Mode.readonly, parsePolicyModeStrict("readonly").?);
+    try std.testing.expectEqual(scoot.policy.Mode.unrestricted, parsePolicyModeStrict("unrestricted").?);
+    try std.testing.expect(parsePolicyModeStrict("surprise") == null);
 }
 
 test {

@@ -42,6 +42,8 @@ Run the built binary:
 ```sh
 ./zig-out/bin/scoot --help
 ./zig-out/bin/scoot config
+./zig-out/bin/scoot doctor
+./zig-out/bin/scoot policy check bash "rm -rf /" --mode guarded
 ./zig-out/bin/scoot skills
 ./zig-out/bin/scoot schedule list
 ./zig-out/bin/scoot -e "count Zig source files in this repository"
@@ -49,6 +51,8 @@ Run the built binary:
 ```
 
 `--trace` is for one-shot CLI debugging. It prints the ReACT execution trace to stderr while keeping the final answer on stdout.
+
+`doctor` performs local health checks without printing secrets. `policy check` dry-runs a tool action against `guarded`, `readonly`, or `unrestricted` policy mode.
 
 ## Configuration
 
