@@ -16,6 +16,7 @@ const usage =
     \\  policy check <action> <input> [--mode <mode>]
     \\                       解释某个工具动作在策略档下会被允许还是拒绝
     \\  skills               列出已发现的技能（name / 描述 / 目录）
+    \\  skills check [dir]   校验本地 skill 目录；缺省扫描配置的 skill 搜索路径
     \\  schedule [list|run]  列出 / 运行调度任务（无人值守，强制只读安全档）
     \\
     \\选项:
@@ -53,7 +54,7 @@ pub fn main(init: std.process.Init) !void {
     var cmd_config = false;
     var cmd_doctor = false;
     var cmd_policy_check: ?PolicyCheckCommand = null;
-    var cmd_skills = false;
+    var cmd_skills: ?SkillsCommand = null;
     var cmd_schedule: ?[]const u8 = null; // null=未请求；否则为子动作 list/run
     var schedule_ticks: usize = 0; // 0=持续运行
     var i: usize = 1; // args[0] 是程序名。
@@ -98,7 +99,22 @@ pub fn main(init: std.process.Init) !void {
         } else if (eql(arg, "policy")) {
             cmd_policy_check = parsePolicyCommand(out, args, &i);
         } else if (eql(arg, "skills")) {
-            cmd_skills = true;
+            if (i + 1 < args.len and !std.mem.startsWith(u8, args[i + 1], "-")) {
+                i += 1;
+                if (eql(args[i], "check")) {
+                    var target: ?[]const u8 = null;
+                    if (i + 1 < args.len and !std.mem.startsWith(u8, args[i + 1], "-")) {
+                        i += 1;
+                        target = args[i];
+                    }
+                    cmd_skills = .{ .check = target };
+                } else {
+                    try out.print("error: 未知 skills 子命令 '{s}'（可用：check）\n", .{args[i]});
+                    die(out, 2);
+                }
+            } else {
+                cmd_skills = .list;
+            }
         } else if (eql(arg, "schedule")) {
             // 可选子动作；缺省为 list（只读、无副作用）。下一 token 若是选项则不消费。
             if (i + 1 < args.len and !std.mem.startsWith(u8, args[i + 1], "-")) {
@@ -176,8 +192,11 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    if (cmd_skills) {
-        try printSkills(out, arena, io, cfg);
+    if (cmd_skills) |cmd| {
+        switch (cmd) {
+            .list => try printSkills(out, arena, io, cfg),
+            .check => |target| try checkSkills(out, arena, io, cfg, target),
+        }
         return;
     }
 
@@ -256,6 +275,11 @@ const PolicyCheckCommand = struct {
     action: []const u8,
     input: []const u8,
     mode: ?[]const u8 = null,
+};
+
+const SkillsCommand = union(enum) {
+    list,
+    check: ?[]const u8,
 };
 
 fn parsePolicyCommand(out: *Io.Writer, args: []const []const u8, i: *usize) PolicyCheckCommand {
@@ -639,6 +663,101 @@ fn printSkills(
     try out.print("\n已发现 {d} 个技能:\n", .{reg.count()});
     for (reg.skills.items) |s| {
         try out.print("  - {s}：{s}\n    {s}\n", .{ s.name, s.description, s.dir });
+    }
+}
+
+const SkillCheckSummary = struct {
+    checked: usize = 0,
+    failures: usize = 0,
+    warnings: usize = 0,
+};
+
+/// `scoot skills check [dir]`：只读校验 skill 结构。它只解析 SKILL.md，不执行任何脚本。
+fn checkSkills(
+    out: *Io.Writer,
+    arena: std.mem.Allocator,
+    io: std.Io,
+    cfg: scoot.config.Config,
+    target: ?[]const u8,
+) !void {
+    var summary: SkillCheckSummary = .{};
+    try out.writeAll("技能校验:\n");
+
+    if (target) |dir| {
+        try checkOneSkill(out, arena, io, dir, &summary);
+    } else {
+        if (!cfg.skills.enabled) {
+            summary.warnings += 1;
+            try out.writeAll("INFO skills disabled by config (skills.enabled=false)\n");
+        } else {
+            const paths = try cfg.skillPaths(arena);
+            for (paths) |root| {
+                try scanSkillRoot(out, arena, io, root, &summary);
+            }
+            if (summary.checked == 0) {
+                summary.warnings += 1;
+                try out.writeAll("WARN no skill directories with SKILL.md were found in configured search paths\n");
+            }
+        }
+    }
+
+    try out.print("summary checked={d} failures={d} warnings={d}\n", .{
+        summary.checked,
+        summary.failures,
+        summary.warnings,
+    });
+    if (summary.failures > 0) die(out, 1);
+}
+
+fn scanSkillRoot(
+    out: *Io.Writer,
+    arena: std.mem.Allocator,
+    io: std.Io,
+    root: []const u8,
+    summary: *SkillCheckSummary,
+) !void {
+    const cwd = std.Io.Dir.cwd();
+    var dir = cwd.openDir(io, root, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => {
+            summary.warnings += 1;
+            try out.print("WARN {s}: search path not found\n", .{root});
+            return;
+        },
+        else => return err,
+    };
+    defer dir.close(io);
+
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .directory) continue;
+        if (entry.name.len == 0 or entry.name[0] == '.') continue;
+
+        const candidate = try std.fs.path.join(arena, &.{ root, entry.name });
+        const md_path = try std.fs.path.join(arena, &.{ candidate, "SKILL.md" });
+        if (!fileExists(io, md_path)) continue;
+        try checkOneSkill(out, arena, io, candidate, summary);
+    }
+}
+
+fn checkOneSkill(
+    out: *Io.Writer,
+    arena: std.mem.Allocator,
+    io: std.Io,
+    dir: []const u8,
+    summary: *SkillCheckSummary,
+) !void {
+    summary.checked += 1;
+    const res = try scoot.skill.validateDir(arena, io, dir);
+    switch (res) {
+        .valid => |meta| try out.print("OK {s} name={s} description={s}\n", .{
+            dir,
+            meta.name,
+            meta.description,
+        }),
+        .invalid => |msg| {
+            summary.failures += 1;
+            try out.print("FAIL {s}: {s}\n", .{ dir, msg });
+        },
     }
 }
 

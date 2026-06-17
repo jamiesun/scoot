@@ -46,6 +46,8 @@ zig build run -- --version
 ./zig-out/bin/scoot --scoot-home /tmp/scoot-test doctor
 ./zig-out/bin/scoot policy check bash "rm -rf /" --mode guarded
 ./zig-out/bin/scoot skills
+./zig-out/bin/scoot skills check
+./zig-out/bin/scoot skills check docs/examples/skills/minimal
 ./zig-out/bin/scoot schedule list
 ./zig-out/bin/scoot -e "统计当前仓库中的 Zig 源文件数量"
 ./zig-out/bin/scoot --trace -e "统计当前仓库中的 Zig 源文件数量"
@@ -54,6 +56,10 @@ zig build run -- --version
 `--trace` 用于单次 CLI 调试：ReACT 执行轨迹打印到 stderr，最终答复仍保持在 stdout。
 
 `doctor` 执行本地健康检查且不会打印密钥。`--scoot-home` 可覆盖运行目录，方便隔离测试。`policy check` 可在 `guarded`、`readonly` 或 `unrestricted` 策略档下 dry-run 某个工具动作。
+
+`skills check [dir]` 用于校验本地 skill 结构，不会执行 skill 脚本。合法 skill 目录需要包含 `SKILL.md`，且 YAML front matter 中必须有非空 `name` 与 `description`；兼容性声明暂未定义执行门槛，出现时会给出明确失败。
+
+最小模板见 [docs/examples/skills/minimal/SKILL.md](examples/skills/minimal/SKILL.md)。
 
 ## 配置
 
