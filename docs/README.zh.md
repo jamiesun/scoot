@@ -48,6 +48,7 @@ zig build run -- --version
 ./zig-out/bin/scoot skills
 ./zig-out/bin/scoot skills check
 ./zig-out/bin/scoot skills check docs/examples/skills/minimal
+./zig-out/bin/scoot skills pack docs/examples/skills/minimal minimal.scoot-skill.tar
 ./zig-out/bin/scoot schedule list
 ./zig-out/bin/scoot -e "统计当前仓库中的 Zig 源文件数量"
 ./zig-out/bin/scoot --trace -e "统计当前仓库中的 Zig 源文件数量"
@@ -58,6 +59,8 @@ zig build run -- --version
 `doctor` 执行本地健康检查且不会打印密钥。`--scoot-home` 可覆盖运行目录，方便隔离测试。`policy check` 可在 `guarded`、`readonly` 或 `unrestricted` 策略档下 dry-run 某个工具动作。
 
 `skills check [dir]` 用于校验本地 skill 结构，不会执行 skill 脚本。合法 skill 目录需要包含 `SKILL.md`，且 YAML front matter 中必须有非空 `name` 与 `description`；兼容性声明暂未定义执行门槛，出现时会给出明确失败。
+
+`skills pack <dir> [out.tar]` 会先校验 skill，再导出带 `.scoot-skill.json` 审查清单的 tar 包。它只包含非隐藏普通文件，拒绝符号链接等不支持的文件类型，也不会执行脚本或绕过 policy。
 
 最小模板见 [docs/examples/skills/minimal/SKILL.md](examples/skills/minimal/SKILL.md)。
 
