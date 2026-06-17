@@ -52,6 +52,7 @@ Run the built binary:
 ./zig-out/bin/scoot skills
 ./zig-out/bin/scoot skills check
 ./zig-out/bin/scoot skills check docs/examples/skills/minimal
+./zig-out/bin/scoot skills check docs/examples/skills/metadata
 ./zig-out/bin/scoot skills pack docs/examples/skills/minimal minimal.scoot-skill.tar
 ./zig-out/bin/scoot wasm-tools check path/to/tool
 ./zig-out/bin/scoot schedule list
@@ -64,11 +65,11 @@ Run the built binary:
 
 `doctor` performs local health checks without printing secrets. `--scoot-home` overrides the runtime directory for isolated tests. `policy check` dry-runs a tool action against `guarded`, `readonly`, or `unrestricted` policy mode.
 
-`skills check [dir]` validates local skill structure without executing skill scripts. A valid skill directory contains `SKILL.md` with YAML front matter including non-empty `name` and `description`; unsupported compatibility declarations fail clearly until Scoot defines those gates.
+`skills check [dir]` validates local skill structure without executing skill scripts. A valid skill directory contains `SKILL.md` with YAML front matter including non-empty `name` and `description`; optional `capabilities`, `allowed_tools`, and `scope` metadata is validated for review. Unsupported compatibility declarations fail clearly until Scoot defines those gates.
 
 `skills pack <dir> [out.tar]` validates a skill and exports a tar package with a `.scoot-skill.json` review manifest. It includes regular non-hidden files, rejects unsupported file types such as symlinks, and does not execute scripts or grant policy bypasses.
 
-A minimal template is available at [docs/examples/skills/minimal/SKILL.md](docs/examples/skills/minimal/SKILL.md).
+Templates are available at [docs/examples/skills/minimal/SKILL.md](docs/examples/skills/minimal/SKILL.md) and [docs/examples/skills/metadata/SKILL.md](docs/examples/skills/metadata/SKILL.md).
 
 `wasm-tools check <dir>` validates a local Wasm tool package boundary: `manifest.toml`, `policy.toml`, referenced JSON schemas, and safe relative paths. It is static validation only and never loads or executes Wasm.
 
@@ -96,6 +97,8 @@ Start from [config.example.toml](config.example.toml).
 - Chinese roadmap: [docs/ROADMAP.zh.md](docs/ROADMAP.zh.md)
 - English agent guide: [AGENT.md](AGENT.md)
 - Chinese agent guide: [docs/AGENT.zh.md](docs/AGENT.zh.md)
+- English skills guide: [docs/SKILLS.md](docs/SKILLS.md)
+- Chinese skills guide: [docs/SKILLS.zh.md](docs/SKILLS.zh.md)
 - English Wasm tool packages: [docs/WASM_TOOLS.md](docs/WASM_TOOLS.md)
 - Chinese Wasm tool packages: [docs/WASM_TOOLS.zh.md](docs/WASM_TOOLS.zh.md)
 - mdBook source: [book/](book/)

@@ -52,6 +52,7 @@ zig build run -- --version
 ./zig-out/bin/scoot skills
 ./zig-out/bin/scoot skills check
 ./zig-out/bin/scoot skills check docs/examples/skills/minimal
+./zig-out/bin/scoot skills check docs/examples/skills/metadata
 ./zig-out/bin/scoot skills pack docs/examples/skills/minimal minimal.scoot-skill.tar
 ./zig-out/bin/scoot wasm-tools check path/to/tool
 ./zig-out/bin/scoot schedule list
@@ -64,11 +65,11 @@ zig build run -- --version
 
 `doctor` 执行本地健康检查且不会打印密钥。`--scoot-home` 可覆盖运行目录，方便隔离测试。`policy check` 可在 `guarded`、`readonly` 或 `unrestricted` 策略档下 dry-run 某个工具动作。
 
-`skills check [dir]` 用于校验本地 skill 结构，不会执行 skill 脚本。合法 skill 目录需要包含 `SKILL.md`，且 YAML front matter 中必须有非空 `name` 与 `description`；兼容性声明暂未定义执行门槛，出现时会给出明确失败。
+`skills check [dir]` 用于校验本地 skill 结构，不会执行 skill 脚本。合法 skill 目录需要包含 `SKILL.md`，且 YAML front matter 中必须有非空 `name` 与 `description`；可选的 `capabilities`、`allowed_tools`、`scope` 审查元数据也会被校验。兼容性声明暂未定义执行门槛，出现时会给出明确失败。
 
 `skills pack <dir> [out.tar]` 会先校验 skill，再导出带 `.scoot-skill.json` 审查清单的 tar 包。它只包含非隐藏普通文件，拒绝符号链接等不支持的文件类型，也不会执行脚本或绕过 policy。
 
-最小模板见 [docs/examples/skills/minimal/SKILL.md](examples/skills/minimal/SKILL.md)。
+模板见 [docs/examples/skills/minimal/SKILL.md](examples/skills/minimal/SKILL.md) 和 [docs/examples/skills/metadata/SKILL.md](examples/skills/metadata/SKILL.md)。
 
 `wasm-tools check <dir>` 校验本地 Wasm 工具包边界，包括 `manifest.toml`、`policy.toml`、引用的 JSON schema 和安全相对路径。它只做静态校验，不会加载或执行 Wasm。
 
@@ -96,6 +97,8 @@ Agent 也可以使用有界 `parallel` 动作一次执行 1-4 个彼此独立的
 - 中文路线图：[ROADMAP.zh.md](ROADMAP.zh.md)
 - 英文 Agent 指南：[AGENT.md](../AGENT.md)
 - 中文 Agent 指南：[AGENT.zh.md](AGENT.zh.md)
+- 英文 Skills 指南：[SKILLS.md](SKILLS.md)
+- 中文 Skills 指南：[SKILLS.zh.md](SKILLS.zh.md)
 - 英文 Wasm 工具包：[WASM_TOOLS.md](WASM_TOOLS.md)
 - 中文 Wasm 工具包：[WASM_TOOLS.zh.md](WASM_TOOLS.zh.md)
 - mdBook 源码：[book/](../book/)

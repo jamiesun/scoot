@@ -848,6 +848,7 @@ fn printSkills(
     try out.print("\n已发现 {d} 个技能:\n", .{reg.count()});
     for (reg.skills.items) |s| {
         try out.print("  - {s}：{s}\n    {s}\n", .{ s.name, s.description, s.dir });
+        try printSkillMetadata(out, s.capabilities, s.allowed_tools, s.scope, "    ");
     }
 }
 
@@ -934,16 +935,31 @@ fn checkOneSkill(
     summary.checked += 1;
     const res = try scoot.skill.validateDir(arena, io, dir);
     switch (res) {
-        .valid => |meta| try out.print("OK {s} name={s} description={s}\n", .{
-            dir,
-            meta.name,
-            meta.description,
-        }),
+        .valid => |meta| {
+            try out.print("OK {s} name={s} description={s}\n", .{
+                dir,
+                meta.name,
+                meta.description,
+            });
+            try printSkillMetadata(out, meta.capabilities, meta.allowed_tools, meta.scope, "");
+        },
         .invalid => |msg| {
             summary.failures += 1;
             try out.print("FAIL {s}: {s}\n", .{ dir, msg });
         },
     }
+}
+
+fn printSkillMetadata(
+    out: *Io.Writer,
+    capabilities: []const u8,
+    allowed_tools: []const u8,
+    scope: []const u8,
+    prefix: []const u8,
+) !void {
+    if (capabilities.len != 0) try out.print("{s}capabilities={s}\n", .{ prefix, capabilities });
+    if (allowed_tools.len != 0) try out.print("{s}allowed_tools={s}\n", .{ prefix, allowed_tools });
+    if (scope.len != 0) try out.print("{s}scope={s}\n", .{ prefix, scope });
 }
 
 /// `scoot wasm-tools check <dir>`：只读校验 Wasm 工具包边界，不加载或执行 Wasm。
@@ -1123,6 +1139,9 @@ const SkillPackManifest = struct {
     format: []const u8 = "scoot.skill.package.v1",
     name: []const u8,
     description: []const u8,
+    capabilities: []const []const u8,
+    allowed_tools: []const []const u8,
+    scope: []const u8,
     files: []const SkillPackManifestFile,
     file_count: usize,
     total_bytes: u64,
@@ -1139,11 +1158,16 @@ fn skillPackManifest(
 ) ![]const u8 {
     const manifest_files = try arena.alloc(SkillPackManifestFile, files.len);
     for (files, 0..) |f, i| manifest_files[i] = .{ .path = f.rel, .size = f.size };
+    const capabilities = try scoot.skill.parseInlineList(arena, meta.capabilities);
+    const allowed_tools = try scoot.skill.parseInlineList(arena, meta.allowed_tools);
 
     var aw = std.Io.Writer.Allocating.init(arena);
     try std.json.Stringify.value(SkillPackManifest{
         .name = meta.name,
         .description = meta.description,
+        .capabilities = capabilities,
+        .allowed_tools = allowed_tools,
+        .scope = meta.scope,
         .files = manifest_files,
         .file_count = files.len,
         .total_bytes = total_bytes,
@@ -1627,7 +1651,7 @@ test "packSkill: 导出 tar 包并写入审查 manifest" {
     try cwd.createDirPath(io, root ++ "/scripts");
     try cwd.writeFile(io, .{
         .sub_path = root ++ "/SKILL.md",
-        .data = "---\nname: pack-ok\ndescription: Pack test skill.\n---\n# Pack\n",
+        .data = "---\nname: pack-ok\ndescription: Pack test skill.\ncapabilities: [instructions, scripts]\nallowed_tools: [bash, file_read]\nscope: workflow\n---\n# Pack\n",
     });
     try cwd.writeFile(io, .{ .sub_path = root ++ "/scripts/run.sh", .data = "echo ok\n" });
     try cwd.writeFile(io, .{ .sub_path = root ++ "/.env", .data = "SECRET=must-not-package\n" });
@@ -1642,6 +1666,11 @@ test "packSkill: 导出 tar 包并写入审查 manifest" {
 
     const archive = try cwd.readFileAlloc(io, out_path, arena, .limited(1 << 20));
     try std.testing.expect(std.mem.indexOf(u8, archive, "scoot.skill.package.v1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, archive, "\"capabilities\": [") != null);
+    try std.testing.expect(std.mem.indexOf(u8, archive, "\"scripts\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, archive, "\"allowed_tools\": [") != null);
+    try std.testing.expect(std.mem.indexOf(u8, archive, "\"file_read\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, archive, "\"scope\": \"workflow\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, archive, "pack-ok/.scoot-skill.json") != null);
     try std.testing.expect(std.mem.indexOf(u8, archive, "pack-ok/SKILL.md") != null);
     try std.testing.expect(std.mem.indexOf(u8, archive, "pack-ok/scripts/run.sh") != null);
