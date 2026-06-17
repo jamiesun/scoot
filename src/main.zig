@@ -1737,7 +1737,7 @@ const AuditSink = struct {
         if (f.stat(io)) |st| {
             self.fw.seekTo(st.size) catch {}; // 追加到末尾，不覆盖历史
         } else |_| {}
-        self.logger = scoot.audit.Logger.init(&self.fw.interface);
+        self.logger = scoot.audit.Logger.init(&self.fw.interface, io);
     }
 
     /// 可注入 agent 的 logger 指针；未成功打开时为 null（agent 静默跳过留痕）。
