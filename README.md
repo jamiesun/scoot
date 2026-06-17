@@ -109,4 +109,4 @@ Each artifact includes a `.tar.gz` archive and a `.sha256` checksum.
 
 ## License
 
-TBD.
+MIT. See [LICENSE](LICENSE).
