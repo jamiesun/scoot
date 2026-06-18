@@ -95,6 +95,15 @@ Use `--scoot-home` or `SCOOT_HOME` to choose a runtime directory. `--scoot-home`
 
 Start from [config.example.toml](config.example.toml).
 
+**Zero-config / CI runs.** Every non-secret field can be overridden by a
+`SCOOT_*` environment variable (precedence: `SCOOT_*` env > `config.toml` >
+defaults), so Scoot can run with **no config file** — point `SCOOT_HOME` at a
+temp dir and pass settings through the environment. Keep the token in a GitHub
+secret (named by `backend.api_key_env`, default `OPENAI_API_KEY`); it is never
+read from `SCOOT_*` directly. See
+[Configuration → Environment Variable Overrides](book/en/src/configuration.md#environment-variable-overrides)
+for the full variable table and a GitHub Actions example.
+
 ## Documentation
 
 The **User Guide** (bilingual mdBook under [`book/`](book/)) is the comprehensive,

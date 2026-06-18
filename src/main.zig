@@ -218,7 +218,7 @@ pub fn main(init: std.process.Init) !void {
             else => return err,
         };
     var load_report: scoot.config.LoadReport = .{};
-    const cfg = scoot.config.Config.loadFromDirs(arena, io, dirs, &load_report) catch |err| switch (err) {
+    var cfg = scoot.config.Config.loadFromDirs(arena, io, dirs, &load_report) catch |err| switch (err) {
         error.InvalidConfig => {
             if (load_report.toml_diag) |d| {
                 try out.print(
@@ -246,6 +246,18 @@ pub fn main(init: std.process.Init) !void {
     if (load_report.unknown_keys.len > 0) {
         for (load_report.unknown_keys) |k|
             err_out.print("warning: 配置含未识别的键 `{s}`，已忽略并回落默认值（请检查拼写）。\n", .{k}) catch {};
+        err_out.flush() catch {};
+    }
+
+    // SCOOT_* 环境变量覆盖（优先级 env > 配置文件 > 默认）：支持 CI / 零配置临时运行。
+    // 密钥不在此读明文，仍走 backend.api_key_env 指向的变量（默认 OPENAI_API_KEY）。
+    cfg.applyEnvOverrides(arena, env, &load_report) catch |err| {
+        try out.print("error: 应用环境变量配置覆盖失败（{s}）\n", .{@errorName(err)});
+        die(out, 1);
+    };
+    if (load_report.env_warnings.len > 0) {
+        for (load_report.env_warnings) |w|
+            err_out.print("warning: 环境变量配置覆盖被忽略——{s}\n", .{w}) catch {};
         err_out.flush() catch {};
     }
 

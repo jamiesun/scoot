@@ -23,6 +23,83 @@ you want to change. Start from [`config.example.toml`](https://github.com/jamies
 Run `scoot config` at any time to print the *resolved* runtime directory and
 backend configuration (with secrets redacted).
 
+## Environment Variable Overrides
+
+Every non-secret config field can be overridden by a `SCOOT_*` environment
+variable. The overlay is applied **in memory** with precedence:
+
+```text
+SCOOT_* environment  >  config.toml / config.json  >  built-in defaults
+```
+
+Environment values **always win**, whether or not a config file exists, so you
+can run Scoot with **no config file at all** — point `SCOOT_HOME` at a throwaway
+directory and pass everything through the environment. This is ideal for CI and
+ephemeral, run-once-then-discard execution.
+
+| Environment variable | Overrides | Type |
+| --- | --- | --- |
+| `SCOOT_BACKEND_BASE_URL` | `backend.base_url` | string |
+| `SCOOT_BACKEND_MODEL` | `backend.model` | string |
+| `SCOOT_BACKEND_API_KEY_ENV` | `backend.api_key_env` | string (names the var holding the token) |
+| `SCOOT_BACKEND_API_KEY_FILE` | `backend.api_key_file` | string |
+| `SCOOT_BACKEND_API_KEY_CMD` | `backend.api_key_cmd` | string |
+| `SCOOT_BACKEND_CA_FILE` | `backend.ca_file` | string |
+| `SCOOT_BACKEND_EXTRA_BODY` | `backend.extra_body` | JSON object |
+| `SCOOT_AGENT_DEFAULT_MODE` | `agent.default_mode` | string (`goal`/`plan`) |
+| `SCOOT_AGENT_MAX_TURNS` | `agent.max_turns` | integer |
+| `SCOOT_AGENT_CONTEXT_BUDGET_BYTES` | `agent.context_budget_bytes` | integer |
+| `SCOOT_TOOLS_POLICY` | `tools.policy` | string (`guarded`/`readonly`/`unrestricted`) |
+| `SCOOT_TOOLS_TIMEOUT_MS` | `tools.timeout_ms` | integer |
+| `SCOOT_TOOLS_CONFINE_WRITES` | `tools.confine_writes` | bool (`true`/`false`/`1`/`0`) |
+| `SCOOT_TOOLS_BLOCK_INTERNAL_HTTP` | `tools.block_internal_http` | bool |
+| `SCOOT_SKILLS_ENABLED` | `skills.enabled` | bool |
+| `SCOOT_AUDIT_LEVEL` | `audit.level` | string |
+| `SCOOT_AUDIT_TO_FILE` | `audit.to_file` | bool |
+
+Notes:
+
+- An **empty** value (`""`) is treated as *unset* and does not override the
+  default — convenient for optional CI inputs.
+- A value of the **wrong type** (e.g. a non-integer for `SCOOT_AGENT_MAX_TURNS`)
+  is **ignored**, the field keeps its previous value, and a warning is printed to
+  **stderr** (never stdout, so `-e` piping stays clean).
+- **Secrets are never read from `SCOOT_*` directly.** The token still comes only
+  from the source named by `backend.api_key_env` (default `OPENAI_API_KEY`), per
+  the [Secrets](#secrets) rule below. `SCOOT_BACKEND_API_KEY_ENV` only changes
+  *which* variable is consulted, not the token itself.
+
+### Zero-config run in GitHub Actions
+
+Store the token as a GitHub **secret** and pass the rest through `env`. No
+`config.toml` is committed or written; the runtime directory is created on the
+fly under the runner's temp space and discarded with the job.
+
+```yaml
+jobs:
+  ask:
+    runs-on: ubuntu-latest
+    env:
+      SCOOT_HOME: ${{ runner.temp }}/scoot
+      OPENAI_API_KEY: ${{ secrets.LLM_KEY }}        # token value (secret)
+      SCOOT_BACKEND_API_KEY_ENV: OPENAI_API_KEY     # which var holds it
+      SCOOT_BACKEND_BASE_URL: https://api.openai.com/v1
+      SCOOT_BACKEND_MODEL: gpt-4o-mini
+      SCOOT_TOOLS_POLICY: readonly                  # safe default for CI
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install scoot
+        run: |
+          # download a release asset for your platform, then:
+          install -m755 scoot /usr/local/bin/scoot
+      - name: Ask
+        run: scoot -e "Summarize the latest changes in this repository"
+```
+
+`scoot -e` checks `SCOOT_HOME`: if the directory is missing it is created with
+built-in defaults; if it already exists, the `SCOOT_*` overlay is applied on top.
+Either way no secret is ever written to disk.
+
 ## Sections At A Glance
 
 | Section | Purpose |
