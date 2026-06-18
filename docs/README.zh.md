@@ -121,6 +121,7 @@ Agent 也可以使用有界 `parallel` 动作一次执行 1-4 个彼此独立的
 - Daemon 生命周期：[DAEMON.md](DAEMON.md) · [DAEMON.zh.md](DAEMON.zh.md)
 - Skills 指南：[SKILLS.md](SKILLS.md) · [SKILLS.zh.md](SKILLS.zh.md)
 - Wasm 工具包：[WASM_TOOLS.md](WASM_TOOLS.md) · [WASM_TOOLS.zh.md](WASM_TOOLS.zh.md)
+- 更新日志：[CHANGELOG.md](../CHANGELOG.md) · [CHANGELOG.zh.md](CHANGELOG.zh.md)
 
 本地构建文档：
 

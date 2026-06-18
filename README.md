@@ -122,6 +122,7 @@ Reference documents:
 - Daemon lifecycle: [docs/DAEMON.md](docs/DAEMON.md) · [docs/DAEMON.zh.md](docs/DAEMON.zh.md)
 - Skills: [docs/SKILLS.md](docs/SKILLS.md) · [docs/SKILLS.zh.md](docs/SKILLS.zh.md)
 - Wasm tool packages: [docs/WASM_TOOLS.md](docs/WASM_TOOLS.md) · [docs/WASM_TOOLS.zh.md](docs/WASM_TOOLS.zh.md)
+- Changelog: [CHANGELOG.md](CHANGELOG.md) · [docs/CHANGELOG.zh.md](docs/CHANGELOG.zh.md)
 
 Build the docs locally:
 
