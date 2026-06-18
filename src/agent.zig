@@ -61,7 +61,7 @@ pub const system_prompt =
     \\  - "file_read"：读取文件内容；action_input 是 JSON 对象 {"path":"文件路径"}。读大文件时优先用行窗口分页：可选 {"offset":起始行(1 起),"limit":行数} 只取指定区间，省 token 且能与 grep 返回的行号精确配合（如先 grep 命中第 420 行，再 file_read {"path":"...","offset":400,"limit":60}）。省略 offset/limit 即整读（超长会被截断）。
     \\  - "file_write"：覆盖写入文件（不存在则创建）；action_input 是 JSON 对象 {"path":"文件路径","content":"完整新内容"}。
     \\  - "file_edit"：精确替换文件中的一段文本；action_input 是 JSON 对象 {"path":"文件路径","old":"要替换的确切文本（须在文件中唯一出现）","new":"替换成的文本"}。
-    \\  - "grep"：在某个文件内按正则逐行搜索，返回命中行号与原文；action_input 是 JSON 对象 {"pattern":"正则","path":"文件路径"}。支持子集：. ^ $ * + ? [] () | \d \w \s（不支持捕获组/反向引用/lookaround/惰性量词）。
+    \\  - "grep"：在某个文件内按正则逐行搜索，返回命中行号与原文；action_input 是 JSON 对象 {"pattern":"正则","path":"文件路径"}。可选 {"context":N} 同时返回每个命中前后各 N 行（类似 grep -C，上下文行以 行号-原文 标注、命中行以 行号:原文 标注，相邻命中合并、块间以 -- 分隔），一次拿到命中点周边即可省掉随后的整文件读。支持子集：. ^ $ * + ? [] () | \d \w \s（不支持捕获组/反向引用/lookaround/惰性量词）。
     \\  - "glob"：在目录子树下按通配模式列出匹配的文件路径；action_input 是 JSON 对象 {"pattern":"通配模式","root":"起始目录（可选，默认 .）"}。* ? [] 不跨 /，** 跨目录层级。返回的路径可直接喂给 file_read / grep。
     \\  - "http_request"：发起一次 HTTP/HTTPS 请求；action_input 是 JSON 对象 {"method":"GET","url":"https://...","body":"可选请求体"}。method 取 GET/POST/PUT/DELETE/HEAD/PATCH。返回状态码与响应体；带硬超时，绝不挂死。
     \\  - "skill"：读取一个已装载技能的指令或资源文件。这是 Scoot 的原生只读能力，不受执行策略限制（即便 readonly 也可用）；action_input 是 JSON 对象 {"name":"技能名","path":"技能目录内的相对路径（可选，默认 SKILL.md）"}。仅能读取「可用技能」清单中列出技能其目录内的文件，用于按需取回该技能的完整操作指令（技能里要你执行的 bash/写/网络动作仍各自受执行策略约束）。
@@ -94,7 +94,7 @@ pub const Step = struct {
 const FileReadArgs = struct { path: []const u8, offset: ?usize = null, limit: ?usize = null };
 const FileWriteArgs = struct { path: []const u8, content: []const u8 };
 const FileEditArgs = struct { path: []const u8, old: []const u8, new: []const u8 };
-const GrepArgs = struct { pattern: []const u8, path: []const u8 };
+const GrepArgs = struct { pattern: []const u8, path: []const u8, context: ?usize = null };
 const GlobArgs = struct { pattern: []const u8, root: []const u8 = "." };
 const HttpArgs = struct { method: []const u8 = "GET", url: []const u8, body: ?[]const u8 = null };
 const SkillArgs = struct { name: []const u8, path: []const u8 = "SKILL.md" };
@@ -444,8 +444,7 @@ pub const Agent = struct {
             },
             .grep => blk: {
                 const args = try parseToolArgs(GrepArgs, arena, input);
-                const hits = try tools.search.grepFile(arena, self.io, args.pattern, args.path, tools.search.default_max_hits);
-                break :blk try formatGrepHits(arena, args.path, hits);
+                break :blk try grepObservation(arena, self.io, args);
             },
             .glob => blk: {
                 const args = try parseToolArgs(GlobArgs, arena, input);
@@ -824,6 +823,41 @@ fn formatGrepHits(arena: std.mem.Allocator, path: []const u8, hits: []const tool
     return clipTo(arena, buf.items, file_read_observation_tokens);
 }
 
+/// 执行 grep 动作并产出「观察」文本（arena 拥有）。execTool 与并发 worker 共用。
+/// 无 context（或 0）→ 仅命中行（formatGrepHits，旧行为）；context>0 → 命中行 ±N 上下文块
+/// （formatGrepBlocks），让模型一次拿到命中点周边，省掉随后的整文件读（issue #76）。
+fn grepObservation(arena: std.mem.Allocator, io: std.Io, args: GrepArgs) ![]const u8 {
+    const ctx = args.context orelse 0;
+    if (ctx == 0) {
+        const hits = try tools.search.grepFile(arena, io, args.pattern, args.path, tools.search.default_max_hits);
+        return formatGrepHits(arena, args.path, hits);
+    }
+    const blocks = try tools.search.grepFileContext(arena, io, args.pattern, args.path, tools.search.default_max_hits, ctx);
+    return formatGrepBlocks(arena, args.path, blocks, @min(ctx, tools.search.max_grep_context));
+}
+
+/// 把带上下文的 grep 块格式化成「观察」文本（arena 拥有）：命中行 `行号:原文`、
+/// 上下文行 `行号-原文`（grep -C 约定），块间以 `--` 分隔。受 file_read 上限截断。
+fn formatGrepBlocks(arena: std.mem.Allocator, path: []const u8, blocks: []const tools.search.ContextBlock, context: usize) ![]const u8 {
+    if (blocks.len == 0) {
+        return std.fmt.allocPrint(arena, "[观察] grep 在 {s} 中无命中。", .{path});
+    }
+    var hit_count: usize = 0;
+    for (blocks) |b| for (b.hit_mask) |h| {
+        if (h) hit_count += 1;
+    };
+    var buf: std.ArrayList(u8) = .empty;
+    try buf.appendSlice(arena, try std.fmt.allocPrint(arena, "[观察] grep {s} 命中 {d} 行（含上下文 ±{d} 行）：\n", .{ path, hit_count, context }));
+    for (blocks, 0..) |b, bi| {
+        if (bi != 0) try buf.appendSlice(arena, "--\n");
+        for (b.lines, b.hit_mask, 0..) |line, is_hit, k| {
+            const sep: u8 = if (is_hit) ':' else '-';
+            try buf.appendSlice(arena, try std.fmt.allocPrint(arena, "{d}{c}{s}\n", .{ b.start_line + k, sep, line }));
+        }
+    }
+    return clipTo(arena, buf.items, file_read_observation_tokens);
+}
+
 /// 把 glob 匹配到的路径格式化成「观察」文本（arena 拥有），无匹配亦明示。
 fn formatGlobPaths(arena: std.mem.Allocator, pattern: []const u8, paths: []const []const u8) ![]const u8 {
     if (paths.len == 0) {
@@ -932,8 +966,7 @@ fn execReadTool(
         },
         .grep => blk: {
             const args = try parseToolArgs(GrepArgs, arena, input);
-            const hits = try tools.search.grepFile(arena, io, args.pattern, args.path, tools.search.default_max_hits);
-            break :blk try formatGrepHits(arena, args.path, hits);
+            break :blk try grepObservation(arena, io, args);
         },
         .glob => blk: {
             const args = try parseToolArgs(GlobArgs, arena, input);
@@ -1041,6 +1074,36 @@ test "fileReadObservation：整读 vs 行窗口（#74）" {
     // offset 越界 → 明示超出
     const oob = try fileReadObservation(arena, io, .{ .path = path, .offset = 99 });
     try std.testing.expect(std.mem.indexOf(u8, oob, "超出文件总行数 5") != null);
+}
+
+test "grepObservation：无 context 仅命中行，有 context 带 ±N 上下文（#76）" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const cwd = std.Io.Dir.cwd();
+    const dir = "/tmp/scoot_agent_grep_ctx_obs";
+    cwd.deleteTree(io, dir) catch {};
+    defer cwd.deleteTree(io, dir) catch {};
+    try cwd.createDirPath(io, dir);
+    const path = dir ++ "/src.txt";
+    try tools.file.write(io, path, "l1\nl2\nfn target\nl4\nl5\n");
+
+    // 无 context：仅命中行，命中行以 `行号:原文`。
+    const plain = try grepObservation(arena, io, .{ .pattern = "target", .path = path });
+    try std.testing.expect(std.mem.indexOf(u8, plain, "3:fn target") != null);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "l2") == null);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "含上下文") == null);
+
+    // context=1：命中行 `:`，上下文行 `-`，头部标注 ±1。
+    const ctx = try grepObservation(arena, io, .{ .pattern = "target", .path = path, .context = 1 });
+    try std.testing.expect(std.mem.indexOf(u8, ctx, "含上下文 ±1 行") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ctx, "2-l2") != null); // 上下文行
+    try std.testing.expect(std.mem.indexOf(u8, ctx, "3:fn target") != null); // 命中行
+    try std.testing.expect(std.mem.indexOf(u8, ctx, "4-l4") != null); // 上下文行
+    try std.testing.expect(std.mem.indexOf(u8, ctx, "l5") == null); // 窗口外
 }
 
 /// 测试用「脚本化大脑」：按顺序吐出预设的步骤 JSON，无需真实后端即可驱动循环。
