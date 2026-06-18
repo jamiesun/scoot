@@ -74,7 +74,7 @@ cp book/site-index.html site/index.html
 | `src/skill.zig` | Skill discovery and progressive disclosure |
 | `src/session.zig` | Short-term session message storage and JSONL persistence |
 | `src/agent.zig` | ReACT loop, action parsing, tool execution, observation feedback |
-| `src/schedule.zig` | `every` and `at` schedule triggers; `cron` is intentionally not implemented yet |
+| `src/schedule.zig` | `every`, `at`, and 5-field UTC `cron` schedule triggers |
 | `src/audit.zig` | JSONL audit events |
 | `src/policy.zig` | Execution policy gate |
 | `src/tools/*.zig` | Built-in tools and execution sandbox |

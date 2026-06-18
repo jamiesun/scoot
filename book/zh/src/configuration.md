@@ -269,11 +269,11 @@ to_file = true
 | `goal` | string | `""` | agent 运行的自然语言目标。 |
 | `every_sec` | u64? | unset | 触发器：固定间隔，单位秒。 |
 | `at_unix` | i64? | unset | 触发器：一个固定的 Unix 时间点。 |
-| `cron` | string? | unset | 触发器：cron 表达式——**已解析但尚不支持**。 |
+| `cron` | string? | unset | 触发器：5 字段 UTC cron 表达式。 |
 | `mode` | string | `readonly` | 执行策略：`readonly`（默认，安全）或 `unrestricted`。 |
 
-`every_sec` / `at_unix` / `cron` 中必须设置 **恰好一个**；否则该任务无效并被跳过并伴随警告
-（在 `schedule list` 中显示为 `INACTIVE`）。在 cron 支持落地之前，`cron` 任务永远不会触发。
+`every_sec` / `at_unix` / `cron` 中必须设置 **恰好一个**；否则该任务无效并被跳过并伴随警告。
+cron 支持分钟/小时/日/月/周字段，以及 `*`、逗号列表、范围和 `/step`。
 
 **安全：** 调度任务默认 `readonly`，且 `guarded` 在执行时会被矫正为等效
 `readonly`。仅在你刻意接受无人值守的写入/网络风险时才使用 `unrestricted`。

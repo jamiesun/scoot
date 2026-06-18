@@ -126,8 +126,7 @@ Implemented triggers:
 
 - `every_sec`
 - `at_unix`
-
-`cron` is intentionally not implemented yet. It is recognized as a shape but does not fire.
+- 5-field UTC `cron` (minute/hour/day/month/weekday; `*`, lists, ranges, and steps)
 
 ### Daemon Lifecycle
 

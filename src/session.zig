@@ -14,6 +14,7 @@
 const std = @import("std");
 const llm = @import("llm.zig");
 const jsonio = @import("jsonio.zig");
+const audit = @import("audit.zig");
 
 /// 一次会话。`messages` 由 Session 的分配器拥有，跨回合存活。
 pub const Session = struct {
@@ -127,9 +128,13 @@ pub const Session = struct {
     pub fn persist(self: *const Session, io: std.Io, sessions_dir: []const u8) !void {
         var pathbuf: [std.fs.max_path_bytes]u8 = undefined;
         const path = try std.fmt.bufPrint(&pathbuf, "{s}/{s}.jsonl", .{ sessions_dir, self.id });
+        var rotate_buf: [std.fs.max_path_bytes + 2]u8 = undefined;
+        var fba = std.heap.FixedBufferAllocator.init(&rotate_buf);
+        _ = audit.rotateFileIfTooLarge(io, fba.allocator(), path, audit.default_max_jsonl_bytes) catch false;
 
         var file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = false });
         defer file.close(io);
+        try file.setPermissions(io, std.Io.File.Permissions.fromMode(0o600));
 
         const st = try file.stat(io);
         var buf: [4096]u8 = undefined;
@@ -218,6 +223,9 @@ test "persist 追加写 JSONL 到 <dir>/<id>.jsonl 并可读回" {
     }
     try std.testing.expectEqual(@as(usize, 4), lines); // 2 条消息 × 2 次持久化
     try std.testing.expect(std.mem.indexOf(u8, bytes, "你好") != null);
+
+    const st = try cwd.statFile(io, dir ++ "/conv1.jsonl", .{});
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), st.permissions.toMode() & 0o777);
 }
 
 test {

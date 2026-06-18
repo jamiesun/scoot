@@ -125,11 +125,10 @@ enabled = false
 poll_ms = 1000
 
 # Scheduled jobs are optional. Each job needs exactly one trigger:
-# every_sec, at_unix, or cron. Cron is parsed but not supported yet: Scoot skips
-# such jobs with a clear warning (they show as INACTIVE in `schedule list`), so
-# they never fire. Schedule jobs default to readonly mode; guarded is corrected to
-# readonly at execution time. Use unrestricted only with deliberate acceptance
-# of unattended write/network risk.
+# every_sec, at_unix, or cron. Cron uses a 5-field UTC expression and fires at
+# most once per matching minute. Schedule jobs default to readonly mode; guarded
+# is corrected to readonly at execution time. Use unrestricted only with
+# deliberate acceptance of unattended write/network risk.
 
 # [[schedule.jobs]]
 # id = "disk-check"
@@ -144,7 +143,7 @@ poll_ms = 1000
 # mode = "readonly"
 
 # [[schedule.jobs]]
-# id = "future-cron-placeholder"
-# goal = "This job will not fire until cron support is implemented"
+# id = "weekday-brief"
+# goal = "Prepare a weekday morning brief"
 # cron = "0 9 * * *"
 # mode = "readonly"

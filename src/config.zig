@@ -108,6 +108,7 @@ pub const JobConfig = struct {
             t = .{ .at_unix = a };
         }
         if (jc.cron) |c| {
+            if (!schedule.cronValid(c)) return null;
             n += 1;
             t = .{ .cron = c };
         }
@@ -270,6 +271,29 @@ fn overrideEnvInt(
     };
 }
 
+fn oneOf(s: []const u8, allowed: []const []const u8) bool {
+    for (allowed) |item| {
+        if (std.mem.eql(u8, s, item)) return true;
+    }
+    return false;
+}
+
+fn overrideEnvEnumString(
+    env: *const Environ.Map,
+    name: []const u8,
+    out: *[]const u8,
+    allowed: []const []const u8,
+    warnings: *std.ArrayList([]const u8),
+    arena: std.mem.Allocator,
+) std.mem.Allocator.Error!void {
+    const v = envVal(env, name) orelse return;
+    if (oneOf(v, allowed)) {
+        out.* = try arena.dupe(u8, v);
+        return;
+    }
+    try warnEnv(warnings, arena, name, "不是支持的取值，已忽略");
+}
+
 /// 解析 config.json 文本为 FileConfig。
 /// 空白内容回落默认；未知字段忽略（向后兼容）；畸形 JSON → error.InvalidConfig。
 /// 字符串/数组分配在 arena 上，生命周期随 arena。
@@ -408,12 +432,12 @@ pub const Config = struct {
         }
 
         // agent
-        if (envVal(env, "SCOOT_AGENT_DEFAULT_MODE")) |v| self.agent.default_mode = try arena.dupe(u8, v);
+        try overrideEnvEnumString(env, "SCOOT_AGENT_DEFAULT_MODE", &self.agent.default_mode, &.{ "goal", "plan" }, &warnings, arena);
         try overrideEnvInt(u32, env, "SCOOT_AGENT_MAX_TURNS", &self.agent.max_turns, &warnings, arena);
         try overrideEnvInt(usize, env, "SCOOT_AGENT_CONTEXT_BUDGET_BYTES", &self.agent.context_budget_bytes, &warnings, arena);
 
         // tools
-        if (envVal(env, "SCOOT_TOOLS_POLICY")) |v| self.tools.policy = try arena.dupe(u8, v);
+        try overrideEnvEnumString(env, "SCOOT_TOOLS_POLICY", &self.tools.policy, &.{ "guarded", "readonly", "unrestricted", "yolo" }, &warnings, arena);
         try overrideEnvInt(u64, env, "SCOOT_TOOLS_TIMEOUT_MS", &self.tools.timeout_ms, &warnings, arena);
         try overrideEnvBool(env, "SCOOT_TOOLS_CONFINE_WRITES", &self.tools.confine_writes, &warnings, arena);
         try overrideEnvBool(env, "SCOOT_TOOLS_BLOCK_INTERNAL_HTTP", &self.tools.block_internal_http, &warnings, arena);
@@ -423,7 +447,7 @@ pub const Config = struct {
         try overrideEnvBool(env, "SCOOT_SKILLS_INCLUDE_AGENTS_SKILLS", &self.skills.include_agents_skills, &warnings, arena);
 
         // audit
-        if (envVal(env, "SCOOT_AUDIT_LEVEL")) |v| self.audit.level = try arena.dupe(u8, v);
+        try overrideEnvEnumString(env, "SCOOT_AUDIT_LEVEL", &self.audit.level, &.{ "debug", "info", "warn", "error" }, &warnings, arena);
         try overrideEnvBool(env, "SCOOT_AUDIT_TO_FILE", &self.audit.to_file, &warnings, arena);
 
         if (report) |r| r.env_warnings = warnings.items;
@@ -752,6 +776,10 @@ test "JobConfig.toJob: 触发器校验与策略矫正" {
     // 多触发器 → 非法
     const multi = JobConfig{ .id = "m", .every_sec = 30, .at_unix = 100 };
     try std.testing.expect(multi.toJob() == null);
+
+    // cron 语法非法 → 非法任务，避免装载后静默永不触发
+    const bad_cron = JobConfig{ .id = "c", .cron = "60 * * * *" };
+    try std.testing.expect(bad_cron.toJob() == null);
 }
 
 test "applyEnvOverrides: 字符串项覆盖 backend 与 tools" {
@@ -773,6 +801,26 @@ test "applyEnvOverrides: 字符串项覆盖 backend 与 tools" {
     try std.testing.expectEqualStrings("anthropic", cfg.backend.prompt_cache);
     try std.testing.expectEqualStrings("readonly", cfg.tools.policy);
     try std.testing.expectEqual(@as(usize, 0), report.env_warnings.len);
+}
+
+test "applyEnvOverrides: 枚举字符串非法时告警且保留原值" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var map: std.process.Environ.Map = .init(std.testing.allocator);
+    defer map.deinit();
+    try map.put("SCOOT_AGENT_DEFAULT_MODE", "pla");
+    try map.put("SCOOT_TOOLS_POLICY", "readonyl");
+    try map.put("SCOOT_AUDIT_LEVEL", "verbose");
+
+    var cfg: Config = .{ .dirs = undefined };
+    var report: LoadReport = .{};
+    try cfg.applyEnvOverrides(arena.allocator(), &map, &report);
+
+    try std.testing.expectEqualStrings("goal", cfg.agent.default_mode);
+    try std.testing.expectEqualStrings("guarded", cfg.tools.policy);
+    try std.testing.expectEqualStrings("info", cfg.audit.level);
+    try std.testing.expectEqual(@as(usize, 3), report.env_warnings.len);
+    try std.testing.expect(std.mem.indexOf(u8, report.env_warnings[1], "SCOOT_TOOLS_POLICY") != null);
 }
 
 test "applyEnvOverrides: 整数/布尔项解析" {

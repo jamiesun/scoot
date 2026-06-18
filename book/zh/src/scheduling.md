@@ -22,7 +22,7 @@ mode = "readonly"
 | --- | --- |
 | `every_sec` | 按固定间隔触发（秒）。 |
 | `at_unix` | 在某个固定 Unix 时间点触发一次。 |
-| `cron` | 已解析但**暂不支持** —— 此类任务永不触发，显示为 `INACTIVE`。 |
+| `cron` | 按 5 字段 UTC cron 表达式触发。 |
 
 触发器为零个或多个的任务非法，会被跳过并告警。每个字段见[配置 → `[[schedule.jobs]]`](configuration.md)。
 

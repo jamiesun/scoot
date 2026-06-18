@@ -75,7 +75,7 @@ scoot policy check bash "the command" --mode readonly
 
 - `[schedule] enabled` 必须为 `true`。
 - 每个任务需要**恰好一个**触发器；`schedule list` 会把非法任务标为 `INACTIVE`。
-- `cron` 已解析但**暂不支持** —— cron 任务永不触发。
+- cron 是 5 字段 UTC 计划，每个匹配分钟最多触发一次。
 - 设为 `guarded` 的任务以等效 `readonly` 运行；若它似乎无法写或触网，那正是无人值守安全矫正。
 
 ### 运行因上下文预算提前中止

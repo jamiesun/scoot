@@ -89,6 +89,6 @@ redaction before they're written. See the [Agent Guide](agent.md) secret rule.
 
 ## Retention
 
-Session and audit files are **append-only** in this release; Scoot does not yet
-rotate or prune them. For long-running deployments, rotate or prune `logs/` and
-`state/sessions/` externally (e.g. `logrotate`, a cron job, or a cleanup script).
+Session and audit files are append-oriented JSONL files. Scoot rotates an
+individual JSONL file to `.1` before appending once it reaches the built-in size
+limit, keeping daemon runs from growing one file without bound.
