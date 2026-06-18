@@ -45,6 +45,7 @@ ephemeral, run-once-then-discard execution.
 | `SCOOT_BACKEND_API_KEY_FILE` | `backend.api_key_file` | string |
 | `SCOOT_BACKEND_API_KEY_CMD` | `backend.api_key_cmd` | string |
 | `SCOOT_BACKEND_CA_FILE` | `backend.ca_file` | string |
+| `SCOOT_BACKEND_PROMPT_CACHE` | `backend.prompt_cache` | string (`off` / `anthropic`) |
 | `SCOOT_BACKEND_EXTRA_BODY` | `backend.extra_body` | JSON object |
 | `SCOOT_AGENT_DEFAULT_MODE` | `agent.default_mode` | string (`goal`/`plan`) |
 | `SCOOT_AGENT_MAX_TURNS` | `agent.max_turns` | integer |
@@ -126,7 +127,22 @@ protocol.
 | `api_key_file` | string? | unset → `~/.scoot/token` | Path to a `0600` token file. Used after the env source. |
 | `api_key_cmd` | string? | unset | Command that prints a token (e.g. `pass show openai`). Used last. |
 | `ca_file` | string? | unset → system roots | PEM CA bundle for HTTPS. Set this on systems lacking root certs. |
+| `prompt_cache` | string | `off` | Prompt-cache hint mode: `off` or `anthropic`. See below. |
 | `extra_body` | table? | unset | Extra top-level JSON fields merged into every request. |
+
+### `prompt_cache`
+
+Controls whether the request body carries a prompt-cache breakpoint so the
+**stable instruction prefix** (the leading `system` block — system prompt, tool
+docs, skill list; re-sent every turn) bills at the cache rate instead of being
+recomputed at full price each turn.
+
+- `off` (default) — no cache markers; the request body is **byte-identical** to
+  the legacy shape. OpenAI / vLLM / SGLang auto-cache stable prefixes, so leave
+  it off (and avoid strict backends rejecting unknown fields).
+- `anthropic` — tag the leading `system` block's content with an Anthropic-style
+  `cache_control: {type: ephemeral}` breakpoint. Enable **only** on
+  Anthropic-compatible gateways. Unknown values fall back to `off`.
 
 ### `[backend.extra_body]`
 
