@@ -18,6 +18,7 @@ pub const skill = @import("skill.zig");
 pub const wasm_tool = @import("wasm_tool.zig");
 pub const session = @import("session.zig");
 pub const agent = @import("agent.zig");
+pub const obs = @import("obs.zig");
 pub const schedule = @import("schedule.zig");
 pub const daemon = @import("daemon.zig");
 pub const audit = @import("audit.zig");

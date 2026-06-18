@@ -19,6 +19,7 @@ const audit = @import("audit.zig");
 const policy = @import("policy.zig");
 const pathsafe = @import("paths.zig");
 const jsonio = @import("jsonio.zig");
+const obs = @import("obs.zig");
 
 // 双轨认知模式（goal / plan，见 ROADMAP 方向二）暂未实现：plan 模式的执行 DAG
 // 尚未落地，故此处不保留「定义却从不读取」的死字段（曾经的 Mode 枚举 + Agent.mode），
@@ -486,7 +487,7 @@ pub const Agent = struct {
         return try std.fmt.allocPrint(
             arena,
             "[观察] 技能 {s} 的 {s}（{d} 字节）：\n{s}",
-            .{ name, sub, content.len, try clipTo(arena, content, skill_observation_cap) },
+            .{ name, sub, content.len, try clipTo(arena, content, skill_observation_tokens) },
         );
     }
 
@@ -556,14 +557,14 @@ pub const Agent = struct {
         var buf: std.ArrayList(u8) = .empty;
         try buf.appendSlice(arena, try std.fmt.allocPrint(arena, "[观察] parallel 完成 {d} 个只读调用：\n", .{args.calls.len}));
         for (workers, 0..) |*w, idx| {
-            const obs = w.observation;
-            if (self.audit) |lg| lg.log(.observation, obs) catch {};
-            self.traceParallelResult(idx + 1, obs);
+            const obs_text = w.observation;
+            if (self.audit) |lg| lg.log(.observation, obs_text) catch {};
+            self.traceParallelResult(idx + 1, obs_text);
             try buf.appendSlice(arena, try std.fmt.allocPrint(arena, "\n[{d}] {s}\n", .{ idx + 1, @tagName(w.action) }));
-            try buf.appendSlice(arena, obs);
+            try buf.appendSlice(arena, obs_text);
             try buf.append(arena, '\n');
         }
-        return clipTo(arena, buf.items, parallel_observation_cap);
+        return clipTo(arena, buf.items, parallel_observation_tokens);
     }
 
     /// 执行一条 bash 命令（带硬超时）并格式化成「观察」文本（arena 拥有）。
@@ -668,22 +669,26 @@ fn clientComplete(
 /// 模型未产出合法步骤时回灌的纠错观察。
 const malformed_hint = "[观察] 你上一条输出不是合法的步骤 JSON。请严格按 schema 只输出一个含 thought/action/action_input 的 JSON 对象。";
 
-/// 单条流的输出在观察里的最大字节数，超出截断，避免脏/海量输出挤爆上下文。
-const observation_stream_cap = 2000;
+/// 观察截断预算一律以 **token 估算**为口径（issue #75）：字节口径会让 CJK（≈1 token/字、
+/// 占 3 字节）与 ASCII 的预算严重不一致。下列数值约为旧字节上限的 1/4（ASCII 字节/token 比），
+/// 使 ASCII 场景体量基本不变，CJK 场景按 token 收敛到一致预算。
 
-/// file_read 观察的截断上限：比 bash 输出更宽（文件内容是模型主动读取、相对结构化，
+/// 单条流（bash stdout/stderr 等）观察的最大 token 数，超出走「头+尾」截断，挡住脏/海量输出。
+const observation_stream_tokens = 500;
+
+/// file_read 观察的截断上限：比 bash 流更宽（文件内容是模型主动读取、相对结构化，
 /// 给更大窗口便于后续 file_edit 看清确切文本），但仍设上限挡住超大文件撑爆上下文。
-const file_read_observation_cap = 8000;
+const file_read_observation_tokens = 2000;
 
 /// 单个技能指令/资源文件的读取上限（1 MiB；指令文件实际仅几 KiB，留足冗余防失控）。
 const skill_read_limit: std.Io.Limit = .limited(1 << 20);
 /// 技能内容回灌观察的截断上限：比普通 file_read 更宽——SKILL.md 是模型按需取回的
 /// 完整操作指令，截断会丢失步骤；但仍设硬上限挡住异常大文件撑爆上下文。
-const skill_observation_cap = 32_000;
+const skill_observation_tokens = 8000;
 
 /// parallel v0 是显式 fan-out，不是 DAG 执行器。小上限避免拖垮本地 runtime。
 const max_parallel_calls = 4;
-const parallel_observation_cap = 12_000;
+const parallel_observation_tokens = 3000;
 
 /// CLI trace 只展示执行轨迹摘要，避免海量工具输出刷屏。
 const trace_reason_cap = 240;
@@ -691,7 +696,6 @@ const trace_action_input_cap = 240;
 const trace_observation_cap = 600;
 const trace_final_cap = 240;
 
-/// 防弹解析一个 ReACT 步骤。非法 JSON → MalformedStep；未知 action → UnknownAction。
 /// 把已解析的步骤压缩成**不含 thought** 的 assistant 历史记录（arena 拥有）：
 /// `{"action":"<名>","action_input":"<原样输入>"}`。thought 是模型本回合的私有推理，
 /// 对后续回合无复用价值；持久化它只会让历史逐回合膨胀、每次全量重发（issue #70）。
@@ -753,7 +757,7 @@ fn toolErrorObservation(arena: std.mem.Allocator, err: anyerror) ![]u8 {
 }
 
 /// 把 file_read 动作格式化成「观察」文本（arena 拥有）。
-/// 省略 offset/limit → 整读（受 file_read_observation_cap 截断）；
+/// 省略 offset/limit → 整读（受 file_read_observation_tokens 截断）；
 /// 给出任一 → 行窗口分页读（与 grep 行号配合，省 token）。execTool 与并发 worker 共用。
 fn fileReadObservation(arena: std.mem.Allocator, io: std.Io, args: FileReadArgs) ![]const u8 {
     if (args.offset == null and args.limit == null) {
@@ -761,7 +765,7 @@ fn fileReadObservation(arena: std.mem.Allocator, io: std.Io, args: FileReadArgs)
         return std.fmt.allocPrint(
             arena,
             "[观察] 读取 {s}（{d} 字节）：\n{s}",
-            .{ args.path, content.len, try clipTo(arena, content, file_read_observation_cap) },
+            .{ args.path, content.len, try clipTo(arena, content, file_read_observation_tokens) },
         );
     }
     const off = args.offset orelse 1;
@@ -777,7 +781,7 @@ fn fileReadObservation(arena: std.mem.Allocator, io: std.Io, args: FileReadArgs)
     return std.fmt.allocPrint(
         arena,
         "[观察] 读取 {s}（第 {d}-{d} 行 / 共 {d} 行）：\n{s}",
-        .{ args.path, win.start_line, win.end_line, win.total_lines, try clipTo(arena, win.text, file_read_observation_cap) },
+        .{ args.path, win.start_line, win.end_line, win.total_lines, try clipTo(arena, win.text, file_read_observation_tokens) },
     );
 }
 
@@ -791,7 +795,7 @@ fn formatGrepHits(arena: std.mem.Allocator, path: []const u8, hits: []const tool
     for (hits) |h| {
         try buf.appendSlice(arena, try std.fmt.allocPrint(arena, "{d}:{s}\n", .{ h.line, h.text }));
     }
-    return clipTo(arena, buf.items, file_read_observation_cap);
+    return clipTo(arena, buf.items, file_read_observation_tokens);
 }
 
 /// 把 glob 匹配到的路径格式化成「观察」文本（arena 拥有），无匹配亦明示。
@@ -805,7 +809,7 @@ fn formatGlobPaths(arena: std.mem.Allocator, pattern: []const u8, paths: []const
         try buf.appendSlice(arena, p);
         try buf.append(arena, '\n');
     }
-    return clipTo(arena, buf.items, file_read_observation_cap);
+    return clipTo(arena, buf.items, file_read_observation_tokens);
 }
 
 /// 把 http 响应格式化成「观察」文本（arena 拥有）。超时 / 传输失败亦明示。受上限截断。
@@ -816,7 +820,7 @@ fn formatHttpResponse(arena: std.mem.Allocator, url: []const u8, resp: tools.htt
     if (resp.err) |e| {
         return std.fmt.allocPrint(arena, "[观察] http {s} 请求失败：{s}（连接/TLS/DNS）。", .{ url, e });
     }
-    const clipped = try clipTo(arena, resp.body, file_read_observation_cap);
+    const clipped = try clipTo(arena, resp.body, file_read_observation_tokens);
     return std.fmt.allocPrint(
         arena,
         "[观察] http {s} 状态码={d}，响应体（{d} 字节）：\n{s}",
@@ -838,19 +842,15 @@ fn formatObservation(arena: std.mem.Allocator, r: tools.Result) ![]u8 {
     );
 }
 
-/// 截断过长的输出流，超出时附带说明（arena 拥有；不超长则原样返回）。
+/// 命令流（bash stdout/stderr）观察瘦身：剥 ANSI、折叠空白、按 token 头+尾截断（arena 拥有）。
 fn clip(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
-    return clipTo(arena, s, observation_stream_cap);
+    return obs.optimizeStream(arena, s, observation_stream_tokens);
 }
 
-/// 按给定上限截断输出（arena 拥有；不超长则原样返回）。
-fn clipTo(arena: std.mem.Allocator, s: []const u8, cap: usize) ![]const u8 {
-    if (s.len <= cap) return s;
-    return std.fmt.allocPrint(
-        arena,
-        "{s}\n…（输出已截断，共 {d} 字节）",
-        .{ s[0..cap], s.len },
-    );
+/// 保真内容（file_read/grep/glob/skill/http 等）按 token 头+尾截断：窗口内逐字节保真，
+/// 不剥 ANSI、不折叠空白，避免破坏后续 file_edit 的精确匹配（arena 拥有；未超预算原样返回）。
+fn clipTo(arena: std.mem.Allocator, s: []const u8, max_tokens: usize) ![]const u8 {
+    return obs.truncateTokens(arena, s, max_tokens);
 }
 
 /// 往 trace writer 写入限长文本；超出时附带剩余字节数。
@@ -980,10 +980,10 @@ test "formatObservation 正常 / 超时 / 截断" {
     const t = try formatObservation(arena, .{ .timed_out = true });
     try std.testing.expect(std.mem.indexOf(u8, t, "超时") != null);
 
-    const big = try arena.alloc(u8, observation_stream_cap + 500);
+    const big = try arena.alloc(u8, observation_stream_tokens * 4 + 1000);
     @memset(big, 'x');
     const clipped = try formatObservation(arena, .{ .stdout = big, .exit_code = 0 });
-    try std.testing.expect(std.mem.indexOf(u8, clipped, "已截断") != null);
+    try std.testing.expect(std.mem.indexOf(u8, clipped, "省略中段") != null);
 }
 
 test "fileReadObservation：整读 vs 行窗口（#74）" {
