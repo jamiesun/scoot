@@ -113,6 +113,72 @@ fn parseToolArgs(comptime T: type, arena: std.mem.Allocator, input: []const u8) 
     }) catch error.MalformedArgs;
 }
 
+/// 低于此体量的观察不去重：占位文本本身约百余字节，给小观察去重反而增重（issue #73）。
+const dedup_min_bytes: usize = 256;
+
+/// 同一 run 内对只读动作（file_read / grep / glob）做内容去重（issue #73）：按
+/// `(action, 规范化参数)` 记下上次观察的内容哈希；若本回合重复同一读取且观察逐字节
+/// 未变，就回灌一条简短引用（指向上次全文出现的回合）而非再灌一遍全文——避免重复观察在
+/// 历史里堆叠、并随后每回合一起重发（与去 thought #70 / 历史压缩 #71 叠加）。
+/// bash / 写动作有副作用，绝不去重。单次 run 内读次数有限（≤ max_turns），线性扫足够。
+const ReadCache = struct {
+    /// run 级寿命分配器：键与表存活至整轮结束，随调用方的 cache arena 整体释放。
+    store: std.mem.Allocator,
+    entries: std.ArrayList(Entry) = .empty,
+
+    const Entry = struct { key: []const u8, hash: u64, turn: u32 };
+
+    /// 命中重复（同键、同内容哈希）→ 返回去重占位（用 `out` 分配，交调用方入历史）；
+    /// 否则返回 null（调用方保留完整观察）。非去重动作 / 参数畸形 / 体量过小一律返回 null。
+    fn dedup(
+        self: *ReadCache,
+        out: std.mem.Allocator,
+        turn: u32,
+        action: Action,
+        input: []const u8,
+        observation: []const u8,
+    ) !?[]const u8 {
+        const key = (readKey(out, action, input) catch return null) orelse return null;
+        if (observation.len < dedup_min_bytes) return null;
+        const h = std.hash.Wyhash.hash(0, observation);
+        for (self.entries.items) |*e| {
+            if (!std.mem.eql(u8, e.key, key)) continue;
+            if (e.hash == h) {
+                return try std.fmt.allocPrint(
+                    out,
+                    "[观察] 去重：{s} 的结果与第 {d} 回合一致，已省略本次重复观察（{d} 字节）；请复用第 {d} 回合的观察。",
+                    .{ key, e.turn, observation.len, e.turn },
+                );
+            }
+            // 内容已变：刷新记录，照常回灌新全文。
+            e.hash = h;
+            e.turn = turn;
+            return null;
+        }
+        try self.entries.append(self.store, .{ .key = try self.store.dupe(u8, key), .hash = h, .turn = turn });
+        return null;
+    }
+};
+
+/// 把只读动作规范化成稳定的去重键（兼作回灌占位里的可读标签）；非去重动作返回 null。
+fn readKey(arena: std.mem.Allocator, action: Action, input: []const u8) !?[]const u8 {
+    return switch (action) {
+        .file_read => blk: {
+            const a = try parseToolArgs(FileReadArgs, arena, input);
+            break :blk try std.fmt.allocPrint(arena, "file_read {s} off={?d} lim={?d}", .{ a.path, a.offset, a.limit });
+        },
+        .grep => blk: {
+            const a = try parseToolArgs(GrepArgs, arena, input);
+            break :blk try std.fmt.allocPrint(arena, "grep {s} /{s}/ ctx={?d}", .{ a.path, a.pattern, a.context });
+        },
+        .glob => blk: {
+            const a = try parseToolArgs(GlobArgs, arena, input);
+            break :blk try std.fmt.allocPrint(arena, "glob {s} /{s}/", .{ a.root, a.pattern });
+        },
+        else => null,
+    };
+}
+
 /// 获取下一条补全的抽象（测试可注入脚本化大脑，无需真实后端）。
 /// 默认实现 `clientComplete` 直接转调 `llm.Client.chat`。
 pub const CompleteFn = *const fn (
@@ -178,6 +244,12 @@ pub const Agent = struct {
     /// `sess` 持有跨回合存活的消息历史（须由调用方预先 append 初始 system / user 消息）。
     pub fn run(self: *Agent, backing: std.mem.Allocator, sess: *session.Session) ![]const u8 {
         var turn: u32 = 0;
+        // 只读动作内容去重缓存（issue #73）：run 级寿命，跨回合存活，整轮结束随 arena 释放。
+        // 用独立 arena（非每回合 arena）承载键/表，使其不被回合末释放；测试以 GPA 作 backing
+        // 时也保证整轮结束统一回收，无泄漏。
+        var cache_arena = std.heap.ArenaAllocator.init(backing);
+        defer cache_arena.deinit();
+        var read_cache = ReadCache{ .store = cache_arena.allocator() };
         while (turn < self.max_turns) : (turn += 1) {
             var arena_state = std.heap.ArenaAllocator.init(backing);
             defer arena_state.deinit(); // 回合制内存：每轮临时分配整体释放。
@@ -263,8 +335,12 @@ pub const Agent = struct {
                             // 工具执行也是阻塞点（bash / http_request 可能很慢），观察结果只能在
                             // 执行**返回后**打印；执行前先标记「正在执行哪个工具」，等待期不致静默。
                             self.traceRunning(turn + 1, step.action);
-                            const observation = self.execTool(arena, step.action, step.action_input) catch |err|
+                            var observation: []const u8 = self.execTool(arena, step.action, step.action_input) catch |err|
                                 try toolErrorObservation(arena, err);
+                            // 只读动作内容去重（issue #73）：重复读取且观察未变时，用简短引用替换
+                            // 全文回灌，避免同份内容在历史里反复堆叠、逐回合重发。
+                            if (try read_cache.dedup(arena, turn + 1, step.action, step.action_input, observation)) |deduped|
+                                observation = deduped;
                             if (self.audit) |lg| lg.log(.observation, observation) catch {};
                             self.traceObservation(turn + 1, observation);
                             try sess.append(backing, .user, observation);
@@ -1104,6 +1180,76 @@ test "grepObservation：无 context 仅命中行，有 context 带 ±N 上下文
     try std.testing.expect(std.mem.indexOf(u8, ctx, "3:fn target") != null); // 命中行
     try std.testing.expect(std.mem.indexOf(u8, ctx, "4-l4") != null); // 上下文行
     try std.testing.expect(std.mem.indexOf(u8, ctx, "l5") == null); // 窗口外
+}
+
+test "ReadCache.dedup：同读未变→引用占位，内容变/体量小/非读动作→照常回灌（issue #73）" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var cache = ReadCache{ .store = arena };
+
+    const big_a = "A" ** 300; // ≥ dedup_min_bytes
+    const big_b = "B" ** 300;
+    const input = "{\"path\":\"README.md\"}";
+
+    // 首次：登记并保留全文（null）。
+    try std.testing.expect((try cache.dedup(arena, 1, .file_read, input, big_a)) == null);
+    // 重复同读且内容未变：返回去重占位，引用第 1 回合。
+    const ref = (try cache.dedup(arena, 3, .file_read, input, big_a)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, ref, "去重") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ref, "第 1 回合") != null);
+    // 内容已变：刷新记录并照常回灌（null）。
+    try std.testing.expect((try cache.dedup(arena, 4, .file_read, input, big_b)) == null);
+    // 现未变内容为 big_b（第 4 回合）：再读 big_b → 引用第 4 回合（证明「上次全文回合」会刷新）。
+    const ref2 = (try cache.dedup(arena, 5, .file_read, input, big_b)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.indexOf(u8, ref2, "第 4 回合") != null);
+    // 体量过小（< dedup_min_bytes）：不去重。
+    try std.testing.expect((try cache.dedup(arena, 6, .grep, "{\"pattern\":\"x\",\"path\":\"a\"}", "tiny")) == null);
+    // 非读动作（bash 有副作用）：永不去重，即便重复同样大的观察。
+    try std.testing.expect((try cache.dedup(arena, 7, .bash, "ls", big_a)) == null);
+    try std.testing.expect((try cache.dedup(arena, 8, .bash, "ls", big_a)) == null);
+    // 不同键（带 offset 的窗口读）独立计账，不与整读串味。
+    try std.testing.expect((try cache.dedup(arena, 9, .file_read, "{\"path\":\"README.md\",\"offset\":10}", big_a)) == null);
+}
+
+test "run: 重复 file_read 同文件内容未变时第二次去重回灌引用（issue #73）" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const root = "/tmp/scoot_run_read_dedup";
+    cwd.deleteTree(io, root) catch {};
+    defer cwd.deleteTree(io, root) catch {};
+    try cwd.createDirPath(io, root);
+    // 内容须 ≥ dedup_min_bytes 才触发去重；用唯一 marker 便于断言全文出现次数。
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/note.txt", .data = "UNIQUE-DEDUP-MARKER-Q7\n" ** 20 });
+
+    var brain = ScriptedBrain{ .steps = &.{
+        "{\"thought\":\"读一次\",\"action\":\"file_read\",\"action_input\":\"{\\\"path\\\":\\\"/tmp/scoot_run_read_dedup/note.txt\\\"}\"}",
+        "{\"thought\":\"再读一次\",\"action\":\"file_read\",\"action_input\":\"{\\\"path\\\":\\\"/tmp/scoot_run_read_dedup/note.txt\\\"}\"}",
+        "{\"thought\":\"完成\",\"action\":\"final\",\"action_input\":\"done\"}",
+    } };
+    var ag = testAgent(&brain, 16);
+
+    var sess = session.Session.init("test");
+    defer sess.deinit(gpa);
+    try sess.append(gpa, .system, system_prompt);
+    try sess.append(gpa, .user, "go");
+
+    const reply = try ag.run(gpa, &sess);
+    defer gpa.free(reply);
+    try std.testing.expectEqualStrings("done", reply);
+
+    // 全文 marker 仅应在历史中出现一次（首次观察）；第二次被替换为去重引用。
+    var full_obs: usize = 0;
+    var saw_dedup = false;
+    for (sess.items()) |m| {
+        const has_marker = std.mem.indexOf(u8, m.content, "UNIQUE-DEDUP-MARKER-Q7") != null;
+        const is_dedup = std.mem.indexOf(u8, m.content, "去重") != null;
+        if (m.role == .user and has_marker and !is_dedup) full_obs += 1;
+        if (is_dedup) saw_dedup = true;
+    }
+    try std.testing.expectEqual(@as(usize, 1), full_obs);
+    try std.testing.expect(saw_dedup);
 }
 
 /// 测试用「脚本化大脑」：按顺序吐出预设的步骤 JSON，无需真实后端即可驱动循环。
