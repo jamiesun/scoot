@@ -44,8 +44,9 @@ scoot --trace -e "list the largest files under src/"
 ```
 
 运行一个目标，并 **仅把最终答复** 打印到 stdout——非常适合脚本与管道。`--trace` 会在
-stderr 上附加逐步轨迹，便于调试而不污染答复。`--retries` 控制对瞬时后端失败
-（限流、5xx）的重试。
+stderr 上附加逐步轨迹，便于调试而不污染答复。轨迹会在每个阻塞步骤**之前**先打印实时进度
+标记——调用模型前打印 `thinking:`，执行工具前打印 `running: <工具>`——这样等待期间也能看到
+agent 当前在做什么，轨迹不会显得卡死。`--retries` 控制对瞬时后端失败（限流、5xx）的重试。
 
 ### `config`
 

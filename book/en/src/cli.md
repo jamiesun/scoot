@@ -47,8 +47,11 @@ scoot --trace -e "list the largest files under src/"
 
 Runs one goal and prints **only the final answer** to stdout — ideal for
 scripting and piping. `--trace` adds the step-by-step trace on stderr for
-debugging without polluting the answer. `--retries` controls retry of transient
-backend failures (rate limits, 5xx).
+debugging without polluting the answer. The trace emits a live progress marker
+*before* each blocking step — `thinking:` before calling the model and
+`running: <tool>` before executing a tool — so you can see what the agent is
+doing while it waits, instead of the trace appearing to freeze. `--retries`
+controls retry of transient backend failures (rate limits, 5xx).
 
 ### `config`
 
