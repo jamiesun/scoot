@@ -100,9 +100,11 @@ asks the model to *run* is still gated. If a skill's *actions* are blocked in
 
 ### The run stops early with a context-budget error
 
-You set `[agent] context_budget_bytes` and the transcript hit it. Raise the
-budget (staying below your backend's context window) or set it to `0` to disable
-the check (turn count is still bounded by `max_turns`).
+You set `[agent] context_budget_bytes` and the transcript stayed over budget even
+after history compaction — i.e. the budget is too small for the minimal retained
+context (system prompt + original task + most recent turns). Raise the budget
+(staying below your backend's context window) or set it to `0` to disable the
+check (turn count is still bounded by `max_turns`).
 
 ### The agent loops without finishing
 

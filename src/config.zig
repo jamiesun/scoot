@@ -33,8 +33,9 @@ pub const Agent = struct {
     max_turns: u32 = 32,
     /// 默认认知模式：goal / plan。
     default_mode: []const u8 = "goal",
-    /// 上下文预算（字节）：跨回合累计的提示历史超过此值则在下次后端调用前主动中止，
-    /// 避免在小上下文窗口的后端上跑到一半才被后端拒绝（issue #28）。
+    /// 上下文预算（字节）：跨回合累计的提示历史超过此值时，先压缩历史（保留 system +
+    /// 原始任务 + 最近若干回合，更早的工具原文替换为摘要标记，见 session.compact /
+    /// issue #71）让 run 继续推进；仅当压缩后仍超限才在下次后端调用前 fail-fast（issue #28）。
     /// 0 = 关闭（仅受 max_turns 约束，保持默认行为）。字节是 token 体量的粗略代理，
     /// 取经验保守值（≈ 上下文上限 token × 每 token 字节数，再留余量）。
     context_budget_bytes: usize = 0,

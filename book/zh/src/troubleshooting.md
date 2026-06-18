@@ -80,7 +80,7 @@ scoot policy check bash "the command" --mode readonly
 
 ### 运行因上下文预算提前中止
 
-你设了 `[agent] context_budget_bytes` 且对话记录触顶。调大预算（保持低于后端上下文窗口），或设为 `0` 关闭该检查（回合数仍受 `max_turns` 约束）。
+你设了 `[agent] context_budget_bytes`，且**压缩历史后**对话记录仍超预算——也就是预算过小，连最小保留集（system 提示 + 原始任务 + 最近若干回合）都放不下。调大预算（保持低于后端上下文窗口），或设为 `0` 关闭该检查（回合数仍受 `max_turns` 约束）。
 
 ### 代理循环不收尾
 

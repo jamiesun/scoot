@@ -131,10 +131,12 @@ pub const Agent = struct {
     complete_fn: CompleteFn,
     /// 回合上限：防止模型陷入工具调用死循环拖垮守护进程。
     max_turns: u32 = 16,
-    /// 上下文预算（字节，0=关闭）：跨回合累计的提示历史超过此值则在下次后端调用前
-    /// fail-fast（`error.ContextBudgetExceeded`），而非任由请求体无界增长、到小上下文
-    /// 后端处才晚失败（issue #28）。这里选择「主动中止」而非「裁剪历史」——因为 `run`
-    /// 的 backing 可能是无法释放的 arena（如 -e 路径），裁剪会泄漏且语义模糊。
+    /// 上下文预算（字节，0=关闭）：跨回合累计的提示历史超过此值时，先**压缩历史**
+    /// （保留 system + 原始任务 + 最近若干条，中段较早消息替换为摘要标记，见
+    /// session.compact / issue #71）让 run 继续推进，而非直接中止整个任务（旧行为）或
+    /// 任由请求体无界增长。仅当压缩后仍超限（连最小保留集都放不下、预算配得过小）时
+    /// 才 fail-fast（`error.ContextBudgetExceeded`）。压缩即时缩小发往后端的历史，token
+    /// 成本随之下降；arena backing 下被丢弃内容不立即回收但语义安全（见 session.compact）。
     context_budget_bytes: usize = 0,
     /// 单条工具调用的硬超时（毫秒）。
     tool_timeout_ms: u64 = 30_000,
@@ -181,17 +183,30 @@ pub const Agent = struct {
             defer arena_state.deinit(); // 回合制内存：每轮临时分配整体释放。
             const arena = arena_state.allocator();
 
-            // 上下文预算硬闸（issue #28）：在把整段历史发往后端前先量它的体量；超预算即
-            // 主动中止（明确错误胜过到后端处晚失败、白烧 token）。0 = 关闭，保持默认行为。
+            // 上下文预算闸（issue #28 + #71）：把整段历史发往后端前先量体量；超预算时
+            // 先压缩历史（保留 system + 原始任务 + 最近 K 条）再继续，而非中止整个 run。
+            // 仅当压缩后仍超限（预算配得过小、连最小保留集都放不下）才 fail-fast。0 = 关闭。
             if (self.context_budget_bytes != 0) {
-                const used = historyBytes(sess.items());
+                var used = historyBytes(sess.items());
                 if (used > self.context_budget_bytes) {
-                    if (self.audit) |lg| {
-                        var b: [160]u8 = undefined;
-                        const m = std.fmt.bufPrint(&b, "上下文预算超限：累计 {d} 字节 > 上限 {d}，第 {d} 回合前主动中止", .{ used, self.context_budget_bytes, turn + 1 }) catch "上下文预算超限，主动中止";
-                        lg.log(.system_error, m) catch {};
+                    const compacted = sess.compact(backing, history_keep_recent) catch false;
+                    if (compacted) {
+                        used = historyBytes(sess.items());
+                        self.traceCompacted(turn + 1, used);
+                        if (self.audit) |lg| {
+                            var b: [160]u8 = undefined;
+                            const m = std.fmt.bufPrint(&b, "上下文预算超限：已压缩历史，现 {d} 字节 / 上限 {d}（第 {d} 回合前）", .{ used, self.context_budget_bytes, turn + 1 }) catch "上下文预算超限：已压缩历史";
+                            lg.log(.system_error, m) catch {};
+                        }
                     }
-                    return error.ContextBudgetExceeded;
+                    if (used > self.context_budget_bytes) {
+                        if (self.audit) |lg| {
+                            var b: [160]u8 = undefined;
+                            const m = std.fmt.bufPrint(&b, "上下文预算超限且压缩后仍超：累计 {d} 字节 > 上限 {d}，第 {d} 回合前主动中止", .{ used, self.context_budget_bytes, turn + 1 }) catch "上下文预算超限且压缩后仍超，主动中止";
+                            lg.log(.system_error, m) catch {};
+                        }
+                        return error.ContextBudgetExceeded;
+                    }
                 }
             }
 
@@ -595,6 +610,13 @@ pub const Agent = struct {
         w.flush() catch {};
     }
 
+    /// 「历史压缩」进度标记：超预算时压缩旧上下文后继续（issue #71），让长 run 不卡死也不暴毙。
+    fn traceCompacted(self: *Agent, turn: u32, used_bytes: usize) void {
+        const w = self.trace orelse return;
+        w.print("[trace {d}] compacted history: 现 {d} 字节（保留 system+任务+最近 {d} 条）\n", .{ turn, used_bytes, history_keep_recent }) catch return;
+        w.flush() catch {};
+    }
+
     fn traceStep(self: *Agent, turn: u32, step: Step) void {
         const w = self.trace orelse return;
         w.print("[trace {d}] reason: ", .{turn}) catch return;
@@ -668,6 +690,10 @@ fn clientComplete(
 
 /// 模型未产出合法步骤时回灌的纠错观察。
 const malformed_hint = "[观察] 你上一条输出不是合法的步骤 JSON。请严格按 schema 只输出一个含 thought/action/action_input 的 JSON 对象。";
+
+/// 历史压缩（issue #71）触发时保留的「最近消息」条数。每回合约产出 2 条（assistant 动作 +
+/// user 观察），8 条 ≈ 最近 4 个回合，足以让模型续上当前进度，同时把更早的工具原文压成摘要。
+const history_keep_recent = 8;
 
 /// 观察截断预算一律以 **token 估算**为口径（issue #75）：字节口径会让 CJK（≈1 token/字、
 /// 占 3 字节）与 ASCII 的预算严重不一致。下列数值约为旧字节上限的 1/4（ASCII 字节/token 比），
@@ -1329,6 +1355,67 @@ test "compactStepJson：去 thought、转义合法、保留 action_input（issue
     const v = try std.json.parseFromSliceLeaky(Raw, arena, out, .{});
     try std.testing.expectEqualStrings("grep", v.action);
     try std.testing.expectEqualStrings("{\"pattern\":\"a\\\"b\",\"path\":\"f\"}", v.action_input);
+}
+
+test "run: 超预算时压缩历史而非中止，run 仍完成（issue #71）" {
+    const gpa = std.testing.allocator;
+    var brain = ScriptedBrain{ .steps = &.{
+        "{\"thought\":\"done\",\"action\":\"final\",\"action_input\":\"FINAL-OK\"}",
+    } };
+    var ag = testAgent(&brain, 16);
+    ag.context_budget_bytes = 4000; // 低于预填体量、但高于最小保留集
+
+    var sess = session.Session.init("t-compact");
+    defer sess.deinit(gpa);
+    try sess.append(gpa, .system, "SYS-PROMPT");
+    try sess.append(gpa, .user, "ORIGINAL-TASK");
+
+    // 预填大量较早消息，使历史远超预算（30 回合，每条观察 200B）。
+    var filler: [200]u8 = undefined;
+    @memset(&filler, 'F');
+    var i: usize = 0;
+    while (i < 30) : (i += 1) {
+        try sess.append(gpa, .assistant, "{\"action\":\"bash\",\"action_input\":\"x\"}");
+        try sess.append(gpa, .user, &filler);
+    }
+    try std.testing.expect(historyBytes(sess.items()) > ag.context_budget_bytes);
+
+    const reply = try ag.run(gpa, &sess);
+    defer gpa.free(reply);
+    // 没有中止：run 正常拿到最终答复。
+    try std.testing.expectEqualStrings("FINAL-OK", reply);
+
+    // 压缩生效：体量回落到预算内，出现压缩标记，system 与原始任务仍保留。
+    try std.testing.expect(historyBytes(sess.items()) <= ag.context_budget_bytes);
+    var saw_marker = false;
+    var saw_task = false;
+    var saw_sys = false;
+    for (sess.items()) |m| {
+        if (std.mem.indexOf(u8, m.content, "历史压缩") != null) saw_marker = true;
+        if (std.mem.indexOf(u8, m.content, "ORIGINAL-TASK") != null) saw_task = true;
+        if (std.mem.indexOf(u8, m.content, "SYS-PROMPT") != null) saw_sys = true;
+    }
+    try std.testing.expect(saw_marker);
+    try std.testing.expect(saw_task);
+    try std.testing.expect(saw_sys);
+}
+
+test "run: 预算过小、压缩后仍超限则 fail-fast（issue #71）" {
+    const gpa = std.testing.allocator;
+    var brain = ScriptedBrain{ .steps = &.{
+        "{\"thought\":\"x\",\"action\":\"final\",\"action_input\":\"never\"}",
+    } };
+    var ag = testAgent(&brain, 16);
+    ag.context_budget_bytes = 50; // 连 system+任务+最近 K 都放不下
+
+    var sess = session.Session.init("t-compact-fail");
+    defer sess.deinit(gpa);
+    try sess.append(gpa, .system, "SYSTEM-PROMPT-THAT-ALONE-EXCEEDS-THE-TINY-BUDGET");
+    try sess.append(gpa, .user, "ORIGINAL-TASK-LONG-ENOUGH-TO-OVERFLOW");
+    var i: usize = 0;
+    while (i < 12) : (i += 1) try sess.append(gpa, .user, "observation-payload-block");
+
+    try std.testing.expectError(error.ContextBudgetExceeded, ag.run(gpa, &sess));
 }
 
 test "run: parallel 并发执行本地只读工具并按输入顺序回灌" {

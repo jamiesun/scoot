@@ -49,6 +49,54 @@ pub const Session = struct {
         return self.messages.items;
     }
 
+    /// 历史压缩（issue #71）：保留**首条 system 指令 + 次条原始 user 任务 + 最近
+    /// `keep_recent` 条**，把中间整段较早消息替换为一条「已省略」摘要标记，让逼近上下文
+    /// 预算的长 run 能压缩后继续，而非整段中止或无界增长。
+    ///
+    /// 被丢弃消息的内容副本用 `gpa` 释放（须与 `append` 同一分配器）：真实分配器下立即回收；
+    /// arena backing 下 `free` 为 no-op——不回收但语义安全，且**发送给后端的历史确实变小**
+    /// （token 成本即时下降，这才是压缩的首要目的）。
+    ///
+    /// 返回是否实际发生了压缩（中段为空时为 false，调用方据此决定是否仍需 fail-fast）。
+    pub fn compact(self: *Session, gpa: std.mem.Allocator, keep_recent: usize) !bool {
+        const msgs = self.messages.items;
+        const n = msgs.len;
+        const prefix: usize = @min(n, 2); // system + 原始 user（按存在取，最多 2 条）
+        if (n <= prefix + keep_recent) return false; // 没有可压缩的中段
+        const drop_start = prefix;
+        const drop_end = n - keep_recent; // 独占
+        if (drop_end <= drop_start) return false;
+
+        var elided_bytes: usize = 0;
+        var k = drop_start;
+        while (k < drop_end) : (k += 1) elided_bytes += msgs[k].content.len;
+        const elided_count = drop_end - drop_start;
+
+        const marker = try std.fmt.allocPrint(
+            gpa,
+            "[历史压缩] 为控制上下文预算，已省略较早的 {d} 条消息（约 {d} 字节，多为工具观察原文）。system 指令、原始任务与最近 {d} 条消息已保留；如需更早细节请用工具重新获取。",
+            .{ elided_count, elided_bytes, keep_recent },
+        );
+        errdefer gpa.free(marker);
+
+        var rebuilt: std.ArrayList(llm.Message) = .empty;
+        errdefer rebuilt.deinit(gpa);
+        try rebuilt.ensureTotalCapacity(gpa, prefix + 1 + keep_recent);
+        var i: usize = 0;
+        while (i < prefix) : (i += 1) rebuilt.appendAssumeCapacity(msgs[i]);
+        rebuilt.appendAssumeCapacity(.{ .role = .user, .content = marker });
+        i = drop_end;
+        while (i < n) : (i += 1) rebuilt.appendAssumeCapacity(msgs[i]);
+
+        // 仅释放被丢弃消息的内容（prefix/tail 的内容已转交 rebuilt 继续引用）。
+        k = drop_start;
+        while (k < drop_end) : (k += 1) gpa.free(msgs[k].content);
+
+        self.messages.deinit(gpa); // 释放旧节点数组（内容已分别转移/释放）
+        self.messages = rebuilt;
+        return true;
+    }
+
     pub fn count(self: *const Session) usize {
         return self.messages.items.len;
     }
@@ -174,4 +222,42 @@ test "persist 追加写 JSONL 到 <dir>/<id>.jsonl 并可读回" {
 
 test {
     std.testing.refAllDecls(@This());
+}
+
+test "compact：保留 system+原始任务+最近 K，中段替换为标记，内容正确释放" {
+    const gpa = std.testing.allocator;
+    var s = Session.init("c1");
+    defer s.deinit(gpa);
+
+    try s.append(gpa, .system, "SYS-PROMPT");
+    try s.append(gpa, .user, "ORIGINAL-TASK");
+    // 6 条中间消息（assistant 动作 + user 观察交替），均应被压掉。
+    var i: usize = 0;
+    while (i < 3) : (i += 1) {
+        try s.append(gpa, .assistant, "{\"action\":\"bash\",\"action_input\":\"x\"}");
+        try s.append(gpa, .user, "[观察] OLD-OBSERVATION-PAYLOAD");
+    }
+    // 最近 2 条应原样保留。
+    try s.append(gpa, .assistant, "RECENT-ACTION");
+    try s.append(gpa, .user, "RECENT-OBSERVATION");
+
+    const before = s.count();
+    const did = try s.compact(gpa, 2);
+    try std.testing.expect(did);
+    // prefix(2) + marker(1) + tail(2) = 5。
+    try std.testing.expectEqual(@as(usize, 5), s.count());
+    try std.testing.expect(s.count() < before);
+
+    const it = s.items();
+    try std.testing.expectEqualStrings("SYS-PROMPT", it[0].content);
+    try std.testing.expectEqualStrings("ORIGINAL-TASK", it[1].content);
+    try std.testing.expect(std.mem.indexOf(u8, it[2].content, "历史压缩") != null);
+    try std.testing.expect(std.mem.indexOf(u8, it[2].content, "已省略较早的 6 条") != null);
+    try std.testing.expectEqualStrings("RECENT-ACTION", it[3].content);
+    try std.testing.expectEqualStrings("RECENT-OBSERVATION", it[4].content);
+    // 被压掉的观察原文不再出现。
+    for (it) |m| try std.testing.expect(std.mem.indexOf(u8, m.content, "OLD-OBSERVATION-PAYLOAD") == null);
+
+    // 中段为空时不压缩。
+    try std.testing.expect(!try s.compact(gpa, 100));
 }

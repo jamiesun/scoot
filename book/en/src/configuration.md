@@ -160,10 +160,14 @@ The cognition engine.
 | `context_budget_bytes` | usize | `0` | Cumulative prompt-history budget in **bytes**. `0` disables it. |
 
 **`context_budget_bytes`** guards small-context backends. When the running
-transcript would exceed this size, the agent stops *before* the next backend
-call with a clear error, instead of letting the request grow unbounded and fail
-late. Bytes are a coarse proxy for tokens — pick a conservative value below your
-backend's context window (turn count is still bounded by `max_turns`).
+transcript would exceed this size, the agent first **compacts history** —
+keeping the system prompt, the original task, and the most recent turns while
+replacing older tool transcripts with a short summary marker — so a long run can
+continue instead of aborting. It only fails fast (with a clear error) *before*
+the next backend call if the transcript is still over budget after compaction
+(the budget is too small for even the minimal retained context). Bytes are a
+coarse proxy for tokens — pick a conservative value below your backend's context
+window (turn count is still bounded by `max_turns`).
 
 ```toml
 [agent]

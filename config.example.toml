@@ -48,9 +48,12 @@ max_turns = 32
 default_mode = "goal"
 
 # Context budget in bytes for the cumulative prompt history across turns.
-# When the running transcript would exceed this, the agent stops *before* the
-# next backend call with a clear error instead of letting the request grow
-# unbounded and fail late at a small-context backend. Bytes are a coarse proxy
+# When the running transcript would exceed this, the agent first *compacts*
+# history — keeping the system prompt, the original task, and the most recent
+# turns while replacing older tool transcripts with a short summary marker — so
+# a long run can continue instead of aborting. It only fails fast (with a clear
+# error) if the history is still over budget after compaction (i.e. the budget
+# is too small for even the minimal retained context). Bytes are a coarse proxy
 # for tokens; pick a conservative value below your backend's context window.
 # 0 disables the check (turn-count bound by max_turns only); this is the default.
 context_budget_bytes = 0
