@@ -147,6 +147,8 @@ pub const LoadReport = struct {
     toml_diag: ?tomlmod.Diagnostic = null,
     /// 未识别的配置键（点分路径）：因 ignore_unknown_fields 被静默丢弃并回落默认，收集以告警。
     unknown_keys: []const []const u8 = &.{},
+    /// SCOOT_* 环境变量覆盖中因类型非法被忽略的项（含变量名与原因），供上层告警。
+    env_warnings: []const []const u8 = &.{},
 };
 
 /// 收集解析后的配置树里未被 FileConfig 模式识别的键（点分路径）。
@@ -209,6 +211,54 @@ fn checkFieldKeys(
 fn joinKey(arena: std.mem.Allocator, prefix: []const u8, key: []const u8) std.mem.Allocator.Error![]const u8 {
     if (prefix.len == 0) return arena.dupe(u8, key);
     return std.fmt.allocPrint(arena, "{s}.{s}", .{ prefix, key });
+}
+
+/// 读取 env 变量值；空串视作未设置（避免把空值覆盖成空字符串）。
+fn envVal(env: *const Environ.Map, name: []const u8) ?[]const u8 {
+    const v = env.get(name) orelse return null;
+    return if (v.len == 0) null else v;
+}
+
+/// 宽松布尔解析：true/false（大小写不敏感）或 1/0。
+fn parseEnvBool(s: []const u8) ?bool {
+    if (std.ascii.eqlIgnoreCase(s, "true") or std.mem.eql(u8, s, "1")) return true;
+    if (std.ascii.eqlIgnoreCase(s, "false") or std.mem.eql(u8, s, "0")) return false;
+    return null;
+}
+
+fn warnEnv(
+    warnings: *std.ArrayList([]const u8),
+    arena: std.mem.Allocator,
+    name: []const u8,
+    reason: []const u8,
+) std.mem.Allocator.Error!void {
+    try warnings.append(arena, try std.fmt.allocPrint(arena, "{s}：{s}", .{ name, reason }));
+}
+
+fn overrideEnvBool(
+    env: *const Environ.Map,
+    name: []const u8,
+    out: *bool,
+    warnings: *std.ArrayList([]const u8),
+    arena: std.mem.Allocator,
+) std.mem.Allocator.Error!void {
+    const v = envVal(env, name) orelse return;
+    if (parseEnvBool(v)) |b| out.* = b else try warnEnv(warnings, arena, name, "需为 true/false（或 1/0），已忽略");
+}
+
+fn overrideEnvInt(
+    comptime T: type,
+    env: *const Environ.Map,
+    name: []const u8,
+    out: *T,
+    warnings: *std.ArrayList([]const u8),
+    arena: std.mem.Allocator,
+) std.mem.Allocator.Error!void {
+    const v = envVal(env, name) orelse return;
+    out.* = std.fmt.parseInt(T, v, 10) catch {
+        try warnEnv(warnings, arena, name, "需为非负整数，已忽略");
+        return;
+    };
 }
 
 /// 解析 config.json 文本为 FileConfig。
@@ -313,6 +363,59 @@ pub const Config = struct {
             .dirs = dirs,
             .active_config_file = active,
         };
+    }
+
+    /// 在已加载的配置上叠加 SCOOT_* 环境变量覆盖。
+    /// 优先级：SCOOT_* env > 配置文件 > 内置默认（env 永远胜，无论配置文件是否存在）。
+    /// 便于 CI / GitHub Actions 等零配置临时运行：把后端地址、模型、策略等经 env 传入，
+    /// 配合 `SCOOT_HOME=$(mktemp -d)` 即可跑完即焚。
+    /// **密钥仍只经 backend.api_key_env 指向的变量取值（默认 OPENAI_API_KEY），此处绝不读明文密钥。**
+    /// 类型非法的项被忽略并记入 `report.env_warnings`，由上层告警到 stderr（不污染 stdout）。
+    pub fn applyEnvOverrides(
+        self: *Config,
+        arena: std.mem.Allocator,
+        env: *const Environ.Map,
+        report: ?*LoadReport,
+    ) std.mem.Allocator.Error!void {
+        var warnings: std.ArrayList([]const u8) = .empty;
+
+        // backend（不含明文密钥）
+        if (envVal(env, "SCOOT_BACKEND_BASE_URL")) |v| self.backend.base_url = try arena.dupe(u8, v);
+        if (envVal(env, "SCOOT_BACKEND_MODEL")) |v| self.backend.model = try arena.dupe(u8, v);
+        if (envVal(env, "SCOOT_BACKEND_API_KEY_ENV")) |v| self.backend.api_key_env = try arena.dupe(u8, v);
+        if (envVal(env, "SCOOT_BACKEND_API_KEY_FILE")) |v| self.backend.api_key_file = try arena.dupe(u8, v);
+        if (envVal(env, "SCOOT_BACKEND_API_KEY_CMD")) |v| self.backend.api_key_cmd = try arena.dupe(u8, v);
+        if (envVal(env, "SCOOT_BACKEND_CA_FILE")) |v| self.backend.ca_file = try arena.dupe(u8, v);
+        if (envVal(env, "SCOOT_BACKEND_EXTRA_BODY")) |v| {
+            if (std.json.parseFromSliceLeaky(std.json.Value, arena, v, .{})) |parsed| {
+                if (parsed == .object)
+                    self.backend.extra_body = parsed
+                else
+                    try warnEnv(&warnings, arena, "SCOOT_BACKEND_EXTRA_BODY", "需为 JSON 对象，已忽略");
+            } else |_| {
+                try warnEnv(&warnings, arena, "SCOOT_BACKEND_EXTRA_BODY", "JSON 解析失败，已忽略");
+            }
+        }
+
+        // agent
+        if (envVal(env, "SCOOT_AGENT_DEFAULT_MODE")) |v| self.agent.default_mode = try arena.dupe(u8, v);
+        try overrideEnvInt(u32, env, "SCOOT_AGENT_MAX_TURNS", &self.agent.max_turns, &warnings, arena);
+        try overrideEnvInt(usize, env, "SCOOT_AGENT_CONTEXT_BUDGET_BYTES", &self.agent.context_budget_bytes, &warnings, arena);
+
+        // tools
+        if (envVal(env, "SCOOT_TOOLS_POLICY")) |v| self.tools.policy = try arena.dupe(u8, v);
+        try overrideEnvInt(u64, env, "SCOOT_TOOLS_TIMEOUT_MS", &self.tools.timeout_ms, &warnings, arena);
+        try overrideEnvBool(env, "SCOOT_TOOLS_CONFINE_WRITES", &self.tools.confine_writes, &warnings, arena);
+        try overrideEnvBool(env, "SCOOT_TOOLS_BLOCK_INTERNAL_HTTP", &self.tools.block_internal_http, &warnings, arena);
+
+        // skills
+        try overrideEnvBool(env, "SCOOT_SKILLS_ENABLED", &self.skills.enabled, &warnings, arena);
+
+        // audit
+        if (envVal(env, "SCOOT_AUDIT_LEVEL")) |v| self.audit.level = try arena.dupe(u8, v);
+        try overrideEnvBool(env, "SCOOT_AUDIT_TO_FILE", &self.audit.to_file, &warnings, arena);
+
+        if (report) |r| r.env_warnings = warnings.items;
     }
 
     /// 按配置来源解析 API token（env > file > cmd）。明文绝不入库。
@@ -622,4 +725,114 @@ test "JobConfig.toJob: 触发器校验与策略矫正" {
     // 多触发器 → 非法
     const multi = JobConfig{ .id = "m", .every_sec = 30, .at_unix = 100 };
     try std.testing.expect(multi.toJob() == null);
+}
+
+test "applyEnvOverrides: 字符串项覆盖 backend 与 tools" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var map: std.process.Environ.Map = .init(std.testing.allocator);
+    defer map.deinit();
+    try map.put("SCOOT_BACKEND_BASE_URL", "https://example.test/v1");
+    try map.put("SCOOT_BACKEND_MODEL", "gpt-override");
+    try map.put("SCOOT_TOOLS_POLICY", "readonly");
+
+    var cfg: Config = .{ .dirs = undefined };
+    var report: LoadReport = .{};
+    try cfg.applyEnvOverrides(arena.allocator(), &map, &report);
+
+    try std.testing.expectEqualStrings("https://example.test/v1", cfg.backend.base_url);
+    try std.testing.expectEqualStrings("gpt-override", cfg.backend.model);
+    try std.testing.expectEqualStrings("readonly", cfg.tools.policy);
+    try std.testing.expectEqual(@as(usize, 0), report.env_warnings.len);
+}
+
+test "applyEnvOverrides: 整数/布尔项解析" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var map: std.process.Environ.Map = .init(std.testing.allocator);
+    defer map.deinit();
+    try map.put("SCOOT_AGENT_MAX_TURNS", "7");
+    try map.put("SCOOT_TOOLS_TIMEOUT_MS", "1234");
+    try map.put("SCOOT_TOOLS_CONFINE_WRITES", "true");
+    try map.put("SCOOT_TOOLS_BLOCK_INTERNAL_HTTP", "0");
+    try map.put("SCOOT_SKILLS_ENABLED", "FALSE");
+
+    var cfg: Config = .{ .dirs = undefined };
+    try cfg.applyEnvOverrides(arena.allocator(), &map, null);
+
+    try std.testing.expectEqual(@as(u32, 7), cfg.agent.max_turns);
+    try std.testing.expectEqual(@as(u64, 1234), cfg.tools.timeout_ms);
+    try std.testing.expectEqual(true, cfg.tools.confine_writes);
+    try std.testing.expectEqual(false, cfg.tools.block_internal_http);
+    try std.testing.expectEqual(false, cfg.skills.enabled);
+}
+
+test "applyEnvOverrides: 非法整数/布尔被忽略并记入告警，原值不变" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var map: std.process.Environ.Map = .init(std.testing.allocator);
+    defer map.deinit();
+    try map.put("SCOOT_AGENT_MAX_TURNS", "abc");
+    try map.put("SCOOT_SKILLS_ENABLED", "maybe");
+
+    var cfg: Config = .{ .dirs = undefined };
+    var report: LoadReport = .{};
+    try cfg.applyEnvOverrides(arena.allocator(), &map, &report);
+
+    try std.testing.expectEqual(@as(u32, 32), cfg.agent.max_turns); // 默认保留
+    try std.testing.expectEqual(true, cfg.skills.enabled); // 默认保留
+    try std.testing.expectEqual(@as(usize, 2), report.env_warnings.len);
+}
+
+test "applyEnvOverrides: 空串视作未设置，不覆盖默认" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var map: std.process.Environ.Map = .init(std.testing.allocator);
+    defer map.deinit();
+    try map.put("SCOOT_BACKEND_MODEL", "");
+
+    var cfg: Config = .{ .dirs = undefined };
+    try cfg.applyEnvOverrides(arena.allocator(), &map, null);
+
+    try std.testing.expectEqualStrings("qwen2.5", cfg.backend.model); // 默认保留
+}
+
+test "applyEnvOverrides: extra_body 接受 JSON 对象、拒绝非对象" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    {
+        var map: std.process.Environ.Map = .init(std.testing.allocator);
+        defer map.deinit();
+        try map.put("SCOOT_BACKEND_EXTRA_BODY", "{\"temperature\":0.2}");
+        var cfg: Config = .{ .dirs = undefined };
+        var report: LoadReport = .{};
+        try cfg.applyEnvOverrides(arena.allocator(), &map, &report);
+        try std.testing.expect(cfg.backend.extra_body != null);
+        try std.testing.expect(cfg.backend.extra_body.? == .object);
+        try std.testing.expectEqual(@as(usize, 0), report.env_warnings.len);
+    }
+    {
+        var map: std.process.Environ.Map = .init(std.testing.allocator);
+        defer map.deinit();
+        try map.put("SCOOT_BACKEND_EXTRA_BODY", "[1,2,3]");
+        var cfg: Config = .{ .dirs = undefined };
+        var report: LoadReport = .{};
+        try cfg.applyEnvOverrides(arena.allocator(), &map, &report);
+        try std.testing.expect(cfg.backend.extra_body == null); // 非对象被拒
+        try std.testing.expectEqual(@as(usize, 1), report.env_warnings.len);
+    }
+}
+
+test "applyEnvOverrides: api_key_env 覆盖间接指向（仍不读明文密钥）" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var map: std.process.Environ.Map = .init(std.testing.allocator);
+    defer map.deinit();
+    try map.put("SCOOT_BACKEND_API_KEY_ENV", "LLM_KEY");
+
+    var cfg: Config = .{ .dirs = undefined };
+    try cfg.applyEnvOverrides(arena.allocator(), &map, null);
+
+    try std.testing.expectEqualStrings("LLM_KEY", cfg.backend.api_key_env);
 }
