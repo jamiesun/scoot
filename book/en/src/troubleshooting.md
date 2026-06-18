@@ -94,7 +94,8 @@ asks the model to *run* is still gated. If a skill's *actions* are blocked in
 - `[schedule] enabled` must be `true`.
 - Each job needs **exactly one** trigger; `schedule list` shows invalid jobs as
   `INACTIVE`.
-- `cron` is parsed but **not supported yet** — cron jobs never fire.
+- Cron expressions are 5-field UTC schedules and fire at most once per matching
+  minute.
 - A job set to `guarded` runs as effective `readonly`; if it seems unable to
   write or reach the network, that's the unattended-safety coercion.
 

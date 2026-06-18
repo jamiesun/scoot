@@ -12,12 +12,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.16.0
+        run: |
+          version=0.16.0
+          curl -fsSL "https://ziglang.org/download/${version}/zig-x86_64-linux-${version}.tar.xz" -o zig.tar.xz
+          tar -xf zig.tar.xz
+          echo "$PWD/zig-x86_64-linux-${version}" >> "$GITHUB_PATH"
+          "$PWD/zig-x86_64-linux-${version}/zig" version
 
       - name: Build
         run: zig build
@@ -30,7 +33,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install mdBook
         run: cargo install mdbook --locked
@@ -40,4 +43,3 @@ jobs:
 
       - name: Build Chinese book
         run: mdbook build book/zh
-

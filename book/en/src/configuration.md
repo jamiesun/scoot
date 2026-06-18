@@ -292,12 +292,12 @@ Each job is an array-of-tables entry with **exactly one** trigger.
 | `goal` | string | `""` | The natural-language goal the agent runs. |
 | `every_sec` | u64? | unset | Trigger: fixed interval in seconds. |
 | `at_unix` | i64? | unset | Trigger: a fixed Unix-time instant. |
-| `cron` | string? | unset | Trigger: cron expression — **parsed but not supported yet**. |
+| `cron` | string? | unset | Trigger: 5-field UTC cron expression. |
 | `mode` | string | `readonly` | Execution policy: `readonly` (default, safe) or `unrestricted`. |
 
 **Exactly one** of `every_sec` / `at_unix` / `cron` must be set; otherwise the
-job is invalid and skipped with a warning (shown as `INACTIVE` in
-`schedule list`). `cron` jobs never fire until cron support lands.
+job is invalid and skipped with a warning. Cron supports minute/hour/day/month/
+weekday fields with `*`, comma lists, ranges, and `/step`.
 
 **Safety:** scheduled jobs default to `readonly`, and `guarded` is coerced to
 effective `readonly` at execution time. Use `unrestricted` only with deliberate

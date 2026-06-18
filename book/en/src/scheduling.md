@@ -24,7 +24,7 @@ Each job needs **exactly one** trigger:
 | --- | --- |
 | `every_sec` | Fire on a fixed interval (seconds). |
 | `at_unix` | Fire once at a fixed Unix-time instant. |
-| `cron` | Parsed but **not supported yet** — such jobs never fire and show as `INACTIVE`. |
+| `cron` | Fire on a 5-field UTC cron expression. |
 
 A job with zero or multiple triggers is invalid and skipped with a warning. See
 [Configuration → `[[schedule.jobs]]`](configuration.md#schedulejobs) for every

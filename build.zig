@@ -16,7 +16,8 @@ pub fn build(b: *std.Build) void {
     const version = b.option([]const u8, "version", "覆盖内嵌版本号（发布时由 git tag 注入）") orelse zon_version;
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "version", version);
-    mod.addImport("build_options", build_options.createModule());
+    const build_options_mod = build_options.createModule();
+    mod.addImport("build_options", build_options_mod);
 
     // `scoot` 可执行文件：CLI / REPL / Daemon 入口。
     const exe = b.addExecutable(.{
@@ -27,6 +28,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "scoot", .module = mod },
+                .{ .name = "build_options", .module = build_options_mod },
             },
         }),
     });

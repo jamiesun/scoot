@@ -55,19 +55,25 @@ pub const Paths = struct {
         };
     }
 
-    /// 确保运行目录及子目录存在（幂等：已存在不报错）。
-    /// 用 Io 的 createDirPath（mkdir -p 语义）逐个创建。
-    /// 注：权限收紧（home 期望 0700、token 0600）由 secret 子系统在读写密钥时把关；
-    ///     此处先保证目录存在，目录权限沿用系统默认。
+    /// 确保运行目录及子目录存在（幂等：已存在不报错），并收紧为属主可读写执行。
+    /// session transcript / audit 日志可能含提示词、模型输出和文件内容；目录不应继承
+    /// 默认 umask 变成同机用户可读。
     pub fn ensure(self: Paths, io: std.Io) !void {
-        const cwd = std.Io.Dir.cwd();
-        try cwd.createDirPath(io, self.home);
-        try cwd.createDirPath(io, self.skills_dir);
-        try cwd.createDirPath(io, self.logs_dir);
-        try cwd.createDirPath(io, self.state_dir);
-        try cwd.createDirPath(io, self.sessions_dir);
+        try ensurePrivateDir(io, self.home);
+        try ensurePrivateDir(io, self.skills_dir);
+        try ensurePrivateDir(io, self.logs_dir);
+        try ensurePrivateDir(io, self.state_dir);
+        try ensurePrivateDir(io, self.sessions_dir);
     }
 };
+
+fn ensurePrivateDir(io: std.Io, path: []const u8) !void {
+    const cwd = std.Io.Dir.cwd();
+    _ = try cwd.createDirPathStatus(io, path, std.Io.File.Permissions.fromMode(0o700));
+    var dir = try cwd.openDir(io, path, .{});
+    defer dir.close(io);
+    try dir.setPermissions(io, std.Io.File.Permissions.fromMode(0o700));
+}
 
 /// `child` 是否位于 `parent` 之内（含相等）。两者应为已规范化（realpath）的绝对路径。
 /// 纯字符串判定，供各模块的 symlink 逃逸防护复用（issue #41 / #52 / #54）。
@@ -98,7 +104,17 @@ pub fn writeEscapesBase(io: std.Io, arena: std.mem.Allocator, base: []const u8, 
     const parent_rel = std.fs.path.dirname(target) orelse ".";
     const parent_path = std.fs.path.join(arena, &.{ base, parent_rel }) catch return false;
     const real_parent = cwd.realPathFileAlloc(io, parent_path, arena) catch return false;
-    return !within(real_parent, real_base);
+    if (!within(real_parent, real_base)) return true;
+
+    const target_path = std.fs.path.join(arena, &.{ base, target }) catch return false;
+    const lst = cwd.statFile(io, target_path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return false,
+    };
+    if (lst.kind == .sym_link) return true;
+
+    const real_target = cwd.realPathFileAlloc(io, target_path, arena) catch return false;
+    return !within(real_target, real_base);
 }
 
 test {
@@ -164,6 +180,29 @@ test "writeEscapesBase: 预置 symlink 的写入逃逸判定（issue #52）" {
     try std.testing.expect(writeEscapesBase(io, arena, base, "link/escape.txt"));
 }
 
+test "writeEscapesBase: final path component symlink is rejected" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const root = "/tmp/scoot_write_final_symlink_test";
+    cwd.deleteTree(io, root) catch {};
+    defer cwd.deleteTree(io, root) catch {};
+    try cwd.createDirPath(io, root ++ "/proj/sub");
+    try cwd.createDirPath(io, root ++ "/outside");
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/outside/target.txt", .data = "OUT" });
+    cwd.symLink(io, root ++ "/outside/target.txt", root ++ "/proj/sub/out", .{}) catch |e| {
+        if (e == error.AccessDenied or e == error.PermissionDenied) return error.SkipZigTest;
+        return e;
+    };
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    try std.testing.expect(writeEscapesBase(io, arena, root ++ "/proj", "sub/out"));
+    try std.testing.expect(!writeEscapesBase(io, arena, root ++ "/proj", "sub/new.txt"));
+}
+
 test "fromHome: 从显式 home 派生运行目录树" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -198,4 +237,7 @@ test "ensure: 在临时目录下创建运行目录树且幂等" {
     // 子目录应可被再次以目录方式打开（存在性验证）。
     var d = try cwd.openDir(io, p.sessions_dir, .{});
     d.close(io);
+
+    const st = try cwd.statFile(io, p.sessions_dir, .{});
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o700), st.permissions.toMode() & 0o777);
 }

@@ -368,6 +368,7 @@ pub fn main(init: std.process.Init) !void {
 
                 if (ag.audit) |lg| lg.log(.system_error, @errorName(err)) catch {};
                 finalizeRun(io, &sess, cfg.dirs.sessions_dir, &sink);
+                try printRunSummary(err_out, arena, "error", &sess, cfg.dirs.sessions_dir, &sink, &client);
                 try err_out.print("[scoot] 调用后端失败：{s}\n", .{@errorName(err)});
                 try printBackendErrorDetail(err_out, &client);
                 try err_out.print(
@@ -379,6 +380,8 @@ pub fn main(init: std.process.Init) !void {
             };
             finalizeRun(io, &sess, cfg.dirs.sessions_dir, &sink);
             try out.print("{s}\n", .{reply});
+            try out.flush();
+            try printRunSummary(err_out, arena, "ok", &sess, cfg.dirs.sessions_dir, &sink, &client);
             return;
         }
     }
@@ -839,19 +842,13 @@ fn checkScheduleConfig(d: *Doctor, cfg: scoot.config.Config) !void {
         return;
     }
     var invalid: usize = 0;
-    var cron_unsupported: usize = 0;
     for (cfg.schedule.jobs) |job| {
-        if (job.toJob()) |j| {
-            if (j.trigger == .cron) cron_unsupported += 1;
-        } else invalid += 1;
+        if (job.toJob() == null) invalid += 1;
     }
-    if (invalid == 0 and cron_unsupported == 0) {
+    if (invalid == 0) {
         try d.ok("schedule.jobs", "all valid");
-    } else if (invalid == 0) {
-        // cron 触发器能解析但暂不支持，运行时会跳过——doctor 须如实示警（issue #25）。
-        try d.warn("schedule.jobs", "含 cron 触发器（暂不支持），运行时会跳过");
     } else {
-        try d.warn("schedule.jobs", "存在非法/不支持的任务触发器，运行时会跳过");
+        try d.warn("schedule.jobs", "存在非法任务触发器，运行时会跳过");
     }
 }
 
@@ -1282,7 +1279,7 @@ fn triggerLabel(buf: []u8, trig: scoot.schedule.Trigger) []const u8 {
     return switch (trig) {
         .every_sec => |s| std.fmt.bufPrint(buf, "每 {d}s", .{s}) catch "every",
         .at_unix => |t| std.fmt.bufPrint(buf, "@{d}", .{t}) catch "at",
-        .cron => |c| std.fmt.bufPrint(buf, "cron '{s}'（暂不支持）", .{c}) catch "cron",
+        .cron => |c| std.fmt.bufPrint(buf, "cron '{s}'", .{c}) catch "cron",
     };
 }
 
@@ -1302,13 +1299,6 @@ fn printSchedule(out: *Io.Writer, cfg: scoot.config.Config) !void {
     var tbuf: [128]u8 = undefined;
     for (sc.jobs) |jc| {
         if (jc.toJob()) |job| {
-            if (job.trigger == .cron) {
-                // cron 暂不支持：明确标记 INACTIVE，避免用户误以为它会按表运行（issue #25）。
-                try out.print("  - {s}  [{s}]  ⚠ INACTIVE（cron 暂不支持，不会运行）  goal={s}\n", .{
-                    jc.id, triggerLabel(&tbuf, job.trigger), job.goal,
-                });
-                continue;
-            }
             const eff = job.effectiveMode();
             const coerced = if (eff != job.mode) "（强制矫正）" else "";
             try out.print("  - {s}  [{s}]  执行档={s}{s}  goal={s}\n", .{
@@ -1385,12 +1375,6 @@ fn loadSchedule(out: *Io.Writer, arena: std.mem.Allocator, cfg: scoot.config.Con
             try out.print("[scoot] 跳过非法任务 '{s}'（触发器须恰好设置其一）。\n", .{jc.id});
             continue;
         };
-        if (job.trigger == .cron) {
-            // cron 触发器暂不支持（schedule.dueAt 对 cron 恒 false）：fail loud——明示跳过且
-            // 不计入可运行任务，杜绝「列在表里、调度启动数里有它，却永不触发」的静默陷阱（issue #25）。
-            try out.print("[scoot] 跳过任务 '{s}'：cron 触发器暂不支持，不会运行（请改用 every_sec / at_unix）。\n", .{jc.id});
-            continue;
-        }
         try sch.add(arena, job); // job 内容借 cfg/arena 生命周期（>= scheduler）
         valid += 1;
     }
@@ -1829,6 +1813,7 @@ fn runRepl(
     replLoop(out, &ir.interface, &ag, &sess, arena, true) catch {};
 
     finalizeRun(io, &sess, cfg.dirs.sessions_dir, &sink);
+    try printRunSummary(err_out, arena, "ok", &sess, cfg.dirs.sessions_dir, &sink, &client);
     try out.writeAll("再见。\n");
 }
 
@@ -1896,11 +1881,13 @@ const AuditSink = struct {
     /// 既不静默退回黑盒，也不因日志故障阻断任务（铁律：可审计胜过黑盒）。
     fn open(self: *AuditSink, warn: *Io.Writer, arena: std.mem.Allocator, io: std.Io, logs_dir: []const u8) void {
         const path = std.fmt.allocPrint(arena, "{s}/audit.jsonl", .{logs_dir}) catch return;
+        _ = scoot.audit.rotateFileIfTooLarge(io, arena, path, scoot.audit.default_max_jsonl_bytes) catch false;
         const f = Io.Dir.cwd().createFile(io, path, .{ .truncate = false }) catch |err| {
             warn.print("[scoot] 警告：审计日志无法写入（{s}：{s}），本次不留痕\n", .{ path, @errorName(err) }) catch {};
             return;
         };
         self.file = f;
+        f.setPermissions(io, std.Io.File.Permissions.fromMode(0o600)) catch {};
         self.fw = f.writer(io, &self.buf);
         if (f.stat(io)) |st| {
             self.fw.seekTo(st.size) catch {}; // 追加到末尾，不覆盖历史
@@ -1919,12 +1906,35 @@ const AuditSink = struct {
             f.close(io);
         }
     }
+
+    fn stats(self: *const AuditSink) scoot.audit.Stats {
+        return if (self.file != null) self.logger.stats else .{};
+    }
 };
 
 /// 收尾一次运行：flush + 关闭审计，并把会话快照追加落盘。全部尽力而为。
 fn finalizeRun(io: std.Io, sess: *scoot.session.Session, sessions_dir: []const u8, sink: *AuditSink) void {
     sink.close(io);
     sess.persist(io, sessions_dir) catch {};
+}
+
+fn printRunSummary(
+    out: *Io.Writer,
+    arena: std.mem.Allocator,
+    status: []const u8,
+    sess: *const scoot.session.Session,
+    sessions_dir: []const u8,
+    sink: *const AuditSink,
+    client: *const scoot.llm.Client,
+) !void {
+    const st = sink.stats();
+    const transcript = try std.fmt.allocPrint(arena, "{s}/{s}.jsonl", .{ sessions_dir, sess.id });
+    const backend = if (client.last_error_status == 0) "ok" else try std.fmt.allocPrint(arena, "status={d}", .{client.last_error_status});
+    try out.print(
+        "[scoot] summary status={s} turns={d} tools={d} policy_deny={d} system_error={d} events={d} backend={s} transcript={s}\n",
+        .{ status, st.thought, st.tool_call, st.policy_deny, st.system_error, st.total(), backend, transcript },
+    );
+    try out.flush();
 }
 
 /// 打印完信息后干净退出（刷新 stdout，不抛错误回溯）：用于面向用户的可预期失败。
@@ -2224,7 +2234,7 @@ test "parsePolicyModeStrict: 未知策略不静默回落" {
     try std.testing.expect(parsePolicyModeStrict("surprise") == null);
 }
 
-test "schedule: cron 触发器 fail-loud——loadSchedule 跳过且不计入、printSchedule 标记 INACTIVE（issue #25）" {
+test "schedule: cron 触发器会装载并在列表中显示为可运行任务" {
     const jobs = [_]scoot.config.JobConfig{
         .{ .id = "tick", .goal = "g", .every_sec = 5 },
         .{ .id = "nightly", .goal = "g", .cron = "0 3 * * *" },
@@ -2235,21 +2245,45 @@ test "schedule: cron 触发器 fail-loud——loadSchedule 跳过且不计入、
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    // loadSchedule：只有 every_sec 计入有效任务；cron 被显式跳过并打印原因。
+    // loadSchedule：every_sec 与 cron 都计入有效任务。
     var lbuf: [1024]u8 = undefined;
     var lw = Io.Writer.fixed(&lbuf);
     const loaded = try loadSchedule(&lw, arena.allocator(), cfg);
-    try std.testing.expectEqual(@as(usize, 1), loaded.valid);
+    try std.testing.expectEqual(@as(usize, 2), loaded.valid);
     const lout = lw.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, lout, "nightly") != null);
-    try std.testing.expect(std.mem.indexOf(u8, lout, "cron 触发器暂不支持") != null);
+    try std.testing.expect(std.mem.indexOf(u8, lout, "nightly") == null);
+    try std.testing.expect(std.mem.indexOf(u8, lout, "cron 触发器暂不支持") == null);
 
-    // printSchedule：cron 任务显式标记 INACTIVE（不展示执行档，杜绝「以为会运行」）。
+    // printSchedule：cron 任务展示执行档，不再标记 INACTIVE。
     var pbuf: [1024]u8 = undefined;
     var pw = Io.Writer.fixed(&pbuf);
     try printSchedule(&pw, cfg);
     const pout = pw.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, pout, "INACTIVE") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pout, "cron '0 3 * * *'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pout, "INACTIVE") == null);
+}
+
+test "AuditSink: audit file is created owner-only" {
+    const io = std.testing.io;
+    const cwd = Io.Dir.cwd();
+    const dir = "/tmp/scoot_audit_sink_mode_test";
+    cwd.deleteTree(io, dir) catch {};
+    defer cwd.deleteTree(io, dir) catch {};
+    try cwd.createDirPath(io, dir);
+
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var warn_buf: [512]u8 = undefined;
+    var warn = Io.Writer.fixed(&warn_buf);
+    var sink: AuditSink = .{};
+    sink.open(&warn, arena, io, dir);
+    if (sink.loggerPtr()) |lg| try lg.log(.run, "mode-test");
+    sink.close(io);
+
+    const st = try cwd.statFile(io, dir ++ "/audit.jsonl", .{});
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), st.permissions.toMode() & 0o777);
 }
 
 test {

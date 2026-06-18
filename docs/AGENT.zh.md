@@ -46,7 +46,7 @@ zig build -Doptimize=ReleaseSafe    # 嵌入式 / 生产部署推荐档（见下
 | `src/skill.zig` | Skill 机制：发现 / 选择 / 按需加载（渐进式披露） |
 | `src/session.zig` | 会话：跨回合存活的消息流 + JSONL 序列化（短期记忆载体） |
 | `src/agent.zig` | 认知流引擎：多轮 ReACT 闭环（structured step + bash 工具）+ 每回合 ArenaAllocator，围绕 Session 运行 |
-| `src/schedule.zig` | 调度引擎：every / at（`cron` 暂不支持，恒判定不到点） |
+| `src/schedule.zig` | 调度引擎：every / at / 5 字段 UTC cron |
 | `src/audit.zig` | 审计日志 |
 | `src/tools/*.zig` | 执行沙盒：bash / file / search / http |
 | `build.zig`, `build.zig.zon` | 构建与包清单 |

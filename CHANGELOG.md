@@ -16,6 +16,22 @@ heading when cutting a release.
 
 ## [Unreleased]
 
+### Added
+
+- Run summaries on stderr after CLI/REPL runs, including event counts, tool calls, policy denies, backend status, and transcript path (#59)
+- Minute-level 5-field UTC cron scheduling for `schedule.jobs` (#65)
+
+### Changed
+
+- Runtime directories and JSONL audit/session files now use owner-only permissions, and JSONL files rotate to `.1` at a bounded size (#60, #61)
+- GitHub workflows now use Node 24-compatible actions and shell-based Zig setup (#63)
+- `build_options` is imported by the executable root module as well as the library module (#64)
+
+### Fixed
+
+- Invalid enum-like `SCOOT_*` overrides now warn and keep the previous value instead of silently changing policy/mode/level (#68)
+- `confine_writes` now rejects a pre-existing symlink at the final write path component (#69)
+
 ## [0.1.0] - 2026-06-18
 
 First feature release since `v0.0.2` (which only carried release-workflow plumbing).

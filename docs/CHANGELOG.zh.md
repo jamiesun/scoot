@@ -15,6 +15,22 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 ## [未发布]
 
+### 新增
+
+- CLI/REPL 运行结束后在 stderr 输出紧凑运行摘要，包含事件数、工具调用、策略拒绝、后端状态与 transcript 路径（#59）
+- `schedule.jobs` 支持分钟级 5 字段 UTC cron 调度（#65）
+
+### 变更
+
+- 运行目录与 JSONL 审计/会话文件改为属主可读写，并对 JSONL 文件做有界 `.1` 轮转（#60、#61）
+- GitHub workflow 改用 Node 24 兼容 actions，并用 shell 安装 Zig，避免 Node 20 action 告警（#63）
+- `build_options` 同时导入可执行文件 root module 与库模块（#64）
+
+### 修复
+
+- 非法的枚举型 `SCOOT_*` 覆盖现在会告警并保留原值，不再静默改变 policy/mode/level（#68）
+- `confine_writes` 现在会拒绝最终写入文件名本身为预置 symlink 的逃逸路径（#69）
+
 ## [0.1.0] - 2026-06-18
 
 自 `v0.0.2`（仅包含发布工作流的基础设施）以来的首个功能版本。

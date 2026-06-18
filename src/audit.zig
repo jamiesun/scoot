@@ -9,6 +9,8 @@
 const std = @import("std");
 const jsonio = @import("jsonio.zig");
 
+pub const default_max_jsonl_bytes: u64 = 10 * 1024 * 1024;
+
 pub const EventKind = enum {
     /// 一次运行的起点标记（main 写入，携带用户目标），用于在追加日志里分隔多次运行。
     run,
@@ -22,6 +24,32 @@ pub const EventKind = enum {
     system_error,
 };
 
+pub const Stats = struct {
+    run: u64 = 0,
+    thought: u64 = 0,
+    tool_call: u64 = 0,
+    observation: u64 = 0,
+    final: u64 = 0,
+    policy_deny: u64 = 0,
+    system_error: u64 = 0,
+
+    pub fn record(self: *Stats, kind: EventKind) void {
+        switch (kind) {
+            .run => self.run += 1,
+            .thought => self.thought += 1,
+            .tool_call => self.tool_call += 1,
+            .observation => self.observation += 1,
+            .final => self.final += 1,
+            .policy_deny => self.policy_deny += 1,
+            .system_error => self.system_error += 1,
+        }
+    }
+
+    pub fn total(self: Stats) u64 {
+        return self.run + self.thought + self.tool_call + self.observation + self.final + self.policy_deny + self.system_error;
+    }
+};
+
 /// 把审计事件写入给定的 writer（文件 / stderr / 纯文本日志）。
 pub const Logger = struct {
     writer: *std.Io.Writer,
@@ -29,6 +57,7 @@ pub const Logger = struct {
     io: std.Io,
     /// 实例内单调递增的事件序号，从 0 起，每写一条 +1。
     seq: u64 = 0,
+    stats: Stats = .{},
 
     pub fn init(writer: *std.Io.Writer, io: std.Io) Logger {
         return .{ .writer = writer, .io = io };
@@ -46,8 +75,23 @@ pub const Logger = struct {
         try w.writeAll("\",\"msg\":");
         try jsonio.writeString(w, message);
         try w.writeAll("}\n");
+        self.stats.record(kind);
     }
 };
+
+pub fn rotateFileIfTooLarge(io: std.Io, arena: std.mem.Allocator, path: []const u8, max_bytes: u64) !bool {
+    const cwd = std.Io.Dir.cwd();
+    const st = cwd.statFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    if (st.size < max_bytes) return false;
+
+    const rotated = try std.fmt.allocPrint(arena, "{s}.1", .{path});
+    cwd.deleteFile(io, rotated) catch {};
+    try cwd.rename(path, cwd, rotated, io);
+    return true;
+}
 
 test "log 产出可被逐行解析的 JSONL（含 seq/ts 与转义）" {
     var buf: [256]u8 = undefined;
@@ -72,6 +116,32 @@ test "log 产出可被逐行解析的 JSONL（含 seq/ts 与转义）" {
     try std.testing.expect(l1.value.ts >= l0.value.ts); // 墙钟不回退
     try std.testing.expectEqualStrings("tool_call", l1.value.kind);
     try std.testing.expectEqualStrings("ls -a", l1.value.msg);
+    try std.testing.expectEqual(@as(u64, 2), lg.stats.total());
+    try std.testing.expectEqual(@as(u64, 1), lg.stats.thought);
+    try std.testing.expectEqual(@as(u64, 1), lg.stats.tool_call);
+}
+
+test "rotateFileIfTooLarge rotates bounded JSONL files" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const path = "/tmp/scoot_audit_rotate.jsonl";
+    cwd.deleteFile(io, path) catch {};
+    cwd.deleteFile(io, path ++ ".1") catch {};
+    defer cwd.deleteFile(io, path) catch {};
+    defer cwd.deleteFile(io, path ++ ".1") catch {};
+    try cwd.writeFile(io, .{ .sub_path = path, .data = "1234567890" });
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    try std.testing.expect(try rotateFileIfTooLarge(io, arena_state.allocator(), path, 10));
+    try std.testing.expect(!fileExists(io, path));
+    try std.testing.expect(fileExists(io, path ++ ".1"));
+}
+
+fn fileExists(io: std.Io, path: []const u8) bool {
+    _ = std.Io.Dir.cwd().statFile(io, path, .{}) catch return false;
+    return true;
 }
 
 test {
