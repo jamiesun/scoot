@@ -89,6 +89,12 @@ Edit **only** `build.zig.zon`'s `.version`:
 new_version="X.Y.Z"   # from step 3, no leading v
 # update the .version line in build.zig.zon to "$new_version"
 ```
+Then record the changelog in the repo so release notes are reproducible. In
+`CHANGELOG.md` (and its Chinese counterpart `docs/CHANGELOG.zh.md`), turn the
+`## [Unreleased]` heading into `## [X.Y.Z] - YYYY-MM-DD`, list the PRs since the
+last tag under `Added`/`Fixed`/`Documentation`, add a fresh empty
+`## [Unreleased]` section on top, and update the compare links at the bottom.
+
 Verify the binary reports it, and that nothing else broke:
 
 ```sh
@@ -100,7 +106,7 @@ zig build test                                       # must be green
 
 ```sh
 git checkout -b release/v"$new_version"
-git add build.zig.zon
+git add build.zig.zon CHANGELOG.md docs/CHANGELOG.zh.md
 git commit -m "Release v$new_version
 
 <bullet changelog: one line per PR since the last tag>
@@ -136,18 +142,20 @@ gh run watch "$(gh run list --workflow=Release --branch "v$new_version" \
   --limit 1 --json databaseId --jq '.[0].databaseId')" --exit-status
 ```
 
-### 7. Set release notes and verify
+### 7. Verify the release notes
 
-The workflow publishes the release with generic notes. Replace them with the
-changelog, then confirm:
+The workflow now derives the published notes from the `## [X.Y.Z]` section of
+`CHANGELOG.md` (falling back to GitHub auto-generated notes only when the version
+has no entry). Because step 4 already landed that section, the notes are correct
+without any manual `gh release edit`. Just confirm:
 
 ```sh
-gh release edit "v$new_version" --notes "## Changes since $last_tag
-<bulleted changelog>"
 gh release view "v$new_version" --json tagName,isDraft,assets \
   --jq '{tag:.tagName, draft:.isDraft, assets:[.assets[].name]}'
 ```
-Done when: the tag exists, the release is published (not draft) with all five
+If the notes are wrong, the fix is to correct `CHANGELOG.md` on `main` (the
+source of truth) rather than hand-editing the release. Done when: the tag exists,
+the release is published (not draft) with all five
 `scoot-v$new_version-*.tar.gz` assets, and `build.zig.zon` on `main` equals the
 tag. Report the new version, the bump level + reasoning, and the release URL.
 
@@ -159,4 +167,6 @@ tag. Report the new version, the bump level + reasoning, and the release URL.
 - Abort if the working tree is dirty, if `main` is behind `origin/main`, or if
   step 2 finds no new PRs.
 - Keep the `vX.Y.Z` tag and `build.zig.zon` `.version` identical.
+- Keep `CHANGELOG.md` and `docs/CHANGELOG.zh.md` in sync, and land the version's
+  changelog section in the bump PR so the workflow can publish reproducible notes.
 - Do not edit `src/root.zig` for the version; it is derived from `build_options`.
