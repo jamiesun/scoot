@@ -70,9 +70,7 @@ pub const Paths = struct {
 fn ensurePrivateDir(io: std.Io, path: []const u8) !void {
     const cwd = std.Io.Dir.cwd();
     _ = try cwd.createDirPathStatus(io, path, std.Io.File.Permissions.fromMode(0o700));
-    var dir = try cwd.openDir(io, path, .{});
-    defer dir.close(io);
-    try dir.setPermissions(io, std.Io.File.Permissions.fromMode(0o700));
+    try cwd.setFilePermissions(io, path, std.Io.File.Permissions.fromMode(0o700), .{});
 }
 
 /// `child` 是否位于 `parent` 之内（含相等）。两者应为已规范化（realpath）的绝对路径。
