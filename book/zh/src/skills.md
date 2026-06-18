@@ -40,7 +40,7 @@ scope: workflow
 技能按**优先级顺序**发现（同名时靠前者胜）：
 
 1. `<cwd>/.agents/skills` —— 项目本地，随仓库携带。
-2. `~/.agents/skills` —— 跨 agent 的用户级技能（独立于 `SCOOT_HOME`）。
+2. `~/.agents/skills` —— 跨 agent 的用户级技能，仅在 `[skills] include_agents_skills = true` 时加载。
 3. `~/.scoot/skills` —— Scoot 自有的用户级目录。
 4. 配置 `[skills]` 中的任意 `extra_paths`。
 

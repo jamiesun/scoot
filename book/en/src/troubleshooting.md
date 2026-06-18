@@ -81,7 +81,7 @@ and copy a longer, unique surrounding span into `old`.
 - Verify the directory has a valid `SKILL.md` with non-empty `name` and
   `description`: `scoot skills check path/to/skill`.
 - Remember the priority order — a same-named skill earlier in the list wins
-  (`<cwd>/.agents/skills` > `~/.agents/skills` > `~/.scoot/skills` > `extra_paths`).
+  (`<cwd>/.agents/skills` > optional `~/.agents/skills` > `~/.scoot/skills` > `extra_paths`).
 
 ### Skills don't work in `readonly`
 

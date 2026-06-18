@@ -95,10 +95,14 @@ block_internal_http = true
 # Enable local Skill discovery.
 enabled = true
 
+# Include the cross-agent user-level directory ~/.agents/skills.
+# Default is false to avoid global skills polluting this agent's skill space.
+include_agents_skills = false
+
 # Extra Skill search paths, appended after the built-in ones. Skills are
 # discovered in priority order (earlier wins on name collision):
 #   1. <cwd>/.agents/skills  (project-local)
-#   2. ~/.agents/skills      (cross-agent user-level)
+#   2. ~/.agents/skills      (only when include_agents_skills=true)
 #   3. ~/.scoot/skills       (Scoot's own user-level dir)
 #   4. these extra_paths
 # Reading a skill's SKILL.md is a native, read-only capability and works even in

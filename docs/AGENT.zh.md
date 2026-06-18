@@ -96,7 +96,7 @@ zig build -Doptimize=ReleaseSafe    # 嵌入式 / 生产部署推荐档（见下
 - **运行目录**：一切配置、密钥、技能、状态收敛在 `~/.scoot/`（`SCOOT_HOME` 可覆盖）。解析逻辑在 `src/paths.zig`；新写盘的东西放对应子目录（`config.toml`（或 `config.json`）/ `token` / `skills/` / `logs/` / `state/`），不要散落到别处或 `$HOME` 根下。`scoot config` 可打印解析结果。
 - **配置**：结构化分节（backend / agent / tools / skills / audit）在 `src/config.zig`，默认值即可用；加 JSON 加载时用 `std.json` 并与默认值合并，**不要**改默认值的含义。
 - **密钥**：解析在 `src/secret.zig`，优先级 env → 文件(0600) → 凭证命令。实现文件分支时**必须**先 `assertPrivate` 校验 0600，权限过宽要拒绝。任何日志 / 错误 / 审计输出 token 前先过 `secret.redact`。
-- **Skill**：机制在 `src/skill.zig`。坚持渐进式披露——发现阶段只读 front-matter（name+description），正文按需在 `activate` 时加载（搜索优先级：`<cwd>/.agents/skills` > `~/.agents/skills` > `~/.scoot/skills` > 配置的 `extra_paths`）。读取技能指令/资源是原生只读能力（`skill` 动作），收口在技能目录内、照常审计，刻意不受策略门控制——故 `readonly` 下技能仍可激活。但 skill 携带的**脚本/命令**必须经 `src/tools/` 沙盒执行（带硬超时），不得新开绕过沙盒的执行路径。
+- **Skill**：机制在 `src/skill.zig`。坚持渐进式披露——发现阶段只读 front-matter（name+description），正文按需在 `activate` 时加载（搜索优先级：`<cwd>/.agents/skills` > 可选的 `~/.agents/skills`（`skills.include_agents_skills=true`）> `~/.scoot/skills` > 配置的 `extra_paths`）。读取技能指令/资源是原生只读能力（`skill` 动作），收口在技能目录内、照常审计，刻意不受策略门控制——故 `readonly` 下技能仍可激活。但 skill 携带的**脚本/命令**必须经 `src/tools/` 沙盒执行（带硬超时），不得新开绕过沙盒的执行路径。
 - **会话 / 记忆**：`src/session.zig` 持有单次交互的消息流，**用 backing/gpa 拥有**（追加时复制内容），使其跨回合存活——绝不把对话历史放进会被 `deinit` 的 per-turn arena。持久化用 JSONL 追加写到 `state/sessions/<id>.jsonl`（纯文本、可回溯）。**跨会话长期记忆不做成子系统**：用 Skill 注入知识或 `state/` 摘要文件 + 文件工具承载，不引入向量库 / embedding（撞「单体简洁」铁律）。
 
 ## 红线（铁律，不得违反）
