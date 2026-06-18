@@ -66,16 +66,19 @@ timeout_ms = 30000
 # Alias: "yolo" is parsed as unrestricted. Unknown values fall back to guarded.
 policy = "guarded"
 
-# Opt-in hardening (both default false, effective only in guarded mode; issue #32).
+# Hardening (effective only in guarded mode; issues #32 / #50).
 # readonly already fail-closes writes and network, so these matter for guarded only.
 # confine_writes: keep file_write/file_edit inside the project root; reject absolute
-#   paths, ".." escapes, and shell-style expansion (~ / $VAR).
+#   paths, ".." escapes, and shell-style expansion (~ / $VAR). Opt-in (default false)
+#   to avoid breaking legitimate out-of-cwd writes.
 confine_writes = false
 # block_internal_http: reject http_request to loopback / private / link-local / cloud
-#   metadata hosts (SSRF guard). Heuristic on literal IPs + known internal names; it
-#   does NOT resolve DNS, so DNS-rebinding can still bypass — use readonly for real
-#   isolation.
-block_internal_http = false
+#   metadata hosts (SSRF guard). Defaults to true (issue #50): legitimate agent HTTP
+#   almost never targets these, so the friction is low and the SSRF win is high. Set
+#   false only if you must reach internal hosts. Heuristic on literal IPs + known
+#   internal names; it does NOT resolve DNS, so DNS-rebinding can still bypass — use
+#   readonly for real isolation.
+block_internal_http = true
 
 [skills]
 # Enable local Skill discovery.

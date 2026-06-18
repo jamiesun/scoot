@@ -234,7 +234,31 @@ fn isInternalHost(host: []const u8) bool {
     if (host.len == 0) return true; // 解析不出主机：fail-closed
     if (parseIp4(host)) |o| return isInternalIp4(o);
     if (std.mem.indexOfScalar(u8, host, ':') != null) return isInternalIp6(host);
+    // 非严格点分四段、却形如数字字面量的 host（整数 / 八进制 / 十六进制 / 短形式，如
+    // 2130706433 / 0177.0.0.1 / 0x7f.0.0.1 / 127.1）是标准 SSRF 绕过手法：下游解析器
+    // 常按 inet_aton 接受并映射回环回 / 内网。在不解析 DNS 的前提下无法确证其真实指向，
+    // 故 fail-closed 视为内部（issue #51）。
+    if (looksNumericLiteral(host)) return true;
     return isInternalHostname(host);
+}
+
+/// host 是否形如「数字 IP 字面量的替代编码」：仅由 [0-9a-fA-F.xX] 组成且至少含一位数字。
+/// 走到这里时严格点分四段已被 parseIp4 排除，故任何仍命中者都是可疑的非标准数字编码。
+/// 合法主机名含 hex 集合之外的字母或连字符即不命中（如 1e100.net 的 'n'/'t'、example.com 的 'm'/'o'）。
+fn looksNumericLiteral(host: []const u8) bool {
+    var has_digit = false;
+    for (host) |c| {
+        if (c >= '0' and c <= '9') {
+            has_digit = true;
+        } else if (c == '.' or c == 'x' or c == 'X' or
+            (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F'))
+        {
+            // hex 数字 / 进制前缀 / 分隔点：仍可能是数字字面量的一部分，继续看。
+        } else {
+            return false; // 明确的非数字字符（g–w、y、z、'-' 等）→ 视为主机名。
+        }
+    }
+    return has_digit;
 }
 
 fn isInternalIp4(o: [4]u8) bool {
@@ -266,6 +290,38 @@ fn parseIp4(s: []const u8) ?[4]u8 {
     return if (i == 4) o else null;
 }
 
+/// 解析 IPv4-mapped IPv6 的十六进制尾部（`::ffff:` 之后的 `<hex>:<hex>`）为 4 字节 IPv4。
+/// 恰好两组、每组 1–4 位十六进制时合成 32 位；否则返回 null（非该形态，交由上层其它分支）。
+fn parseHexMappedIp4(tail: []const u8) ?[4]u8 {
+    var groups: [2]u16 = undefined;
+    var n: usize = 0;
+    var it = std.mem.splitScalar(u8, tail, ':');
+    while (it.next()) |g| {
+        if (n >= 2 or g.len == 0 or g.len > 4) return null;
+        var v: u16 = 0;
+        for (g) |c| {
+            const d = hexDigit(c) orelse return null;
+            v = v *% 16 +% d;
+        }
+        groups[n] = v;
+        n += 1;
+    }
+    if (n != 2) return null;
+    return .{
+        @intCast(groups[0] >> 8),   @intCast(groups[0] & 0xff),
+        @intCast(groups[1] >> 8),   @intCast(groups[1] & 0xff),
+    };
+}
+
+fn hexDigit(c: u8) ?u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => null,
+    };
+}
+
 fn isInternalIp6(host: []const u8) bool {
     var buf: [64]u8 = undefined;
     if (host.len > buf.len) return true; // 异常长：fail-closed
@@ -279,6 +335,14 @@ fn isInternalIp6(host: []const u8) bool {
         const tail = h[last_colon + 1 ..];
         if (std.mem.indexOfScalar(u8, tail, '.') != null) {
             if (parseIp4(tail)) |o| return isInternalIp4(o);
+        }
+    }
+    // IPv4-mapped 的十六进制写法（::ffff:7f00:1 == 127.0.0.1）：上面的点分分支只认 a.b.c.d，
+    // 这里补齐 ::ffff:<hex>:<hex> 形式，否则 hex 写法可绕过 SSRF 防护（issue #51）。
+    if (std.mem.startsWith(u8, h, "::ffff:")) {
+        const tail = h["::ffff:".len..];
+        if (std.mem.indexOfScalar(u8, tail, '.') == null) {
+            if (parseHexMappedIp4(tail)) |o| return isInternalIp4(o);
         }
     }
     // fe80::/10 链路本地：fe8 / fe9 / fea / feb 开头。
@@ -552,6 +616,59 @@ test "evaluateHttpUrl：开启 SSRF 防护后拒绝内部目标（issue #32）" 
     }
 }
 
-test {
-    std.testing.refAllDecls(@This());
+test "isInternalHost：替代编码的 IPv4 一并判内部，合法主机名放行（issue #51）" {
+    // 替代编码 / 短形式 / hex IPv4-mapped → 视为内部（fail-closed）。
+    const internal = [_][]const u8{
+        "2130706433", // 整数 127.0.0.1
+        "0177.0.0.1", // 八进制
+        "0x7f.0.0.1", // 十六进制
+        "0x7f000001", // 纯十六进制整数
+        "127.1", // 短形式
+        "10.1", // 短形式
+        "::ffff:7f00:1", // hex IPv4-mapped 环回
+        "::ffff:a9fe:a9fe", // hex IPv4-mapped 169.254.169.254（云元数据）
+    };
+    for (internal) |h| {
+        if (!isInternalHost(h)) {
+            std.debug.print("应判内部却放行: {s}\n", .{h});
+            return error.ShouldBeInternal;
+        }
+    }
+    // 合法公网主机名 / 严格点分公网 IP 不受影响。
+    const external = [_][]const u8{
+        "example.com",
+        "1e100.net", // 全 hex+数字但含 'n'/'t' → 主机名
+        "api.github.com",
+        "cafe.example",
+        "93.184.216.34", // 严格点分公网 IP
+        "8.8.8.8",
+    };
+    for (external) |h| {
+        if (isInternalHost(h)) {
+            std.debug.print("应放行却判内部: {s}\n", .{h});
+            return error.ShouldBeExternal;
+        }
+    }
+}
+
+test "evaluateHttpUrl：替代编码 SSRF 绕过被拒（issue #51）" {
+    const denied = [_][]const u8{
+        "http://2130706433/", // 整数环回
+        "http://0x7f.0.0.1/", // hex
+        "http://127.1/latest/meta-data/", // 短形式
+        "http://[::ffff:7f00:1]/x", // hex IPv4-mapped
+        "http://[::ffff:a9fe:a9fe]/latest/", // hex 映射云元数据
+    };
+    for (denied) |u| {
+        switch (evaluateHttpUrl(u, .guarded, true)) {
+            .deny => {},
+            .allow => {
+                std.debug.print("SSRF 替代编码应拒绝却放行: {s}\n", .{u});
+                return error.ShouldHaveDenied;
+            },
+        }
+    }
+    // 公网域名仍放行，避免误伤。
+    try testing.expectEqual(Decision.allow, evaluateHttpUrl("https://api.github.com/", .guarded, true));
+    try testing.expectEqual(Decision.allow, evaluateHttpUrl("https://1e100.net/", .guarded, true));
 }

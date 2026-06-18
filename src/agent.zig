@@ -17,6 +17,7 @@ const session = @import("session.zig");
 const tools = @import("tools/tools.zig");
 const audit = @import("audit.zig");
 const policy = @import("policy.zig");
+const pathsafe = @import("paths.zig");
 
 // 双轨认知模式（goal / plan，见 ROADMAP 方向二）暂未实现：plan 模式的执行 DAG
 // 尚未落地，故此处不保留「定义却从不读取」的死字段（曾经的 Mode 枚举 + Agent.mode），
@@ -333,7 +334,16 @@ pub const Agent = struct {
             else => null,
         };
         const p = path orelse return .{ .deny = "已开启写入项目根约束：无法解析写路径，已拒绝" };
-        return policy.evaluateWritePath(p, self.policy_mode, self.confine_writes);
+        switch (policy.evaluateWritePath(p, self.policy_mode, self.confine_writes)) {
+            .deny => |reason| return .{ .deny = reason },
+            .allow => {},
+        }
+        // 词法检查（禁绝对 / `..`）只是前置过滤，写入会跟随 symlink。对写入目标父目录做 realpath，
+        // 确认仍落在项目根（cwd）内，挡住项目内预置 `link -> /etc` 这类 symlink 逃逸（issue #52，
+        // 与 #41 技能读取对齐）。仅在 guarded + confine_writes 生效，与 evaluateWritePath 语义一致。
+        if (self.policy_mode == .guarded and pathsafe.writeEscapesBase(self.io, arena, ".", p))
+            return .{ .deny = "写入项目根约束：路径经 symlink 解析后逃逸项目目录，已拒绝" };
+        return .allow;
     }
 
     fn guardParallel(self: *Agent, arena: std.mem.Allocator, input: []const u8) policy.Decision {
@@ -475,10 +485,7 @@ pub const Agent = struct {
     /// 目标不在 dir 之内（symlink 指向外部）即判逃逸。无法解析（如文件不存在 / 平台不支持 realpath）
     /// 时返回 false 不在此拦截——交由后续 read 给出失败观察；不存在的文件本就无内容可泄露。
     fn skillPathEscapes(self: *Agent, arena: std.mem.Allocator, dir: []const u8, full: []const u8) bool {
-        const cwd = std.Io.Dir.cwd();
-        const real_dir = cwd.realPathFileAlloc(self.io, dir, arena) catch return false;
-        const real_full = cwd.realPathFileAlloc(self.io, full, arena) catch return false;
-        return !pathWithin(real_full, real_dir);
+        return pathsafe.realPathEscapes(self.io, arena, dir, full);
     }
 
     /// 技能名未命中已装载清单时的可纠错观察：列出可用技能名，引导模型重选。
@@ -797,14 +804,6 @@ fn pathHasDotDot(p: []const u8) bool {
         if (std.mem.eql(u8, part, "..")) return true;
     }
     return false;
-}
-
-/// `child` 是否位于 `parent` 目录内（含相等）。两参数均应为 realpath 规范化后的绝对路径。
-/// 用于技能读取的 symlink 逃逸判定（issue #41）。
-fn pathWithin(child: []const u8, parent: []const u8) bool {
-    if (!std.mem.startsWith(u8, child, parent)) return false;
-    if (child.len == parent.len) return true;
-    return child[parent.len] == std.fs.path.sep;
 }
 
 const ParallelWorker = struct {

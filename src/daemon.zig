@@ -74,6 +74,26 @@ pub fn previousRunWasUnclean(state: ?State) bool {
     return std.mem.eql(u8, s.status, "running");
 }
 
+/// 进程存活探测（issue #53）：用 signal 0 探针判断 `pid` 是否对应一个仍存活的进程。
+///
+/// 设计取舍：项目未链接 libc，且 0.16 无 `std.posix.flock`/`open`，故不引入文件锁或
+/// 全量监督，仅做轻量探活以缩小失败模式（陈旧 PID、误判 running）。signal 0 不会真正投递
+/// 信号，只触发内核的权限/存在性检查：
+///   - 成功返回         → 进程存在且本进程有权限 → 存活
+///   - error.PermissionDenied → 进程存在但属于他人 → 仍视为存活
+///   - 其它（ProcessNotFound 等） → 进程不存在 → 非存活
+/// 残留风险：PID 复用可能把“恰好复用同号的新进程”误判为存活，这是无进程身份信息时不可消除的，
+/// 已在 issue #53 中作为可接受的文档化残留。pid <= 0 一律视为非存活（避免 kill 的进程组语义）。
+pub fn pidAlive(pid: i64) bool {
+    if (pid <= 0) return false;
+    const sig0: std.posix.SIG = @enumFromInt(0);
+    std.posix.kill(@intCast(pid), sig0) catch |err| switch (err) {
+        error.PermissionDenied => return true,
+        else => return false,
+    };
+    return true;
+}
+
 test "statePath and pidPath live under state directory" {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
@@ -139,6 +159,19 @@ test "previousRunWasUnclean only flags running state" {
         .jobs = 1,
         .poll_ms = 1000,
     }));
+}
+
+test "pidAlive: current process alive, invalid and unused pids dead (issue #53)" {
+    // 当前进程必然存活。
+    const self_pid: i64 = @intCast(std.posix.system.getpid());
+    try std.testing.expect(pidAlive(self_pid));
+
+    // 非法 pid（<=0）一律视为非存活，避免触发 kill 的进程组语义。
+    try std.testing.expect(!pidAlive(0));
+    try std.testing.expect(!pidAlive(-1));
+
+    // 一个几乎不可能被占用的超大 pid：探针应判为非存活。
+    try std.testing.expect(!pidAlive(2_000_000_000));
 }
 
 test {
