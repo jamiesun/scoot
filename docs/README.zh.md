@@ -64,7 +64,7 @@ zig build run -- --version
 ./zig-out/bin/scoot --trace -e "统计当前仓库中的 Zig 源文件数量"
 ```
 
-`--trace` 用于调试：在 `-e` 单次与交互式 REPL 模式下，都会把 ReACT 执行轨迹打印到 stderr，最终答复（或对话）仍保持在 stdout。`--retries` 控制 `-e` 遇到限流、5xx 等临时后端错误时的重试次数。
+`--trace` 用于调试：在 `-e` 单次与交互式 REPL 模式下，都会把 ReACT 执行轨迹打印到 stderr，最终答复（或对话）仍保持在 stdout。轨迹会在每个阻塞点**之前**先打印实时进度标记——进入后端推理前打印 `thinking:`，执行工具前打印 `running: <工具>`——因此在等待模型推理或工具返回时也能看到 agent 当前在做什么，而不会显得卡死。`--retries` 控制 `-e` 遇到限流、5xx 等临时后端错误时的重试次数。
 
 `doctor` 执行本地健康检查且不会打印密钥。`--scoot-home` 可覆盖运行目录，方便隔离测试。`policy check` 可在 `guarded`、`readonly` 或 `unrestricted` 策略档下 dry-run 某个工具动作。
 

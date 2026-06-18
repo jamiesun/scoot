@@ -193,6 +193,10 @@ pub const Agent = struct {
                 }
             }
 
+            // 进入推理前先留一条「推理中」轨迹并即时刷出：complete 是本回合最长的阻塞点
+            // （等待后端推理），而 reason/action 只能在它**返回后**才打印——不预先标记的话，
+            // 这段等待期 trace 全静默，前端会显得卡死（本次需求）。
+            self.traceThinking(turn + 1);
             const completion = try self.complete(arena, sess.items(), .{
                 .json_schema = react_schema,
                 .schema_name = "scoot_step",
@@ -233,6 +237,9 @@ pub const Agent = struct {
                         },
                         .allow => {
                             self.tracePolicyAllow(turn + 1);
+                            // 工具执行也是阻塞点（bash / http_request 可能很慢），观察结果只能在
+                            // 执行**返回后**打印；执行前先标记「正在执行哪个工具」，等待期不致静默。
+                            self.traceRunning(turn + 1, step.action);
                             const observation = self.execTool(arena, step.action, step.action_input) catch |err|
                                 try toolErrorObservation(arena, err);
                             if (self.audit) |lg| lg.log(.observation, observation) catch {};
@@ -561,6 +568,22 @@ pub const Agent = struct {
     fn runBash(self: *Agent, arena: std.mem.Allocator, command: []const u8) ![]u8 {
         const result = try tools.bash.run(arena, self.io, command, .{ .timeout_ms = self.tool_timeout_ms });
         return formatObservation(arena, result);
+    }
+
+    /// 「推理中」进度标记（在调用后端推理前打印并即时刷出）：让 trace 在等待模型期间也有
+    /// 实时输出，反映 agent 当前正在推理，而非卡死。
+    fn traceThinking(self: *Agent, turn: u32) void {
+        const w = self.trace orelse return;
+        w.print("[trace {d}] thinking: 调用后端推理中…\n", .{turn}) catch return;
+        w.flush() catch {};
+    }
+
+    /// 「执行中」进度标记（在执行工具前打印并即时刷出）：标明当前正在执行哪个工具，
+    /// 使等待工具返回的这段时间也有实时反馈。
+    fn traceRunning(self: *Agent, turn: u32, action: Action) void {
+        const w = self.trace orelse return;
+        w.print("[trace {d}] running: {s}（执行中，等待结果）…\n", .{ turn, @tagName(action) }) catch return;
+        w.flush() catch {};
     }
 
     fn traceMalformed(self: *Agent, turn: u32) void {
@@ -1370,6 +1393,17 @@ test "run: trace 输出 reason/action/policy/observation/final 到注入 writer"
     try std.testing.expect(std.mem.indexOf(u8, trace, "[trace 1] observe: ") != null);
     try std.testing.expect(std.mem.indexOf(u8, trace, "[trace 2] action: final") != null);
     try std.testing.expect(std.mem.indexOf(u8, trace, "[trace 2] final: done") != null);
+
+    // 进度标记（防前端卡死）：每回合进入后端推理前应先有 thinking；工具回合执行前应有 running。
+    const think1 = std.mem.indexOf(u8, trace, "[trace 1] thinking:") orelse return error.MissingThinking;
+    const reason1 = std.mem.indexOf(u8, trace, "[trace 1] reason:").?;
+    const running1 = std.mem.indexOf(u8, trace, "[trace 1] running: bash") orelse return error.MissingRunning;
+    const observe1 = std.mem.indexOf(u8, trace, "[trace 1] observe:").?;
+    // thinking 必须早于 reason（推理前），running 必须早于 observe（执行前）。
+    try std.testing.expect(think1 < reason1);
+    try std.testing.expect(running1 < observe1);
+    // 第二回合（final）也应先打印 thinking。
+    try std.testing.expect(std.mem.indexOf(u8, trace, "[trace 2] thinking:") != null);
 }
 
 test "run: 危险命令被执行护栏拦截——不执行、留痕 policy_deny、回灌后改道收敛" {

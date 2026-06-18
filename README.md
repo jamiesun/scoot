@@ -64,7 +64,7 @@ Run the built binary:
 ./zig-out/bin/scoot --trace -e "count Zig source files in this repository"
 ```
 
-`--trace` is for debugging. In both `-e` one-shot and interactive REPL mode it prints the ReACT execution trace to stderr while keeping the final answer (or conversation) on stdout. `--retries` controls how many times `-e` retries temporary backend failures such as rate limits and 5xx responses.
+`--trace` is for debugging. In both `-e` one-shot and interactive REPL mode it prints the ReACT execution trace to stderr while keeping the final answer (or conversation) on stdout. The trace emits a live progress marker *before* each blocking step — `thinking:` before calling the model and `running: <tool>` before executing a tool — so you can see what the agent is doing while it waits instead of the trace appearing to freeze. `--retries` controls how many times `-e` retries temporary backend failures such as rate limits and 5xx responses.
 
 `doctor` performs local health checks without printing secrets. `--scoot-home` overrides the runtime directory for isolated tests. `policy check` dry-runs a tool action against `guarded`, `readonly`, or `unrestricted` policy mode.
 
