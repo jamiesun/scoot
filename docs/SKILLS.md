@@ -21,7 +21,7 @@ Skills are discovered from these locations, in priority order (earlier wins on
 name collision):
 
 1. `<cwd>/.agents/skills` — project-local, travels with the repository.
-2. `~/.agents/skills` — cross-agent user-level skills (independent of `SCOOT_HOME`).
+2. `~/.agents/skills` — cross-agent user-level skills, only when `[skills] include_agents_skills = true`.
 3. `~/.scoot/skills` — Scoot's own user-level skill directory.
 4. Any `extra_paths` declared in `[skills]` of the config.
 
@@ -117,7 +117,7 @@ addition to the `evaluateReadPath`-gated project reads. The registered skill
 directories are the same four search roots listed above:
 
 1. `<cwd>/.agents/skills`
-2. `~/.agents/skills`
+2. `~/.agents/skills` when `[skills] include_agents_skills = true`
 3. `~/.scoot/skills`
 4. any `extra_paths` declared in `[skills]`
 

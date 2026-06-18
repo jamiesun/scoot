@@ -80,7 +80,7 @@ non-sensitive, no `..`/absolute), it can read **any file under any registered
 skill directory**:
 
 1. `<cwd>/.agents/skills`
-2. `~/.agents/skills`
+2. `~/.agents/skills` when `[skills] include_agents_skills = true`
 3. `~/.scoot/skills`
 4. `extra_paths` declared in `[skills]`
 

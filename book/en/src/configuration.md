@@ -55,6 +55,7 @@ ephemeral, run-once-then-discard execution.
 | `SCOOT_TOOLS_CONFINE_WRITES` | `tools.confine_writes` | bool (`true`/`false`/`1`/`0`) |
 | `SCOOT_TOOLS_BLOCK_INTERNAL_HTTP` | `tools.block_internal_http` | bool |
 | `SCOOT_SKILLS_ENABLED` | `skills.enabled` | bool |
+| `SCOOT_SKILLS_INCLUDE_AGENTS_SKILLS` | `skills.include_agents_skills` | bool |
 | `SCOOT_AUDIT_LEVEL` | `audit.level` | string |
 | `SCOOT_AUDIT_TO_FILE` | `audit.to_file` | bool |
 
@@ -230,12 +231,13 @@ Local skill discovery. See [Skills](skills.md).
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | Enable skill discovery and injection. |
+| `include_agents_skills` | bool | `false` | Include `~/.agents/skills`, the cross-agent user-level skill directory. |
 | `extra_paths` | list of string | `[]` | Additional skill search paths, appended after the built-in ones. |
 
 Skills are discovered in **priority order** (earlier wins on name collision):
 
 1. `<cwd>/.agents/skills` — project-local, travels with the repository.
-2. `~/.agents/skills` — cross-agent user-level skills (independent of `SCOOT_HOME`).
+2. `~/.agents/skills` — cross-agent user-level skills, only when `include_agents_skills=true`.
 3. `~/.scoot/skills` — Scoot's own user-level directory.
 4. the `extra_paths` listed here.
 
@@ -246,6 +248,7 @@ policy-gated.
 ```toml
 [skills]
 enabled = true
+include_agents_skills = false
 extra_paths = ["/opt/scoot/skills", "./skills"]
 ```
 
