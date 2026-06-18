@@ -3,8 +3,9 @@
 //! 既供 CLI (src/main.zig) 使用，也便于未来被其他可执行文件嵌入。
 const std = @import("std");
 
-/// 语义化版本号（与 build.zig.zon 保持一致）。
-pub const version = "0.0.0";
+/// 语义化版本号。单一事实源为 build.zig.zon 的 `.version`，经 build.zig 通过 build_options
+/// 注入；发布时由 release 工作流用 `-Dversion=<tag>` 覆盖，确保二进制版本与 git tag 一致。
+pub const version = @import("build_options").version;
 
 pub const paths = @import("paths.zig");
 pub const config = @import("config.zig");

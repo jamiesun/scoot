@@ -10,6 +10,14 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    // 版本号单一事实源：默认取 build.zig.zon 的 `.version`；发布时由 release 工作流用
+    // `-Dversion=<tag>` 覆盖，使二进制内嵌版本与 git tag 始终一致，杜绝硬编码漂移。
+    const zon_version = @import("build.zig.zon").version;
+    const version = b.option([]const u8, "version", "覆盖内嵌版本号（发布时由 git tag 注入）") orelse zon_version;
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "version", version);
+    mod.addImport("build_options", build_options.createModule());
+
     // `scoot` 可执行文件：CLI / REPL / Daemon 入口。
     const exe = b.addExecutable(.{
         .name = "scoot",

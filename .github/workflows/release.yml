@@ -43,10 +43,17 @@ jobs:
 
       - name: Build ReleaseSafe
         run: |
+          # Embed the exact tag as the binary version (single source of truth at release time).
+          # On a tag push GITHUB_REF_NAME is like "v0.0.3" → strip the leading "v".
+          # On workflow_dispatch (no tag) fall back to the build.zig.zon default.
+          case "$GITHUB_REF_NAME" in
+            v*) version_arg="-Dversion=${GITHUB_REF_NAME#v}" ;;
+            *)  version_arg="" ;;
+          esac
           if [ -n "${{ matrix.cpu }}" ]; then
-            zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} -Dcpu=${{ matrix.cpu }}
+            zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} -Dcpu=${{ matrix.cpu }} $version_arg
           else
-            zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }}
+            zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} $version_arg
           fi
 
       - name: Create archive
