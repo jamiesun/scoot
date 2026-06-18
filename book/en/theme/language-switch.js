@@ -5,15 +5,16 @@
   }
 
   function addLanguageSwitch() {
-    var menu = document.querySelector(".menu-bar");
-    if (!menu || document.querySelector(".language-switch")) return;
+    var buttons = document.querySelector(".right-buttons");
+    if (!buttons || document.querySelector(".language-switch")) return;
 
     var link = document.createElement("a");
-    link.className = "language-switch";
+    link.className = "icon-button language-switch";
     link.href = targetHref();
     link.textContent = "中文";
     link.title = "Switch to Chinese documentation";
-    menu.appendChild(link);
+    // Insert before the first icon button (print) so it sits alongside them
+    buttons.insertBefore(link, buttons.firstChild);
   }
 
   if (document.readyState === "loading") {

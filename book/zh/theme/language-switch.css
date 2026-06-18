@@ -1,6 +1,12 @@
 .language-switch {
-  margin-inline-start: 0.75rem;
-  font-size: 0.85rem;
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 500;
+  padding: 0 4px;
+  line-height: var(--menu-bar-height, 50px);
   text-decoration: none;
+  color: var(--icons);
 }
-
+.language-switch:hover {
+  color: var(--icons-hover);
+}

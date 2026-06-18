@@ -5,15 +5,15 @@
   }
 
   function addLanguageSwitch() {
-    var menu = document.querySelector(".menu-bar");
-    if (!menu || document.querySelector(".language-switch")) return;
+    var buttons = document.querySelector(".right-buttons");
+    if (!buttons || document.querySelector(".language-switch")) return;
 
     var link = document.createElement("a");
-    link.className = "language-switch";
+    link.className = "icon-button language-switch";
     link.href = targetHref();
     link.textContent = "English";
     link.title = "Switch to English documentation";
-    menu.appendChild(link);
+    buttons.insertBefore(link, buttons.firstChild);
   }
 
   if (document.readyState === "loading") {
