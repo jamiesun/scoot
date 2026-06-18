@@ -56,7 +56,7 @@ pub const system_prompt =
     \\
     \\可用动作：
     \\  - "bash"：执行一条 shell 命令；action_input 是命令字符串。命令在 POSIX sh（/bin/sh）的带硬超时沙盒里执行，其输出作为下一条「观察」返回。只用可移植的 POSIX 语法，避免 bash 专有写法（如 [[ ]]、数组、{1..10} 花括号展开、$'...'）。
-    \\  - "file_read"：读取文件内容；action_input 是 JSON 对象 {"path":"文件路径"}。
+    \\  - "file_read"：读取文件内容；action_input 是 JSON 对象 {"path":"文件路径"}。读大文件时优先用行窗口分页：可选 {"offset":起始行(1 起),"limit":行数} 只取指定区间，省 token 且能与 grep 返回的行号精确配合（如先 grep 命中第 420 行，再 file_read {"path":"...","offset":400,"limit":60}）。省略 offset/limit 即整读（超长会被截断）。
     \\  - "file_write"：覆盖写入文件（不存在则创建）；action_input 是 JSON 对象 {"path":"文件路径","content":"完整新内容"}。
     \\  - "file_edit"：精确替换文件中的一段文本；action_input 是 JSON 对象 {"path":"文件路径","old":"要替换的确切文本（须在文件中唯一出现）","new":"替换成的文本"}。
     \\  - "grep"：在某个文件内按正则逐行搜索，返回命中行号与原文；action_input 是 JSON 对象 {"pattern":"正则","path":"文件路径"}。支持子集：. ^ $ * + ? [] () | \d \w \s（不支持捕获组/反向引用/lookaround/惰性量词）。
@@ -89,7 +89,7 @@ pub const Step = struct {
 /// 多参数内建工具的 action_input 承载一个 JSON 对象字符串，按工具二次解析。
 /// 单参数工具（如 file_read）同样走 JSON（{"path":...}），统一「文件类工具 = JSON 参数」
 /// 这条规则，降低小模型「何时裸串、何时 JSON」的认知负担。bash / final 仍是裸文本。
-const FileReadArgs = struct { path: []const u8 };
+const FileReadArgs = struct { path: []const u8, offset: ?usize = null, limit: ?usize = null };
 const FileWriteArgs = struct { path: []const u8, content: []const u8 };
 const FileEditArgs = struct { path: []const u8, old: []const u8, new: []const u8 };
 const GrepArgs = struct { pattern: []const u8, path: []const u8 };
@@ -399,12 +399,7 @@ pub const Agent = struct {
             .bash => try self.runBash(arena, input),
             .file_read => blk: {
                 const args = try parseToolArgs(FileReadArgs, arena, input);
-                const content = try tools.file.read(arena, self.io, args.path, tools.file.default_read_limit);
-                break :blk try std.fmt.allocPrint(
-                    arena,
-                    "[观察] 读取 {s}（{d} 字节）：\n{s}",
-                    .{ args.path, content.len, try clipTo(arena, content, file_read_observation_cap) },
-                );
+                break :blk try fileReadObservation(arena, self.io, args);
             },
             .file_write => blk: {
                 const args = try parseToolArgs(FileWriteArgs, arena, input);
@@ -735,6 +730,35 @@ fn toolErrorObservation(arena: std.mem.Allocator, err: anyerror) ![]u8 {
     return std.fmt.allocPrint(arena, "[观察] 工具执行失败：{s}", .{hint});
 }
 
+/// 把 file_read 动作格式化成「观察」文本（arena 拥有）。
+/// 省略 offset/limit → 整读（受 file_read_observation_cap 截断）；
+/// 给出任一 → 行窗口分页读（与 grep 行号配合，省 token）。execTool 与并发 worker 共用。
+fn fileReadObservation(arena: std.mem.Allocator, io: std.Io, args: FileReadArgs) ![]const u8 {
+    if (args.offset == null and args.limit == null) {
+        const content = try tools.file.read(arena, io, args.path, tools.file.default_read_limit);
+        return std.fmt.allocPrint(
+            arena,
+            "[观察] 读取 {s}（{d} 字节）：\n{s}",
+            .{ args.path, content.len, try clipTo(arena, content, file_read_observation_cap) },
+        );
+    }
+    const off = args.offset orelse 1;
+    const win = try tools.file.readLineRange(arena, io, args.path, tools.file.default_read_limit, off, args.limit);
+    if (win.total_lines == 0)
+        return std.fmt.allocPrint(arena, "[观察] 读取 {s}：文件为空。", .{args.path});
+    if (win.start_line == 0)
+        return std.fmt.allocPrint(
+            arena,
+            "[观察] 读取 {s}：offset {d} 超出文件总行数 {d}。",
+            .{ args.path, off, win.total_lines },
+        );
+    return std.fmt.allocPrint(
+        arena,
+        "[观察] 读取 {s}（第 {d}-{d} 行 / 共 {d} 行）：\n{s}",
+        .{ args.path, win.start_line, win.end_line, win.total_lines, try clipTo(arena, win.text, file_read_observation_cap) },
+    );
+}
+
 /// 把 grep 命中格式化成「观察」文本（arena 拥有），无命中亦明示。受 file_read 上限截断。
 fn formatGrepHits(arena: std.mem.Allocator, path: []const u8, hits: []const tools.search.Hit) ![]const u8 {
     if (hits.len == 0) {
@@ -856,12 +880,7 @@ fn execReadTool(
     return switch (action) {
         .file_read => blk: {
             const args = try parseToolArgs(FileReadArgs, arena, input);
-            const content = try tools.file.read(arena, io, args.path, tools.file.default_read_limit);
-            break :blk try std.fmt.allocPrint(
-                arena,
-                "[观察] 读取 {s}（{d} 字节）：\n{s}",
-                .{ args.path, content.len, try clipTo(arena, content, file_read_observation_cap) },
-            );
+            break :blk try fileReadObservation(arena, io, args);
         },
         .grep => blk: {
             const args = try parseToolArgs(GrepArgs, arena, input);
@@ -943,6 +962,37 @@ test "formatObservation 正常 / 超时 / 截断" {
     @memset(big, 'x');
     const clipped = try formatObservation(arena, .{ .stdout = big, .exit_code = 0 });
     try std.testing.expect(std.mem.indexOf(u8, clipped, "已截断") != null);
+}
+
+test "fileReadObservation：整读 vs 行窗口（#74）" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const cwd = std.Io.Dir.cwd();
+    const dir = "/tmp/scoot_agent_fileread_obs";
+    cwd.deleteTree(io, dir) catch {};
+    defer cwd.deleteTree(io, dir) catch {};
+    try cwd.createDirPath(io, dir);
+    const path = dir ++ "/big.txt";
+    try tools.file.write(io, path, "a1\na2\na3\na4\na5\n");
+
+    // 整读：无 offset/limit → 字节计数路径
+    const whole = try fileReadObservation(arena, io, .{ .path = path });
+    try std.testing.expect(std.mem.indexOf(u8, whole, "字节") != null);
+    try std.testing.expect(std.mem.indexOf(u8, whole, "a3") != null);
+
+    // 行窗口：offset=2,limit=2 → 标注「第 2-3 行 / 共 5 行」，且只含 a2/a3
+    const win = try fileReadObservation(arena, io, .{ .path = path, .offset = 2, .limit = 2 });
+    try std.testing.expect(std.mem.indexOf(u8, win, "第 2-3 行 / 共 5 行") != null);
+    try std.testing.expect(std.mem.indexOf(u8, win, "a2\na3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, win, "a5") == null);
+
+    // offset 越界 → 明示超出
+    const oob = try fileReadObservation(arena, io, .{ .path = path, .offset = 99 });
+    try std.testing.expect(std.mem.indexOf(u8, oob, "超出文件总行数 5") != null);
 }
 
 /// 测试用「脚本化大脑」：按顺序吐出预设的步骤 JSON，无需真实后端即可驱动循环。

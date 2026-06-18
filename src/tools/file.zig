@@ -20,6 +20,58 @@ pub fn read(arena: std.mem.Allocator, io: std.Io, path: []const u8, limit: std.I
     return std.Io.Dir.cwd().readFileAlloc(io, path, arena, limit);
 }
 
+/// 一次行窗口读取的结果。`text` 为所选行以 `\n` 连接后的内容（arena 拥有，不含尾随换行）。
+/// `total_lines` 为文件总行数（编辑器约定：末尾换行不额外计一空行）。
+/// 当 `start_line == 0` 表示请求的窗口落在文件行数之外（空窗口）。
+pub const LineWindow = struct {
+    text: []const u8,
+    total_lines: usize,
+    start_line: usize,
+    end_line: usize,
+};
+
+/// 读取文件的指定行窗口：从 1-based 行 `offset` 起，最多 `limit` 行（`null` = 读到文件尾）。
+/// 仍受 `limit_bytes` 整文件上限保护（先整读再按行切片）——目的是省「喂回模型的 token」，
+/// 而非省文件 I/O。让 Agent 能分页啃大文件、并与 grep 返回的行号精确配合。
+pub fn readLineRange(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    path: []const u8,
+    limit_bytes: std.Io.Limit,
+    offset: usize,
+    limit: ?usize,
+) !LineWindow {
+    const src = try read(arena, io, path, limit_bytes);
+    if (src.len == 0) return .{ .text = "", .total_lines = 0, .start_line = 0, .end_line = 0 };
+
+    var lines: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.splitScalar(u8, src, '\n');
+    while (it.next()) |seg| try lines.append(arena, seg);
+
+    // 末尾换行产生的尾随空段不计作一行（贴合编辑器/grep 的行号约定）。
+    var total = lines.items.len;
+    if (total > 0 and src.len > 0 and src[src.len - 1] == '\n') total -= 1;
+    if (total == 0) return .{ .text = "", .total_lines = 0, .start_line = 0, .end_line = 0 };
+
+    const start0 = if (offset == 0) 0 else offset - 1;
+    if (start0 >= total) return .{ .text = "", .total_lines = total, .start_line = 0, .end_line = 0 };
+
+    const want = limit orelse (total - start0);
+    const end0 = @min(start0 + want, total); // 0-based 排他上界
+
+    var buf: std.ArrayList(u8) = .empty;
+    for (lines.items[start0..end0], 0..) |ln, i| {
+        if (i != 0) try buf.append(arena, '\n');
+        try buf.appendSlice(arena, ln);
+    }
+    return .{
+        .text = buf.items,
+        .total_lines = total,
+        .start_line = start0 + 1,
+        .end_line = end0,
+    };
+}
+
 /// 覆盖写入文件（不存在则创建，存在则截断为新内容）。
 pub fn write(io: std.Io, path: []const u8, content: []const u8) !void {
     var file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
@@ -97,6 +149,61 @@ test "read 不存在的文件返回错误而非 panic" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     try std.testing.expectError(error.FileNotFound, read(gpa, io, "/tmp/scoot_file_tool_nope_404", default_read_limit));
+}
+
+test "readLineRange：行窗口、越界、limit 截断与无尾换行" {
+    const io = std.testing.io;
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const cwd = std.Io.Dir.cwd();
+    const dir = "/tmp/scoot_file_tool_range";
+    cwd.deleteTree(io, dir) catch {};
+    defer cwd.deleteTree(io, dir) catch {};
+    try cwd.createDirPath(io, dir);
+    const path = dir ++ "/a.txt";
+
+    // 5 行、含末尾换行 → 总行数 5（尾随空段不计）。
+    try write(io, path, "l1\nl2\nl3\nl4\nl5\n");
+
+    // 中段窗口 [2,4]
+    const w = try readLineRange(arena, io, path, default_read_limit, 2, 2);
+    try std.testing.expectEqual(@as(usize, 5), w.total_lines);
+    try std.testing.expectEqual(@as(usize, 2), w.start_line);
+    try std.testing.expectEqual(@as(usize, 3), w.end_line);
+    try std.testing.expectEqualStrings("l2\nl3", w.text);
+
+    // offset=1, limit=null → 读到尾
+    const all = try readLineRange(arena, io, path, default_read_limit, 1, null);
+    try std.testing.expectEqual(@as(usize, 1), all.start_line);
+    try std.testing.expectEqual(@as(usize, 5), all.end_line);
+    try std.testing.expectEqualStrings("l1\nl2\nl3\nl4\nl5", all.text);
+
+    // limit 超过剩余 → 截断到尾
+    const tail = try readLineRange(arena, io, path, default_read_limit, 4, 100);
+    try std.testing.expectEqual(@as(usize, 4), tail.start_line);
+    try std.testing.expectEqual(@as(usize, 5), tail.end_line);
+    try std.testing.expectEqualStrings("l4\nl5", tail.text);
+
+    // offset 越界 → 空窗口但 total_lines 保留
+    const oob = try readLineRange(arena, io, path, default_read_limit, 99, 3);
+    try std.testing.expectEqual(@as(usize, 5), oob.total_lines);
+    try std.testing.expectEqual(@as(usize, 0), oob.start_line);
+    try std.testing.expectEqualStrings("", oob.text);
+
+    // 无尾换行：总行数仍按编辑器约定计 3
+    const path2 = dir ++ "/b.txt";
+    try write(io, path2, "a\nb\nc");
+    const nn = try readLineRange(arena, io, path2, default_read_limit, 1, null);
+    try std.testing.expectEqual(@as(usize, 3), nn.total_lines);
+    try std.testing.expectEqualStrings("a\nb\nc", nn.text);
+
+    // 空文件 → total 0、空窗口
+    const path3 = dir ++ "/c.txt";
+    try write(io, path3, "");
+    const empty = try readLineRange(arena, io, path3, default_read_limit, 1, 10);
+    try std.testing.expectEqual(@as(usize, 0), empty.total_lines);
+    try std.testing.expectEqual(@as(usize, 0), empty.start_line);
 }
 
 test "edit 唯一匹配成功替换并写回" {
