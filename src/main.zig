@@ -557,6 +557,7 @@ fn policyDecisionForAction(
         .file_read => policyDecisionForReadPath(PolicyFileReadArgs, arena, mode, input, "file_read", "path"),
         .grep => policyDecisionForReadPath(PolicyGrepArgs, arena, mode, input, "grep", "path"),
         .glob => policyDecisionForGlob(arena, mode, input),
+        .outline => policyDecisionForReadPath(PolicyFileReadArgs, arena, mode, input, "outline", "path"),
         .file_write, .file_edit => scoot.policy.evaluateTool(.write, mode),
         .http_request => blk: {
             const args = std.json.parseFromSliceLeaky(PolicyHttpArgs, arena, input, .{
@@ -588,7 +589,7 @@ fn policyDecisionForParallel(
         const child_input = if (call.input.len != 0) call.input else call.action_input;
         if (child_input.len == 0) return .{ .deny = "parallel 子调用缺少 input" };
         switch (child) {
-            .file_read, .grep, .glob => {},
+            .file_read, .grep, .glob, .outline => {},
             .http_request => {
                 const http_args = std.json.parseFromSliceLeaky(PolicyHttpArgs, arena, child_input, .{
                     .ignore_unknown_fields = true,
