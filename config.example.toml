@@ -31,6 +31,14 @@ api_key_env = "OPENAI_API_KEY"
 # Omit this field to scan system root certificates.
 # ca_file = "/etc/ssl/certs/ca-certificates.crt"
 
+# Prompt-cache hint mode: "off" (default) or "anthropic".
+#   off       — no cache markers; request body is byte-identical to legacy.
+#               OpenAI / vLLM / SGLang auto-cache stable prefixes, so leave it off.
+#   anthropic — tag the stable instruction prefix (leading system block) with an
+#               Anthropic-style cache_control breakpoint so the fixed prefix bills
+#               at the cache rate. Enable only on Anthropic-compatible gateways.
+# prompt_cache = "off"
+
 # Optional extra request body fields merged into chat/completions JSON.
 # Omit the whole [backend.extra_body] table when no extra fields are needed.
 # Do not put secrets here. Do not override core fields like model/messages.

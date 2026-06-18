@@ -275,6 +275,8 @@ pub fn main(init: std.process.Init) !void {
         try out.print("后端:       {s} (model={s})\n", .{ cfg.backend.base_url, cfg.backend.model });
         if (cfg.backend.ca_file) |ca| try out.print("  CA:       {s}\n", .{ca});
         if (cfg.backend.extra_body) |eb| try out.print("  扩展参数: {f}\n", .{std.json.fmt(eb, .{})});
+        if (!std.mem.eql(u8, cfg.backend.prompt_cache, "off"))
+            try out.print("  prompt缓存: {s}\n", .{cfg.backend.prompt_cache});
         try out.print("token 来源: env[{s}] > file > cmd（明文不入库）\n", .{cfg.backend.api_key_env});
         return;
     }
@@ -1732,6 +1734,7 @@ fn initBackendClient(
     var client = scoot.llm.Client.init(io, cfg.backend.base_url, cfg.backend.model, token);
     client.ca_file = cfg.backend.ca_file;
     client.extra_body = cfg.backend.extra_body;
+    client.prompt_cache = scoot.llm.PromptCache.parse(cfg.backend.prompt_cache);
     return client;
 }
 

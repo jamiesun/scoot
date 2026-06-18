@@ -26,6 +26,12 @@ pub const Backend = struct {
     /// 如 Azure 的 `service_tier`、推理模型的 `reasoning_effort`、`top_p` 等。
     /// 仅接受 JSON 对象；非对象一律忽略（防弹）。**明文密钥严禁放此处**（见铁律 #7）。
     extra_body: ?std.json.Value = null,
+    /// prompt 缓存提示模式（issue #72）：`off`（默认）/ `anthropic`。
+    /// `off`：请求体不带任何缓存标记，逐字节同旧行为——OpenAI / vLLM / SGLang 等自动缓存
+    /// 稳定前缀的后端无需也不应收到额外字段。`anthropic`：给稳定指令前缀（开头 system 段）
+    /// 打 Anthropic 风格 `cache_control` 断点，使固定前缀按缓存价计费。仅在 Anthropic 兼容
+    /// 网关上开启；未知值回落 off。见 llm.PromptCache。
+    prompt_cache: []const u8 = "off",
 };
 
 /// 认知引擎配置。
@@ -387,6 +393,7 @@ pub const Config = struct {
         if (envVal(env, "SCOOT_BACKEND_API_KEY_FILE")) |v| self.backend.api_key_file = try arena.dupe(u8, v);
         if (envVal(env, "SCOOT_BACKEND_API_KEY_CMD")) |v| self.backend.api_key_cmd = try arena.dupe(u8, v);
         if (envVal(env, "SCOOT_BACKEND_CA_FILE")) |v| self.backend.ca_file = try arena.dupe(u8, v);
+        if (envVal(env, "SCOOT_BACKEND_PROMPT_CACHE")) |v| self.backend.prompt_cache = try arena.dupe(u8, v);
         if (envVal(env, "SCOOT_BACKEND_EXTRA_BODY")) |v| {
             if (std.json.parseFromSliceLeaky(std.json.Value, arena, v, .{})) |parsed| {
                 if (parsed == .object)
@@ -735,6 +742,7 @@ test "applyEnvOverrides: 字符串项覆盖 backend 与 tools" {
     defer map.deinit();
     try map.put("SCOOT_BACKEND_BASE_URL", "https://example.test/v1");
     try map.put("SCOOT_BACKEND_MODEL", "gpt-override");
+    try map.put("SCOOT_BACKEND_PROMPT_CACHE", "anthropic");
     try map.put("SCOOT_TOOLS_POLICY", "readonly");
 
     var cfg: Config = .{ .dirs = undefined };
@@ -743,6 +751,7 @@ test "applyEnvOverrides: 字符串项覆盖 backend 与 tools" {
 
     try std.testing.expectEqualStrings("https://example.test/v1", cfg.backend.base_url);
     try std.testing.expectEqualStrings("gpt-override", cfg.backend.model);
+    try std.testing.expectEqualStrings("anthropic", cfg.backend.prompt_cache);
     try std.testing.expectEqualStrings("readonly", cfg.tools.policy);
     try std.testing.expectEqual(@as(usize, 0), report.env_warnings.len);
 }
