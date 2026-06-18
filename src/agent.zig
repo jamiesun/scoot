@@ -18,6 +18,7 @@ const tools = @import("tools/tools.zig");
 const audit = @import("audit.zig");
 const policy = @import("policy.zig");
 const pathsafe = @import("paths.zig");
+const jsonio = @import("jsonio.zig");
 
 // 双轨认知模式（goal / plan，见 ROADMAP 方向二）暂未实现：plan 模式的执行 DAG
 // 尚未落地，故此处不保留「定义却从不读取」的死字段（曾经的 Mode 枚举 + Agent.mode），
@@ -201,18 +202,24 @@ pub const Agent = struct {
                 .json_schema = react_schema,
                 .schema_name = "scoot_step",
             });
-            // 原始结构化输出落入会话历史（复制进 backing，独立于本回合 arena）。
-            try sess.append(backing, .assistant, completion.content);
 
             // 防弹解析（铁律 #4）：模型没吐合法步骤时不 panic，把错误作为观察回灌触发重试。
             const step = parseStep(arena, completion.content) catch {
                 if (self.audit) |lg| lg.log(.system_error, "模型输出不是合法步骤 JSON，已回灌纠错并重试") catch {};
                 self.traceMalformed(turn + 1);
+                // 畸形输出仍原样入历史（assistant）：让模型看到自己产出的坏 JSON，配合纠错回灌自我修复。
+                try sess.append(backing, .assistant, completion.content);
                 try sess.append(backing, .user, malformed_hint);
                 continue;
             };
             if (self.audit) |lg| lg.log(.thought, step.thought) catch {};
             self.traceStep(turn + 1, step);
+
+            // 只把不含 thought 的紧凑步骤写入历史（issue #70）：thought 是模型本回合的私有推理，
+            // 对后续回合无复用价值；持久化它会让历史逐回合膨胀且每次全量重发，使输入 token 随
+            // 回合数呈 O(N²)。thought 仅用于审计/trace（上面），历史只留 action/action_input。
+            const compact = try compactStepJson(arena, @tagName(step.action), step.action_input);
+            try sess.append(backing, .assistant, compact);
 
             switch (step.action) {
                 .final => {
@@ -685,6 +692,21 @@ const trace_observation_cap = 600;
 const trace_final_cap = 240;
 
 /// 防弹解析一个 ReACT 步骤。非法 JSON → MalformedStep；未知 action → UnknownAction。
+/// 把已解析的步骤压缩成**不含 thought** 的 assistant 历史记录（arena 拥有）：
+/// `{"action":"<名>","action_input":"<原样输入>"}`。thought 是模型本回合的私有推理，
+/// 对后续回合无复用价值；持久化它只会让历史逐回合膨胀、每次全量重发（issue #70）。
+/// 字符串经 jsonio 转义，保证回灌历史仍是合法 JSON。
+fn compactStepJson(arena: std.mem.Allocator, action_name: []const u8, action_input: []const u8) ![]const u8 {
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    const w = &aw.writer;
+    try w.writeAll("{\"action\":");
+    try jsonio.writeString(w, action_name);
+    try w.writeAll(",\"action_input\":");
+    try jsonio.writeString(w, action_input);
+    try w.writeByte('}');
+    return aw.writer.buffered();
+}
+
 pub fn parseStep(arena: std.mem.Allocator, content: []const u8) !Step {
     const Raw = struct {
         thought: []const u8 = "",
@@ -1259,6 +1281,54 @@ test "run: ReACT 循环执行 bash 工具后给出最终答复" {
             std.mem.indexOf(u8, m.content, "观察") != null) saw_observation = true;
     }
     try std.testing.expect(saw_observation);
+}
+
+test "run: thought 不落历史，只持久化紧凑步骤（issue #70）" {
+    const gpa = std.testing.allocator;
+    var brain = ScriptedBrain{ .steps = &.{
+        "{\"thought\":\"SECRET-THOUGHT-X9\",\"action\":\"bash\",\"action_input\":\"printf OK\"}",
+        "{\"thought\":\"ANOTHER-THOUGHT-Z\",\"action\":\"final\",\"action_input\":\"done\"}",
+    } };
+    var ag = testAgent(&brain, 16);
+
+    var sess = session.Session.init("test");
+    defer sess.deinit(gpa);
+    try sess.append(gpa, .system, system_prompt);
+    try sess.append(gpa, .user, "go");
+
+    const reply = try ag.run(gpa, &sess);
+    defer gpa.free(reply);
+    try std.testing.expectEqualStrings("done", reply);
+
+    // thought 文本绝不出现在任何历史消息中（不随回合重发）。
+    for (sess.items()) |m| {
+        try std.testing.expect(std.mem.indexOf(u8, m.content, "SECRET-THOUGHT-X9") == null);
+        try std.testing.expect(std.mem.indexOf(u8, m.content, "ANOTHER-THOUGHT-Z") == null);
+    }
+    // 但紧凑步骤（action，无 thought 字段）确实入了历史。
+    var saw_compact = false;
+    for (sess.items()) |m| {
+        if (m.role == .assistant and
+            std.mem.indexOf(u8, m.content, "\"action\":\"bash\"") != null and
+            std.mem.indexOf(u8, m.content, "\"thought\"") == null) saw_compact = true;
+    }
+    try std.testing.expect(saw_compact);
+}
+
+test "compactStepJson：去 thought、转义合法、保留 action_input（issue #70）" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const out = try compactStepJson(arena, "grep", "{\"pattern\":\"a\\\"b\",\"path\":\"f\"}");
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"thought\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"action\":\"grep\"") != null);
+
+    // 产物本身必须是合法 JSON，且 action_input 解析回原字符串（转义未丢失）。
+    const Raw = struct { action: []const u8, action_input: []const u8 };
+    const v = try std.json.parseFromSliceLeaky(Raw, arena, out, .{});
+    try std.testing.expectEqualStrings("grep", v.action);
+    try std.testing.expectEqualStrings("{\"pattern\":\"a\\\"b\",\"path\":\"f\"}", v.action_input);
 }
 
 test "run: parallel 并发执行本地只读工具并按输入顺序回灌" {
