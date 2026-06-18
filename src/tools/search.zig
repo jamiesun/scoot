@@ -70,6 +70,95 @@ pub fn grepFile(
     return grepText(arena, pattern, text, max_hits);
 }
 
+/// grep 命中上下文块（issue #76）：一段连续行区间（相邻/重叠的命中已合并）+ 标记哪些行是命中。
+/// 行切片指向被搜文本（arena 拥有其来源）。让 agent 一次拿到命中点周边，省掉「grep 后再整读」。
+pub const ContextBlock = struct {
+    start_line: usize, // 1 起：块首行号
+    lines: []const []const u8, // 块内各行原文（不含换行）
+    hit_mask: []const bool, // 与 lines 等长：true=命中行，false=上下文行
+};
+
+/// 上下文行数上限：挡住「context 设得很大」导致单次观察吃满内存/预算（issue #76）。
+pub const max_grep_context: usize = 20;
+
+/// 带上下文的 grep：返回命中行前后各 `context` 行的块；相邻/重叠块合并（类似 grep -C）。
+/// `max_hits` 限制命中行数（非块数、非总行数）。`context` 会被夹到 [0, max_grep_context]。
+pub fn grepTextContext(
+    arena: std.mem.Allocator,
+    pattern: []const u8,
+    text: []const u8,
+    max_hits: usize,
+    context: usize,
+) ![]ContextBlock {
+    const ctx = @min(context, max_grep_context);
+
+    // 切行（不含换行；末尾换行不算额外空行，与编辑器约定一致）。
+    var lines: std.ArrayList([]const u8) = .empty;
+    var start: usize = 0;
+    var idx: usize = 0;
+    while (idx < text.len) : (idx += 1) {
+        if (text[idx] == '\n') {
+            try lines.append(arena, text[start..idx]);
+            start = idx + 1;
+        }
+    }
+    if (start < text.len) try lines.append(arena, text[start..]);
+    const total = lines.items.len;
+    if (total == 0) return &.{};
+
+    // 命中行号（0 起），受 max_hits 约束。
+    var re = try regex.Regex.compile(arena, pattern);
+    var m = try regex.Matcher.init(arena, &re);
+    var hit_idx: std.ArrayList(usize) = .empty;
+    for (lines.items, 0..) |line, i| {
+        if (m.matches(line)) {
+            try hit_idx.append(arena, i);
+            if (hit_idx.items.len >= max_hits) break;
+        }
+    }
+    if (hit_idx.items.len == 0) return &.{};
+
+    // 把每个命中扩成 [hit-ctx, hit+ctx]，相邻/重叠区间合并成一块。
+    var blocks: std.ArrayList(ContextBlock) = .empty;
+    var bi: usize = 0;
+    while (bi < hit_idx.items.len) {
+        const first = hit_idx.items[bi];
+        const lo = if (first >= ctx) first - ctx else 0;
+        var hi = @min(total - 1, first + ctx);
+        var bj = bi + 1;
+        while (bj < hit_idx.items.len) : (bj += 1) {
+            const h = hit_idx.items[bj];
+            const h_lo = if (h >= ctx) h - ctx else 0;
+            if (h_lo > hi + 1) break; // 有间隔 → 另起一块
+            hi = @min(total - 1, h + ctx);
+        }
+        const n = hi - lo + 1;
+        const blk_lines = try arena.alloc([]const u8, n);
+        const blk_mask = try arena.alloc(bool, n);
+        for (0..n) |k| {
+            blk_lines[k] = lines.items[lo + k];
+            blk_mask[k] = false;
+        }
+        for (hit_idx.items[bi..bj]) |h| blk_mask[h - lo] = true;
+        try blocks.append(arena, .{ .start_line = lo + 1, .lines = blk_lines, .hit_mask = blk_mask });
+        bi = bj;
+    }
+    return blocks.toOwnedSlice(arena);
+}
+
+/// 读取文件后做带上下文的 grep（路径相对 cwd）。
+pub fn grepFileContext(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    pattern: []const u8,
+    path: []const u8,
+    max_hits: usize,
+    context: usize,
+) ![]ContextBlock {
+    const text = try std.Io.Dir.cwd().readFileAlloc(io, path, arena, default_read_limit);
+    return grepTextContext(arena, pattern, text, max_hits, context);
+}
+
 /// 在 `root` 子树下按 glob 模式匹配路径，返回匹配到的路径（相对 cwd，可直接喂 file_read）。
 /// 模式相对 `root` 匹配；`*`/`?`/`[]` 不跨 `/`，`**` 跨目录层级。隐藏文件（`.` 开头）跳过。
 pub fn glob(
@@ -303,6 +392,49 @@ test "grepText max_hits 含无换行尾行不越界（issue #39）" {
     const text = "x\nx\nx"; // 三处命中，末行无 '\n'
     const hits = try grepText(a, "x", text, 2);
     try std.testing.expectEqual(@as(usize, 2), hits.len);
+}
+
+test "grepTextContext 命中行带上下文 ±N 并标记命中（issue #76）" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const text = "l1\nl2\nNEEDLE\nl4\nl5";
+    const blocks = try grepTextContext(a, "NEEDLE", text, 100, 1);
+    try std.testing.expectEqual(@as(usize, 1), blocks.len);
+    const b = blocks[0];
+    try std.testing.expectEqual(@as(usize, 2), b.start_line); // l2..l4
+    try std.testing.expectEqual(@as(usize, 3), b.lines.len);
+    try std.testing.expectEqualStrings("l2", b.lines[0]);
+    try std.testing.expectEqualStrings("NEEDLE", b.lines[1]);
+    try std.testing.expectEqualStrings("l4", b.lines[2]);
+    try std.testing.expectEqual(false, b.hit_mask[0]);
+    try std.testing.expectEqual(true, b.hit_mask[1]);
+    try std.testing.expectEqual(false, b.hit_mask[2]);
+}
+
+test "grepTextContext 相邻命中的上下文块合并（issue #76）" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    // 命中第 2、4 行，±1 上下文 → 窗口 [1..3] 与 [3..5] 相邻，合并为一块。
+    const text = "a\nHIT\nc\nHIT\ne";
+    const blocks = try grepTextContext(a, "HIT", text, 100, 1);
+    try std.testing.expectEqual(@as(usize, 1), blocks.len);
+    try std.testing.expectEqual(@as(usize, 1), blocks[0].start_line);
+    try std.testing.expectEqual(@as(usize, 5), blocks[0].lines.len);
+    // 两个命中行被标记，其余为上下文。
+    var hits: usize = 0;
+    for (blocks[0].hit_mask) |h| { if (h) hits += 1; }
+    try std.testing.expectEqual(@as(usize, 2), hits);
+}
+
+test "grepTextContext 远离的命中各自成块（issue #76）" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const text = "HIT\nb\nc\nd\ne\nf\nHIT";
+    const blocks = try grepTextContext(a, "HIT", text, 100, 1);
+    try std.testing.expectEqual(@as(usize, 2), blocks.len);
 }
 
 test "globMatch 病态模式不超时（issue #37）" {

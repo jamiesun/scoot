@@ -89,6 +89,16 @@ text. Supported regex subset: `.` `^` `$` `*` `+` `?` `[]` `()` `|` `\d` `\w`
 `\s`. **Not** supported: capture-group backreferences, lookaround, lazy
 quantifiers. Read-only; allowed in every mode.
 
+Add an optional `context` to also return the **N lines around each hit** (like
+`grep -C`), so you can understand a match without a follow-up whole-file read:
+
+```json
+{ "pattern": "fn main", "path": "src/main.zig", "context": 3 }
+```
+
+Hit lines are marked `lineno:text`, context lines `lineno-text`; adjacent/overlapping
+hits are merged and blocks separated by `--`. `context` is clamped to `0..20`.
+
 ## `glob`
 
 ```json
