@@ -26,6 +26,7 @@ Prefer them over shelling out.
 | `file_edit` | Replace an exact text span | `{"path":...,"old":...,"new":...}` | no |
 | `grep` | Regex search within a file | `{"pattern":...,"path":...}` | yes |
 | `glob` | List files by glob pattern | `{"pattern":...,"root":"."}` | yes |
+| `outline` | Structural skeleton of a file | `{"path":...}` | yes |
 | `http_request` | One HTTP/HTTPS request | `{"method":...,"url":...,"body":...}` | depends on method |
 | `skill` | Read a loaded skill's files | `{"name":...,"path":"SKILL.md"}` | yes (native) |
 | `parallel` | 1–4 concurrent read-only calls | `{"calls":[...]}` | yes |
@@ -109,6 +110,25 @@ Lists file paths matching a glob under `root` (default `.`). `*` `?` `[]` do not
 cross `/`; `**` spans directory levels. Returned paths can be fed directly to
 `file_read` or `grep`. Read-only; allowed in every mode.
 
+## `outline`
+
+```json
+{ "path": "src/agent.zig" }
+```
+
+Returns a compact **structural skeleton** of one file — function and type
+signatures, plus Markdown headings — each with its line number, instead of the
+whole file. Use it to map an unfamiliar file first, then `file_read` with
+`offset`/`limit` to window into the parts you actually need; this avoids dumping
+large files into context.
+
+Language handling is a **zero-dependency line heuristic** (no AST / external
+parser, keeping Scoot a single self-contained binary): Zig and Markdown use
+precise rules; every other language falls back to a keyword-led heuristic
+(`def`/`class`/`func`/`function`/`struct`/`type`/`interface`/…), which is
+best-effort and may miss type-led definitions (e.g. C/C++). Output is capped at
+400 entries (then marked truncated). Read-only; allowed in every mode.
+
 ## `http_request`
 
 ```json
@@ -150,9 +170,10 @@ every read is audited. Content is returned up to ~32 KB. See [Skills](skills.md)
 ```
 
 Runs **1–4 independent read-only calls** concurrently, preserving observation
-order. Only `file_read`, `grep`, `glob`, and HTTP `GET`/`HEAD` are permitted —
-`bash`, writes, and nested `parallel` are rejected. Every child call still routes
-through the normal policy gate. Use it to fan out independent reads in one turn.
+order. Only `file_read`, `grep`, `glob`, `outline`, and HTTP `GET`/`HEAD` are
+permitted — `bash`, writes, and nested `parallel` are rejected. Every child call
+still routes through the normal policy gate. Use it to fan out independent reads
+in one turn.
 
 ## `final`
 

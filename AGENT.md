@@ -27,7 +27,7 @@ Scoot is a lightweight AI agent daemon and CLI written in pure Zig 0.16+. It is 
 The project already has the core pillars in place:
 
 - ReACT execution for `scoot -e` and the default REPL.
-- Built-in tools: `bash`, `file_read`, `file_write`, `file_edit`, `grep`, `glob`, and `http_request`.
+- Built-in tools: `bash`, `file_read`, `file_write`, `file_edit`, `grep`, `glob`, `outline`, and `http_request`.
 - Execution policy: `guarded`, `readonly`, and `unrestricted`.
 - Local skill discovery with progressive disclosure.
 - Scheduled unattended jobs with effective `readonly` mode by default.

@@ -24,6 +24,7 @@
 | `file_edit` | 替换一段精确文本 | `{"path":...,"old":...,"new":...}` | 否 |
 | `grep` | 在文件内做正则搜索 | `{"pattern":...,"path":...}` | 是 |
 | `glob` | 按 glob 模式列出文件 | `{"pattern":...,"root":"."}` | 是 |
+| `outline` | 文件结构骨架 | `{"path":...}` | 是 |
 | `http_request` | 一次 HTTP/HTTPS 请求 | `{"method":...,"url":...,"body":...}` | 取决于方法 |
 | `skill` | 读取已加载技能的文件 | `{"name":...,"path":"SKILL.md"}` | 是（原生） |
 | `parallel` | 1–4 个并发只读调用 | `{"calls":[...]}` | 是 |
@@ -105,6 +106,23 @@
 跨越 `/`；`**` 跨越目录层级。返回的路径可直接喂给
 `file_read` 或 `grep`。只读；在每种模式下都允许。
 
+## `outline`
+
+```json
+{ "path": "src/agent.zig" }
+```
+
+返回单个文件的紧凑**结构骨架**——函数与类型签名、Markdown 标题，
+各自带行号——而不是整文件内容。先用它给陌生文件画出地图，再用
+`file_read` 的 `offset`/`limit` 窗口读真正需要的片段；以此避免把大文件
+整块灌进上下文。
+
+语言识别是**零依赖的行启发式**（不引入 AST / 外部解析器，保持 Scoot
+单一自包含二进制）：Zig 与 Markdown 走精确规则；其余语言回退到关键字
+引导的启发式（`def`/`class`/`func`/`function`/`struct`/`type`/`interface`/…），
+属 best-effort，可能漏掉类型引导的定义（如 C/C++）。输出上限 400 条
+（超出即标注已截断）。只读；在每种模式下都允许。
+
 ## `http_request`
 
 ```json
@@ -145,7 +163,7 @@
 ```
 
 并发运行 **1–4 个独立的只读调用**，保留观察
-顺序。仅允许 `file_read`、`grep`、`glob` 与 HTTP `GET`/`HEAD`——
+顺序。仅允许 `file_read`、`grep`、`glob`、`outline` 与 HTTP `GET`/`HEAD`——
 `bash`、写入与嵌套的 `parallel` 都被拒绝。每个子调用仍会
 经过正常的策略门。用它在一个回合中并行扇出独立的读取。
 

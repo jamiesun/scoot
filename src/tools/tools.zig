@@ -6,6 +6,7 @@ pub const bash = @import("bash.zig");
 pub const file = @import("file.zig");
 pub const search = @import("search.zig");
 pub const http = @import("http.zig");
+pub const outline = @import("outline.zig");
 
 /// 工具执行的统一结果。
 pub const Result = struct {

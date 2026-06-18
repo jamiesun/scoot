@@ -63,9 +63,10 @@ pub const system_prompt =
     \\  - "file_edit"：精确替换文件中的一段文本；action_input 是 JSON 对象 {"path":"文件路径","old":"要替换的确切文本（须在文件中唯一出现）","new":"替换成的文本"}。
     \\  - "grep"：在某个文件内按正则逐行搜索，返回命中行号与原文；action_input 是 JSON 对象 {"pattern":"正则","path":"文件路径"}。可选 {"context":N} 同时返回每个命中前后各 N 行（类似 grep -C，上下文行以 行号-原文 标注、命中行以 行号:原文 标注，相邻命中合并、块间以 -- 分隔），一次拿到命中点周边即可省掉随后的整文件读。支持子集：. ^ $ * + ? [] () | \d \w \s（不支持捕获组/反向引用/lookaround/惰性量词）。
     \\  - "glob"：在目录子树下按通配模式列出匹配的文件路径；action_input 是 JSON 对象 {"pattern":"通配模式","root":"起始目录（可选，默认 .）"}。* ? [] 不跨 /，** 跨目录层级。返回的路径可直接喂给 file_read / grep。
+    \\  - "outline"：以极低 token 取回一个文件的「结构骨架」——源码的函数/类型签名、Markdown 的标题层级；action_input 是 JSON 对象 {"path":"文件路径"}。用于在**不整读**大文件的前提下先了解其结构，再决定要不要用 file_read 行窗口精读某段。零依赖启发式（按扩展名识别 Zig / Markdown，其余走通用关键字匹配），是 best-effort 概览而非精确解析。
     \\  - "http_request"：发起一次 HTTP/HTTPS 请求；action_input 是 JSON 对象 {"method":"GET","url":"https://...","body":"可选请求体"}。method 取 GET/POST/PUT/DELETE/HEAD/PATCH。返回状态码与响应体；带硬超时，绝不挂死。
     \\  - "skill"：读取一个已装载技能的指令或资源文件。这是 Scoot 的原生只读能力，不受执行策略限制（即便 readonly 也可用）；action_input 是 JSON 对象 {"name":"技能名","path":"技能目录内的相对路径（可选，默认 SKILL.md）"}。仅能读取「可用技能」清单中列出技能其目录内的文件，用于按需取回该技能的完整操作指令（技能里要你执行的 bash/写/网络动作仍各自受执行策略约束）。
-    \\  - "parallel"：并发执行 1-4 个彼此独立的只读调用；action_input 是 JSON 对象 {"calls":[{"action":"file_read","input":"{\"path\":\"README.md\"}"},{"action":"grep","input":"{\"pattern\":\"Scoot\",\"path\":\"AGENT.md\"}"}]}。只允许 file_read / grep / glob / HTTP GET 或 HEAD；禁止 bash、写操作、嵌套 parallel。
+    \\  - "parallel"：并发执行 1-4 个彼此独立的只读调用；action_input 是 JSON 对象 {"calls":[{"action":"file_read","input":"{\"path\":\"README.md\"}"},{"action":"grep","input":"{\"pattern\":\"Scoot\",\"path\":\"AGENT.md\"}"}]}。只允许 file_read / grep / glob / outline / HTTP GET 或 HEAD；禁止 bash、写操作、嵌套 parallel。
     \\  - "final"：给出最终答复；action_input 是给用户的答复文本。
     \\
     \\工作方式：
@@ -79,7 +80,7 @@ pub const system_prompt =
 ;
 
 /// 模型可选的动作。
-pub const Action = enum { bash, file_read, file_write, file_edit, grep, glob, http_request, skill, parallel, final };
+pub const Action = enum { bash, file_read, file_write, file_edit, grep, glob, outline, http_request, skill, parallel, final };
 
 /// 一个解析后的 ReACT 步骤。
 pub const Step = struct {
@@ -96,6 +97,7 @@ const FileWriteArgs = struct { path: []const u8, content: []const u8 };
 const FileEditArgs = struct { path: []const u8, old: []const u8, new: []const u8 };
 const GrepArgs = struct { pattern: []const u8, path: []const u8, context: ?usize = null };
 const GlobArgs = struct { pattern: []const u8, root: []const u8 = "." };
+const OutlineArgs = struct { path: []const u8 };
 const HttpArgs = struct { method: []const u8 = "GET", url: []const u8, body: ?[]const u8 = null };
 const SkillArgs = struct { name: []const u8, path: []const u8 = "SKILL.md" };
 const ParallelCallArgs = struct {
@@ -174,6 +176,10 @@ fn readKey(arena: std.mem.Allocator, action: Action, input: []const u8) !?[]cons
         .glob => blk: {
             const a = try parseToolArgs(GlobArgs, arena, input);
             break :blk try std.fmt.allocPrint(arena, "glob {s} /{s}/", .{ a.root, a.pattern });
+        },
+        .outline => blk: {
+            const a = try parseToolArgs(OutlineArgs, arena, input);
+            break :blk try std.fmt.allocPrint(arena, "outline {s}", .{a.path});
         },
         else => null,
     };
@@ -358,7 +364,7 @@ pub const Agent = struct {
     fn guard(self: *Agent, arena: std.mem.Allocator, action: Action, input: []const u8) policy.Decision {
         return switch (action) {
             .bash => policy.evaluate(arena, input, self.policy_mode),
-            .file_read, .grep, .glob => self.guardLocalRead(arena, action, input),
+            .file_read, .grep, .glob, .outline => self.guardLocalRead(arena, action, input),
             .file_write, .file_edit => self.guardWrite(arena, action, input),
             .http_request => self.guardHttp(arena, input),
             .skill => .allow, // 见下：读取技能指令是原生只读能力，刻意置于执行策略之外。
@@ -394,6 +400,11 @@ pub const Agent = struct {
                 const root_decision = policy.evaluateReadPath(args.root, self.policy_mode);
                 if (root_decision != .allow) break :blk root_decision;
                 break :blk policy.evaluateReadPath(args.pattern, self.policy_mode);
+            },
+            .outline => blk: {
+                const args = parseToolArgs(OutlineArgs, arena, input) catch
+                    break :blk .{ .deny = "只读模式无法解析 outline 路径，已拒绝" };
+                break :blk policy.evaluateReadPath(args.path, self.policy_mode);
             },
             // 调用方契约：guardLocalRead 只对本地读动作（file_read/grep/glob）调用。
             // 降级为 deny 而非 unreachable：契约被未来重构破坏时退化为可回灌的拒绝，不 panic。
@@ -465,7 +476,7 @@ pub const Agent = struct {
             if (child_input.len == 0)
                 return .{ .deny = "parallel 子调用缺少 input" };
             switch (child) {
-                .file_read, .grep, .glob => {},
+                .file_read, .grep, .glob, .outline => {},
                 .http_request => {
                     const http_args = parseToolArgs(HttpArgs, arena, child_input) catch
                         return .{ .deny = "parallel 无法解析 http_request 参数" };
@@ -526,6 +537,10 @@ pub const Agent = struct {
                 const args = try parseToolArgs(GlobArgs, arena, input);
                 const paths = try tools.search.glob(arena, self.io, args.pattern, args.root, tools.search.default_max_results);
                 break :blk try formatGlobPaths(arena, args.pattern, paths);
+            },
+            .outline => blk: {
+                const args = try parseToolArgs(OutlineArgs, arena, input);
+                break :blk try outlineObservation(arena, self.io, args);
             },
             .http_request => blk: {
                 const args = try parseToolArgs(HttpArgs, arena, input);
@@ -886,6 +901,33 @@ fn fileReadObservation(arena: std.mem.Allocator, io: std.Io, args: FileReadArgs)
     );
 }
 
+/// 执行 outline 动作并产出「观察」文本（arena 拥有）。execTool 与并发 worker 共用。
+/// 读入整文件 → 按扩展名识别语言 → 抽结构骨架 → 紧凑成「行号: 签名」概览，让模型先看
+/// 结构再决定是否窗口读细节（issue #77，零依赖行启发式）。受 file_read 上限截断。
+fn outlineObservation(arena: std.mem.Allocator, io: std.Io, args: OutlineArgs) ![]const u8 {
+    const content = try tools.file.read(arena, io, args.path, tools.file.default_read_limit);
+    const lang = tools.outline.detectLang(args.path);
+    const result = try tools.outline.extract(arena, content, lang);
+    if (result.entries.len == 0) {
+        return std.fmt.allocPrint(
+            arena,
+            "[结构] {s}（lang={s}）：未识别到结构行（函数/类型/标题）。如需内容请用 file_read。",
+            .{ args.path, @tagName(lang) },
+        );
+    }
+    var buf: std.ArrayList(u8) = .empty;
+    try buf.appendSlice(arena, try std.fmt.allocPrint(
+        arena,
+        "[结构] {s}（lang={s}，{d} 项{s}）：\n",
+        .{ args.path, @tagName(lang), result.entries.len, if (result.truncated) "，已截断" else "" },
+    ));
+    for (result.entries) |e| {
+        try buf.appendSlice(arena, try std.fmt.allocPrint(arena, "{d}: {s}\n", .{ e.line, e.text }));
+    }
+    try buf.appendSlice(arena, "提示：用 file_read 的 offset/limit 按行号窗口读取所需片段。");
+    return clipTo(arena, buf.items, file_read_observation_tokens);
+}
+
 /// 把 grep 命中格式化成「观察」文本（arena 拥有），无命中亦明示。受 file_read 上限截断。
 fn formatGrepHits(arena: std.mem.Allocator, path: []const u8, hits: []const tools.search.Hit) ![]const u8 {
     if (hits.len == 0) {
@@ -1049,6 +1091,10 @@ fn execReadTool(
             const paths = try tools.search.glob(arena, io, args.pattern, args.root, tools.search.default_max_results);
             break :blk try formatGlobPaths(arena, args.pattern, paths);
         },
+        .outline => blk: {
+            const args = try parseToolArgs(OutlineArgs, arena, input);
+            break :blk try outlineObservation(arena, io, args);
+        },
         .http_request => blk: {
             const args = try parseToolArgs(HttpArgs, arena, input);
             const method = tools.http.methodFromString(args.method) orelse return error.UnknownMethod;
@@ -1180,6 +1226,48 @@ test "grepObservation：无 context 仅命中行，有 context 带 ±N 上下文
     try std.testing.expect(std.mem.indexOf(u8, ctx, "3:fn target") != null); // 命中行
     try std.testing.expect(std.mem.indexOf(u8, ctx, "4-l4") != null); // 上下文行
     try std.testing.expect(std.mem.indexOf(u8, ctx, "l5") == null); // 窗口外
+}
+
+test "outlineObservation：抽出结构骨架并提示窗口读（#77）" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const cwd = std.Io.Dir.cwd();
+    const dir = "/tmp/scoot_agent_outline_obs";
+    cwd.deleteTree(io, dir) catch {};
+    defer cwd.deleteTree(io, dir) catch {};
+    try cwd.createDirPath(io, dir);
+
+    // 有结构的 .zig：命中函数 / 顶层类型，输出含行号与「结构」头、窗口读提示。
+    const zig_path = dir ++ "/sample.zig";
+    try tools.file.write(io, zig_path,
+        \\const std = @import("std");
+        \\pub const Foo = struct {
+        \\    pub fn bar(self: *Foo) void {
+        \\        _ = self;
+        \\    }
+        \\};
+        \\fn helper() void {}
+        \\
+    );
+    const skeleton = try outlineObservation(arena, io, .{ .path = zig_path });
+    try std.testing.expect(std.mem.indexOf(u8, skeleton, "[结构]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, skeleton, "lang=zig") != null);
+    try std.testing.expect(std.mem.indexOf(u8, skeleton, "pub const Foo = struct") != null);
+    try std.testing.expect(std.mem.indexOf(u8, skeleton, "pub fn bar(self: *Foo) void") != null);
+    try std.testing.expect(std.mem.indexOf(u8, skeleton, "fn helper() void") != null);
+    try std.testing.expect(std.mem.indexOf(u8, skeleton, "@import") == null); // import 噪声被跳过
+    try std.testing.expect(std.mem.indexOf(u8, skeleton, "file_read") != null); // 窗口读提示
+
+    // 无结构的纯文本：明示未识别并引导 file_read。
+    const txt_path = dir ++ "/plain.txt";
+    try tools.file.write(io, txt_path, "just some prose\nno definitions here\n");
+    const empty = try outlineObservation(arena, io, .{ .path = txt_path });
+    try std.testing.expect(std.mem.indexOf(u8, empty, "未识别到结构行") != null);
+    try std.testing.expect(std.mem.indexOf(u8, empty, "file_read") != null);
 }
 
 test "ReadCache.dedup：同读未变→引用占位，内容变/体量小/非读动作→照常回灌（issue #73）" {
