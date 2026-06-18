@@ -50,9 +50,10 @@ pub const Tools = struct {
     /// opt-in 加固（默认关闭，仅 guarded 生效）：把 file_write/file_edit 收口到项目根内，
     /// 拒绝绝对路径 / `..` 逃逸 / shell 展开（issue #32）。readonly 已 fail-closed 拒写。
     confine_writes: bool = false,
-    /// opt-in 加固（默认关闭，仅 guarded 生效）：拒绝 http_request 访问环回 / 内网 /
-    /// 链路本地 / 云元数据地址，收窄 SSRF / 外带面（issue #32）。readonly 已默认拒网。
-    block_internal_http: bool = false,
+    /// 默认开启（仅 guarded 生效）：拒绝 http_request 访问环回 / 内网 / 链路本地 / 云元数据
+    /// 地址，收窄 SSRF / 外带面（issue #32 / #50）。合法 agent HTTP 几乎不触达这些地址，
+    /// 摩擦低、收益高，故默认 true；如确需访问内网可显式置 false。readonly 已默认拒网。
+    block_internal_http: bool = true,
 };
 
 /// Skill 机制配置。

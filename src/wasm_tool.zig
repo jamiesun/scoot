@@ -6,6 +6,7 @@
 const std = @import("std");
 const toml = @import("toml.zig");
 const skill = @import("skill.zig");
+const pathsafe = @import("paths.zig");
 
 const manifest_read_limit: std.Io.Limit = .limited(64 * 1024);
 const policy_read_limit: std.Io.Limit = .limited(64 * 1024);
@@ -78,7 +79,7 @@ pub fn validatePackage(arena: std.mem.Allocator, io: std.Io, dir: []const u8) !V
     if (validatePolicy(arena, manifest, policy)) |msg| return .{ .invalid = msg };
 
     const component_path = try std.fs.path.join(arena, &.{ dir, manifest.component });
-    if (validateComponent(arena, io, component_path)) |msg| return .{ .invalid = msg };
+    if (validateComponent(arena, io, dir, component_path)) |msg| return .{ .invalid = msg };
 
     if (validateJsonSchema(arena, io, dir, manifest.input_schema, "input schema")) |msg| return .{ .invalid = msg };
     if (validateJsonSchema(arena, io, dir, manifest.output_schema, "output schema")) |msg| return .{ .invalid = msg };
@@ -130,6 +131,10 @@ fn validateJsonSchema(
 ) ?[]const u8 {
     const cwd = std.Io.Dir.cwd();
     const path = std.fs.path.join(arena, &.{ dir, rel_path }) catch return "cannot build schema path";
+    // symlink 逃逸防护（issue #54，与 #41 对齐）：isSafeRelativePath 只做词法过滤，后续
+    // readFileAlloc 会跟随 symlink。对已存在目标做 realpath，确认仍落在包目录内。
+    if (pathsafe.realPathEscapes(io, arena, dir, path))
+        return std.fmt.allocPrint(arena, "{s} resolves outside the package directory (symlink escape)", .{label}) catch "schema resolves outside package directory";
     const bytes = cwd.readFileAlloc(io, path, arena, schema_read_limit) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => return std.fmt.allocPrint(arena, "{s} file is missing", .{label}) catch "schema file is missing",
         error.FileTooBig => return std.fmt.allocPrint(arena, "{s} exceeds 256 KiB", .{label}) catch "schema file is too large",
@@ -143,8 +148,12 @@ fn validateJsonSchema(
     return null;
 }
 
-fn validateComponent(arena: std.mem.Allocator, io: std.Io, path: []const u8) ?[]const u8 {
+fn validateComponent(arena: std.mem.Allocator, io: std.Io, dir: []const u8, path: []const u8) ?[]const u8 {
     const cwd = std.Io.Dir.cwd();
+    // symlink 逃逸防护（issue #54）：component 路径虽过 isSafeRelativePath 词法检查，但
+    // statFile/openFile 会跟随 symlink。对已存在目标做 realpath，确认仍落在包目录内。
+    if (pathsafe.realPathEscapes(io, arena, dir, path))
+        return "component wasm file resolves outside the package directory (symlink escape)";
     const component_stat = cwd.statFile(io, path, .{}) catch |err| switch (err) {
         error.FileNotFound, error.NotDir => return "component wasm file is missing",
         else => return std.fmt.allocPrint(arena, "cannot stat component wasm file: {s}", .{@errorName(err)}) catch "cannot stat component wasm file",
@@ -298,6 +307,52 @@ test "validatePackage: rejects missing files and unsafe manifest paths" {
     switch (unsafe) {
         .valid => return error.TestUnexpectedResult,
         .invalid => |msg| try std.testing.expectEqualStrings("component path must be a safe relative path", msg),
+    }
+}
+
+test "validatePackage: rejects symlink that escapes the package directory (issue #54)" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const root = "/tmp/scoot_wasm_tool_validate_symlink";
+    cwd.deleteTree(io, root) catch {};
+    defer cwd.deleteTree(io, root) catch {};
+
+    try cwd.createDirPath(io, root ++ "/pkg/schema");
+    try cwd.createDirPath(io, root ++ "/outside");
+    // 包外的“机密” JSON：词法安全的相对路径 + 包内 symlink 即可逃逸读取。
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/outside/secret.json", .data = "{\"leak\":true}\n" });
+    try cwd.writeFile(io, .{
+        .sub_path = root ++ "/pkg/manifest.toml",
+        .data =
+        \\name = "escaper"
+        \\description = "Tries to escape via symlink."
+        \\entry = "call"
+        \\component = "component.wasm"
+        \\input_schema = "schema/input.json"
+        \\output_schema = "schema/output.json"
+        \\capabilities = ["compute"]
+        \\
+        ,
+    });
+    try cwd.writeFile(io, .{
+        .sub_path = root ++ "/pkg/policy.toml",
+        .data = "capabilities = [\"compute\"]\n",
+    });
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/pkg/component.wasm", .data = "\x00asm" });
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/pkg/schema/output.json", .data = "{\"type\":\"object\"}\n" });
+    // input.json 是指向包外机密文件的 symlink（词法上仍是安全相对路径）。
+    cwd.symLink(io, root ++ "/outside/secret.json", root ++ "/pkg/schema/input.json", .{}) catch |e| {
+        if (e == error.AccessDenied or e == error.PermissionDenied) return error.SkipZigTest;
+        return e;
+    };
+
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const res = try validatePackage(arena.allocator(), io, root ++ "/pkg");
+    switch (res) {
+        .valid => return error.TestUnexpectedResult,
+        .invalid => |msg| try std.testing.expect(std.mem.indexOf(u8, msg, "outside the package directory") != null),
     }
 }
 

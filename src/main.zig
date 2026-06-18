@@ -745,6 +745,24 @@ fn checkPolicyConfig(d: *Doctor, arena: std.mem.Allocator, cfg: scoot.config.Con
     } else {
         try d.ok("tools.timeout_ms", try std.fmt.allocPrint(arena, "{d}ms", .{cfg.tools.timeout_ms}));
     }
+
+    // issue #50：把加固护栏的「实际生效与否」在 doctor 中显式化，避免 guarded 看似加固、
+    // 实则两道护栏默认关闭。block_internal_http 默认开启，confine_writes 仍为 opt-in。
+    const guarded = if (parsePolicyModeStrict(cfg.tools.policy)) |m| m == .guarded else false;
+    if (cfg.tools.block_internal_http) {
+        try d.ok("tools.block_internal_http", "enabled（拒绝环回/内网/链路本地/云元数据，收窄 SSRF）");
+    } else if (guarded) {
+        try d.warn("tools.block_internal_http", "disabled：http_request 可访问环回/内网/云元数据；建议设为 true");
+    } else {
+        try d.info("tools.block_internal_http", "disabled（当前策略档不强制网络护栏）");
+    }
+    if (cfg.tools.confine_writes) {
+        try d.ok("tools.confine_writes", "enabled（file_write/file_edit 收口到项目根内）");
+    } else if (guarded) {
+        try d.info("tools.confine_writes", "disabled（opt-in；如需把写入收口到项目根设为 true）");
+    } else {
+        try d.info("tools.confine_writes", "disabled（当前策略档不强制写入收口）");
+    }
 }
 
 fn checkAgentConfig(d: *Doctor, arena: std.mem.Allocator, cfg: scoot.config.Config) !void {
@@ -1446,8 +1464,18 @@ fn runDaemon(
     };
     if (scoot.daemon.previousRunWasUnclean(previous_state)) {
         const prev = previous_state.?;
+        // issue #53：上次状态仍为 running。若该 pid 确实存活（且不是本进程），说明已有 daemon
+        // 在跑——拒绝重复启动，避免双实例争用同一份调度/状态文件。否则视为上次崩溃残留的陈旧
+        // running 记录，按重启恢复语义继续（signal-0 探活无法区分 PID 复用，作为可接受残留）。
+        if (scoot.daemon.pidAlive(prev.pid) and prev.pid != currentPid()) {
+            try out.print(
+                "[scoot] 拒绝启动：检测到 daemon 已在运行（pid={d} started_at={d}）。请先 `scoot daemon stop`。\n",
+                .{ prev.pid, prev.started_at_unix },
+            );
+            die(out, 1);
+        }
         try out.print(
-            "[scoot] 检测到上次 daemon 未记录正常停止：pid={d} started_at={d}。按重启恢复语义继续。\n",
+            "[scoot] 检测到上次 daemon 未记录正常停止：pid={d} started_at={d}（进程已不存活，按重启恢复语义继续）。\n",
             .{ prev.pid, prev.started_at_unix },
         );
     }
@@ -1539,7 +1567,26 @@ fn printDaemonStatus(
         try out.print("pid_file={s} missing\n", .{pid_path});
     }
     try out.print("state_file={s}\n", .{state_path});
-    try out.writeAll("liveness=not_probed（status 反映 Scoot 写入的生命周期状态）\n");
+
+    // issue #53：实际探活，替代旧的「not_probed」占位。优先探 pid 文件中的 pid，否则退回状态里的 pid。
+    const probe_pid: ?i64 = if (pid) |p| p else if (state) |s| s.pid else null;
+    if (probe_pid) |pp| {
+        const alive = scoot.daemon.pidAlive(pp);
+        try out.print("liveness={s} probed_pid={d}\n", .{ if (alive) "alive" else "dead", pp });
+        // 若状态文件仍记为 running 但进程已不存活，则对账：写入 stopped 记录并清理陈旧 pid 文件，
+        // 避免 status 长期误报 running（issue #53 的陈旧 PID 失败模式）。
+        if (!alive) {
+            if (state) |s| {
+                if (std.mem.eql(u8, s.status, "running")) {
+                    try writeDaemonStoppedAfterFailedStop(arena, io, cfg, pp, "stale_pid_reconciled");
+                    scoot.daemon.clearPid(arena, io, cfg.dirs.state_dir);
+                    try out.writeAll("[scoot] 已将陈旧的 running 状态对账为 stopped 并清理 pid 文件。\n");
+                }
+            }
+        }
+    } else {
+        try out.writeAll("liveness=unknown（无 pid 可探测）\n");
+    }
 }
 
 fn stopDaemon(
@@ -1555,6 +1602,14 @@ fn stopDaemon(
     if (pid <= 0) {
         try out.print("[scoot] daemon pid 非法：{d}\n", .{pid});
         die(out, 1);
+    }
+    // issue #53：发 SIGTERM 前先探活。进程已不存活时直接清理 pid 文件并对账状态，
+    // 避免对陈旧 pid 发信号（PID 复用时甚至可能误杀无关进程的最坏情况由 status/stop 的探活共同收窄）。
+    if (!scoot.daemon.pidAlive(pid)) {
+        try out.print("[scoot] daemon pid={d} 已不存活；清理 pid 文件并对账状态。\n", .{pid});
+        scoot.daemon.clearPid(arena, io, cfg.dirs.state_dir);
+        try writeDaemonStoppedAfterFailedStop(arena, io, cfg, pid, "process_not_alive");
+        return;
     }
     std.posix.kill(@intCast(pid), .TERM) catch |err| switch (err) {
         error.ProcessNotFound => {
@@ -2001,6 +2056,40 @@ test "policyDecisionForAction: 复用工具策略语义" {
     switch (policyDecisionForAction(arena, .guarded, .parallel, "{\"calls\":[{\"action\":\"file_write\",\"input\":\"{\\\"path\\\":\\\"x\\\",\\\"content\\\":\\\"y\\\"}\"}]}")) {
         .deny => {},
         .allow => return error.ExpectedDeny,
+    }
+}
+
+test "checkPolicyConfig: 报告加固护栏的生效状态（issue #50）" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // 默认档（guarded + block_internal_http=true + confine_writes=false）：
+    // SSRF 护栏应报 OK，写入收口报 INFO（opt-in），无 WARN。
+    {
+        var buf: [4096]u8 = undefined;
+        var ow = Io.Writer.fixed(&buf);
+        var d = Doctor{ .out = &ow };
+        const cfg: scoot.config.Config = .{ .dirs = undefined };
+        try checkPolicyConfig(&d, arena, cfg);
+        const o = ow.buffered();
+        try std.testing.expect(std.mem.indexOf(u8, o, "OK\ttools.block_internal_http") != null);
+        try std.testing.expect(std.mem.indexOf(u8, o, "INFO\ttools.confine_writes") != null);
+        try std.testing.expectEqual(@as(usize, 0), d.warnings);
+    }
+
+    // guarded 下显式关闭 SSRF 护栏：应 WARN，提示生效姿态被削弱。
+    {
+        var buf: [4096]u8 = undefined;
+        var ow = Io.Writer.fixed(&buf);
+        var d = Doctor{ .out = &ow };
+        var cfg: scoot.config.Config = .{ .dirs = undefined };
+        cfg.tools.block_internal_http = false;
+        try checkPolicyConfig(&d, arena, cfg);
+        const o = ow.buffered();
+        try std.testing.expect(std.mem.indexOf(u8, o, "WARN\ttools.block_internal_http") != null);
+        try std.testing.expect(d.warnings >= 1);
     }
 }
 
