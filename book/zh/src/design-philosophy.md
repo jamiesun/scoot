@@ -30,7 +30,7 @@ Scoot 应该是：
 - **带策略门的本地执行器。** 文件、搜索、shell、HTTP、skill 和 parallel 动作都
   先校验，再经过明确策略决策。
 - **边界上 OpenAI 兼容。** 本地或云端后端只要提供 OpenAI 兼容
-  `chat/completions` 形态即可接入。
+  Responses API（`/v1/responses`）即可接入。
 - **适合小机器。** Zig 实现、低依赖、显式内存分配和交叉编译能力，是为了适配
   边缘主机、NAS、实验室机器和小型服务器。
 - **通过指令扩展，而不是原生插件扩展。** Skills 通过可审查的指令包和资源扩展

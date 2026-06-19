@@ -83,7 +83,7 @@ pub fn start(gpa: std.mem.Allocator, io: std.Io, options: Options) !*Runtime {
     state.client = llm.Client.init(io, cfg.backend.base_url, cfg.backend.model, token);
     state.client.ca_file = cfg.backend.ca_file;
     state.client.extra_body = cfg.backend.extra_body;
-    state.client.prompt_cache = llm.PromptCache.parse(cfg.backend.prompt_cache);
+    state.client.model_ctx.store = cfg.backend.store;
 
     state.agent_template = agent.Agent.initClient(&state.client);
     state.agent_template.max_turns = cfg.agent.max_turns;

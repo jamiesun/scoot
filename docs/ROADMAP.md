@@ -74,11 +74,11 @@ Most tools are implemented in-process and do not require external `cat`, `sed`, 
 
 ### OpenAI-Compatible API Integration
 
-Scoot targets `/v1/chat/completions` and uses strict JSON schema response formatting to force structured model steps.
+Scoot speaks only the OpenAI-compatible Responses API (`/v1/responses`). Leading system messages are sent as the top-level `instructions` field; the rest become the `input` array, with strict JSON schema response formatting to force structured model steps. Transport is stateless by default (`store=false`, full `input` resent each turn), which keeps local context compaction in control. Local servers that serve this API include Ollama >= 0.13.3 and vLLM.
 
 Current boundaries:
 
-- OpenAI-compatible protocol only.
+- OpenAI-compatible Responses API (`/v1/responses`) only; Chat Completions has been removed.
 - No provider-specific API glue.
 - No streaming requirement.
 - No dependency on backend-native tool calling.

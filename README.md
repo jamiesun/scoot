@@ -21,7 +21,7 @@ jobs without pulling in a large app stack.
 | --- | --- |
 | Run an agent from a terminal | One self-contained binary with one-shot and REPL modes. |
 | Keep state local | Config, sessions, skills, logs, and daemon state live under `~/.scoot` by default. |
-| Use existing model infrastructure | Any OpenAI-compatible `chat/completions` backend works, local or hosted. |
+| Use existing model infrastructure | OpenAI-compatible Responses API backends work, local or hosted (Ollama >= 0.13.3, vLLM, OpenAI). |
 | Avoid accidental damage | Tool calls pass through `guarded`, `readonly`, or `unrestricted` policy modes. |
 | Audit what happened | Every agent step and tool decision is persisted as local JSONL state. |
 | Extend behavior | Local skills are discovered from directories and read progressively when needed. |
@@ -134,7 +134,9 @@ mkdir -p ~/.scoot
 cp config.example.toml ~/.scoot/config.toml
 ```
 
-Edit `[backend]` for your OpenAI-compatible backend:
+Edit `[backend]` for your OpenAI-compatible backend. Scoot speaks only the
+Responses API (`/v1/responses`), so the backend must serve it (Ollama >= 0.13.3,
+vLLM, or OpenAI):
 
 ```toml
 [backend]

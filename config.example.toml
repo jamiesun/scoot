@@ -8,12 +8,20 @@
 # Keep secrets out of this file; use api_key_env, api_key_file, or api_key_cmd.
 
 [backend]
-# OpenAI-compatible chat/completions endpoint.
+# OpenAI-compatible endpoint base URL. Scoot speaks ONLY the OpenAI Responses
+# API (/v1/responses); the backend must serve it. Local servers that support it
+# include Ollama >= 0.13.3 and vLLM (both stateless). A Chat-Completions-only
+# server must sit behind a Responses-compatible gateway.
 # Default local Ollama-compatible endpoint:
 base_url = "http://127.0.0.1:11434/v1"
 
 # Model name sent to the backend.
 model = "qwen2.5"
+
+# Ask the backend to persist the response server-side via the Responses API
+# `store` flag. Off by default to keep Scoot stateless and local-first: the
+# full input is resent each turn so local context compaction stays in control.
+# store = false
 
 # Environment variable used as the first API token source.
 # The value of this environment variable is never written back to disk.
@@ -31,17 +39,12 @@ api_key_env = "OPENAI_API_KEY"
 # Omit this field to scan system root certificates.
 # ca_file = "/etc/ssl/certs/ca-certificates.crt"
 
-# Prompt-cache hint mode: "off" (default) or "anthropic".
-#   off       — no cache markers; request body is byte-identical to legacy.
-#               OpenAI / vLLM / SGLang auto-cache stable prefixes, so leave it off.
-#   anthropic — tag the stable instruction prefix (leading system block) with an
-#               Anthropic-style cache_control breakpoint so the fixed prefix bills
-#               at the cache rate. Enable only on Anthropic-compatible gateways.
-# prompt_cache = "off"
+# Prompt caching needs no configuration: leading system messages are sent as the
+# Responses API top-level `instructions`, which providers cache automatically.
 
-# Optional extra request body fields merged into chat/completions JSON.
+# Optional extra request body fields merged into the model request JSON.
 # Omit the whole [backend.extra_body] table when no extra fields are needed.
-# Do not put secrets here. Do not override core fields like model/messages.
+# Do not put secrets here. Do not override core fields like model/input.
 #
 # [backend.extra_body]
 # service_tier = "priority"

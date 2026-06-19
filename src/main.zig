@@ -252,6 +252,11 @@ pub fn main(init: std.process.Init) !void {
             err_out.print("warning: config contains unrecognized key `{s}`, ignored and defaulted (check spelling).\n", .{k}) catch {};
         err_out.flush() catch {};
     }
+    if (load_report.deprecated_keys.len > 0) {
+        for (load_report.deprecated_keys) |k|
+            err_out.print("warning: config key `{s}` was removed and is ignored; Scoot now speaks only the OpenAI Responses API (issue #110).\n", .{k}) catch {};
+        err_out.flush() catch {};
+    }
 
     // SCOOT_* env overrides with priority env > config file > defaults. Supports
     // CI/zero-config temporary runs. Plaintext secrets are not read here; they
@@ -280,8 +285,8 @@ pub fn main(init: std.process.Init) !void {
         try out.print("Backend:       {s} (model={s})\n", .{ cfg.backend.base_url, cfg.backend.model });
         if (cfg.backend.ca_file) |ca| try out.print("  CA:       {s}\n", .{ca});
         if (cfg.backend.extra_body) |eb| try out.print("  extra fields: {f}\n", .{std.json.fmt(eb, .{})});
-        if (!std.mem.eql(u8, cfg.backend.prompt_cache, "off"))
-            try out.print("  prompt cache: {s}\n", .{cfg.backend.prompt_cache});
+        if (cfg.backend.store)
+            try out.print("  store: server-side response storage enabled\n", .{});
         try out.print("token source: env[{s}] > file > cmd (plaintext is not stored)\n", .{cfg.backend.api_key_env});
         return;
     }
@@ -380,7 +385,7 @@ pub fn main(init: std.process.Init) !void {
                 try err_out.print("[scoot] backend call failed: {s}\n", .{@errorName(err)});
                 try printBackendErrorDetail(err_out, &client);
                 try err_out.print(
-                    "        Backend {s} (model={s}). Make sure the OpenAI-compatible service is running; set {s} if needed.\n",
+                    "        Backend {s} (model={s}). Make sure the OpenAI-compatible Responses service is running; set {s} if needed.\n",
                     .{ cfg.backend.base_url, cfg.backend.model, cfg.backend.api_key_env },
                 );
                 try err_out.flush();
@@ -1763,7 +1768,7 @@ fn initBackendClient(
     var client = scoot.llm.Client.init(io, cfg.backend.base_url, cfg.backend.model, token);
     client.ca_file = cfg.backend.ca_file;
     client.extra_body = cfg.backend.extra_body;
-    client.prompt_cache = scoot.llm.PromptCache.parse(cfg.backend.prompt_cache);
+    client.model_ctx.store = cfg.backend.store;
     return client;
 }
 

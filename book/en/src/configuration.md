@@ -45,7 +45,7 @@ ephemeral, run-once-then-discard execution.
 | `SCOOT_BACKEND_API_KEY_FILE` | `backend.api_key_file` | string |
 | `SCOOT_BACKEND_API_KEY_CMD` | `backend.api_key_cmd` | string |
 | `SCOOT_BACKEND_CA_FILE` | `backend.ca_file` | string |
-| `SCOOT_BACKEND_PROMPT_CACHE` | `backend.prompt_cache` | string (`off` / `anthropic`) |
+| `SCOOT_BACKEND_STORE` | `backend.store` | bool (`true`/`false`/`1`/`0`) |
 | `SCOOT_BACKEND_EXTRA_BODY` | `backend.extra_body` | JSON object |
 | `SCOOT_AGENT_DEFAULT_MODE` | `agent.default_mode` | string (`goal`/`plan`) |
 | `SCOOT_AGENT_COMPACTOR` | `agent.compactor` | string (`drop`/`extractive`) |
@@ -118,8 +118,10 @@ Either way no secret is ever written to disk.
 
 ## `[backend]`
 
-The LLM backend. Scoot speaks **only** the OpenAI-compatible `chat/completions`
-protocol.
+The LLM backend. Scoot speaks **only** the OpenAI-compatible Responses API
+(`/v1/responses`).
+By default Scoot resends the full `input` each turn so local context compaction
+stays effective and token use stays bounded.
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -129,35 +131,22 @@ protocol.
 | `api_key_file` | string? | unset → `~/.scoot/token` | Path to a `0600` token file. Used after the env source. |
 | `api_key_cmd` | string? | unset | Command that prints a token (e.g. `pass show openai`). Used last. |
 | `ca_file` | string? | unset → system roots | PEM CA bundle for HTTPS. Set this on systems lacking root certs. |
-| `prompt_cache` | string | `off` | Prompt-cache hint mode: `off` or `anthropic`. See below. |
+| `store` | bool | `false` | Ask the backend to persist the response server-side via the Responses API `store` flag. Off by default to keep scoot stateless and local-first. |
 | `extra_body` | table? | unset | Extra top-level JSON fields merged into every request. |
-
-### `prompt_cache`
-
-Controls whether the request body carries a prompt-cache breakpoint so the
-**stable instruction prefix** (the leading `system` block — system prompt, tool
-docs, skill list; re-sent every turn) bills at the cache rate instead of being
-recomputed at full price each turn.
-
-- `off` (default) — no cache markers; the request body is **byte-identical** to
-  the legacy shape. OpenAI / vLLM / SGLang auto-cache stable prefixes, so leave
-  it off (and avoid strict backends rejecting unknown fields).
-- `anthropic` — tag the leading `system` block's content with an Anthropic-style
-  `cache_control: {type: ephemeral}` breakpoint. Enable **only** on
-  Anthropic-compatible gateways. Unknown values fall back to `off`.
 
 ### `[backend.extra_body]`
 
-A pass-through table merged verbatim into the top-level `chat/completions` JSON.
+A pass-through table merged verbatim into the top-level model request JSON.
 Use it for backend-specific or newer fields without recompiling — e.g.
 `reasoning_effort`, `service_tier`, `top_p`. Only a JSON **object** is accepted;
 non-object values are ignored. **Never put secrets here**, and do not override
-core fields like `model` or `messages`.
+core fields like `model`, `messages`, or `input`.
 
 ```toml
 [backend]
 base_url = "https://api.openai.com/v1"
 model    = "gpt-4o-mini"
+# store = false
 api_key_env = "OPENAI_API_KEY"
 
 [backend.extra_body]

@@ -26,19 +26,15 @@ pub const Backend = struct {
     /// a CA bundle and point here.
     ca_file: ?[]const u8 = null,
     /// Dynamic extra request-body fields passed through into the top-level
-    /// chat/completions JSON. This supports backend-specific or newly added
-    /// fields without a Zig field for each one, such as Azure `service_tier`,
+    /// model request JSON. This supports backend-specific or newly added fields
+    /// without a Zig field for each one, such as Azure `service_tier`,
     /// reasoning-model `reasoning_effort`, or `top_p`. Only JSON objects are
     /// accepted; non-objects are ignored. Plaintext secrets are forbidden here.
     extra_body: ?std.json.Value = null,
-    /// Prompt-cache hint mode (issue #72): `off` by default, or `anthropic`.
-    /// `off` sends no cache markers and preserves old byte-for-byte behavior;
-    /// backends such as OpenAI, vLLM, or SGLang that auto-cache stable prefixes
-    /// do not need extra fields. `anthropic` adds Anthropic-style cache_control
-    /// breakpoints to stable instruction prefixes, charging fixed prefixes at
-    /// cache rates. Enable only on Anthropic-compatible gateways. Unknown values
-    /// fall back to off. See llm.PromptCache.
-    prompt_cache: []const u8 = "off",
+    /// Whether to ask the backend to persist responses server-side via the
+    /// Responses API `store` flag (issue #110). Off by default to keep model
+    /// context local and auditable; transport stays stateless either way.
+    store: bool = false,
 };
 
 /// Cognitive engine configuration.
@@ -179,6 +175,9 @@ pub const LoadReport = struct {
     /// Unknown config keys as dotted paths, collected because ignore_unknown_fields
     /// silently drops them and falls back to defaults.
     unknown_keys: []const []const u8 = &.{},
+    /// Keys that Scoot used to recognize but has removed, as dotted paths. Surfaced
+    /// separately from misspellings so upgrade warnings can be clear (issue #110).
+    deprecated_keys: []const []const u8 = &.{},
     /// SCOOT_* env overrides ignored due to invalid types, with variable and reason.
     env_warnings: []const []const u8 = &.{},
 };
@@ -191,6 +190,27 @@ fn collectUnknownKeys(arena: std.mem.Allocator, value: std.json.Value) std.mem.A
     var list: std.ArrayList([]const u8) = .empty;
     if (value == .object) try checkObjectKeys(FileConfig, arena, value.object, "", &list);
     return list.items;
+}
+
+/// Config keys removed by Scoot, kept here so an upgrade surfaces a clear
+/// "removed" warning instead of a misleading "check spelling" one (issue #110).
+const removed_keys = [_][]const u8{ "backend.api", "backend.prompt_cache" };
+
+fn isRemovedKey(k: []const u8) bool {
+    for (removed_keys) |r| if (std.mem.eql(u8, k, r)) return true;
+    return false;
+}
+
+/// Splits collected unknown keys into genuinely unknown (likely misspellings) and
+/// deprecated/removed keys, recording each into the report.
+fn classifyUnknownKeys(arena: std.mem.Allocator, all: []const []const u8, r: *LoadReport) std.mem.Allocator.Error!void {
+    var unknown: std.ArrayList([]const u8) = .empty;
+    var deprecated: std.ArrayList([]const u8) = .empty;
+    for (all) |k| {
+        if (isRemovedKey(k)) try deprecated.append(arena, k) else try unknown.append(arena, k);
+    }
+    r.unknown_keys = unknown.items;
+    r.deprecated_keys = deprecated.items;
 }
 
 fn checkObjectKeys(
@@ -332,7 +352,7 @@ fn parseFileConfig(arena: std.mem.Allocator, bytes: []const u8, report: ?*LoadRe
     // Diagnostics only: parse again as Value to collect unknown keys best-effort.
     if (report) |r| {
         if (std.json.parseFromSliceLeaky(std.json.Value, arena, trimmed, .{})) |value| {
-            r.unknown_keys = try collectUnknownKeys(arena, value);
+            try classifyUnknownKeys(arena, try collectUnknownKeys(arena, value), r);
         } else |_| {}
     }
     return fc;
@@ -354,7 +374,7 @@ fn parseTomlConfig(arena: std.mem.Allocator, bytes: []const u8, report: ?*LoadRe
             return error.InvalidConfig;
         },
     };
-    if (report) |r| r.unknown_keys = try collectUnknownKeys(arena, value); // Report misspelled keys.
+    if (report) |r| try classifyUnknownKeys(arena, try collectUnknownKeys(arena, value), r); // Report misspelled/removed keys.
     return std.json.parseFromValueLeaky(FileConfig, arena, value, .{
         .ignore_unknown_fields = true,
     }) catch |err| switch (err) {
@@ -457,7 +477,7 @@ pub const Config = struct {
         if (envVal(env, "SCOOT_BACKEND_API_KEY_FILE")) |v| self.backend.api_key_file = try arena.dupe(u8, v);
         if (envVal(env, "SCOOT_BACKEND_API_KEY_CMD")) |v| self.backend.api_key_cmd = try arena.dupe(u8, v);
         if (envVal(env, "SCOOT_BACKEND_CA_FILE")) |v| self.backend.ca_file = try arena.dupe(u8, v);
-        if (envVal(env, "SCOOT_BACKEND_PROMPT_CACHE")) |v| self.backend.prompt_cache = try arena.dupe(u8, v);
+        try overrideEnvBool(env, "SCOOT_BACKEND_STORE", &self.backend.store, &warnings, arena);
         if (envVal(env, "SCOOT_BACKEND_EXTRA_BODY")) |v| {
             if (std.json.parseFromSliceLeaky(std.json.Value, arena, v, .{})) |parsed| {
                 if (parsed == .object)
@@ -573,6 +593,7 @@ test "parseTomlConfig: TOML to FileConfig with extra_body passthrough and per-se
         \\[backend]
         \\base_url = "https://x.azure.com/openai/v1"
         \\model = "gpt-5.5"
+        \\store = true
         \\api_key_env = "WJT_AZURE_OPENAI_API_KEY"
         \\
         \\[backend.extra_body]
@@ -588,6 +609,7 @@ test "parseTomlConfig: TOML to FileConfig with extra_body passthrough and per-se
     const fc = try parseTomlConfig(arena.allocator(), src, null);
     try std.testing.expectEqualStrings("https://x.azure.com/openai/v1", fc.backend.base_url);
     try std.testing.expectEqualStrings("gpt-5.5", fc.backend.model);
+    try std.testing.expectEqual(true, fc.backend.store);
     try std.testing.expectEqualStrings("WJT_AZURE_OPENAI_API_KEY", fc.backend.api_key_env);
     try std.testing.expectEqualStrings("guarded", fc.tools.policy);
     try std.testing.expectEqual(true, fc.skills.include_agents_skills);
@@ -655,6 +677,33 @@ test "parseTomlConfig: misspelled keys are collected for warnings and defaulted(
     try std.testing.expect(saw_polcy and saw_modle);
 }
 
+test "parseConfig: removed keys api/prompt_cache report as deprecated, not unknown(issue #110)" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const src =
+        \\[backend]
+        \\base_url = "https://h/v1"
+        \\api = "responses"
+        \\prompt_cache = "anthropic"
+        \\modle = "x"
+    ;
+    var report: LoadReport = .{};
+    const fc = try parseTomlConfig(arena.allocator(), src, &report);
+    // Removed keys are ignored without changing behavior.
+    try std.testing.expectEqualStrings("https://h/v1", fc.backend.base_url);
+    // api/prompt_cache are surfaced as deprecated; the misspelling stays unknown.
+    try std.testing.expectEqual(@as(usize, 2), report.deprecated_keys.len);
+    try std.testing.expectEqual(@as(usize, 1), report.unknown_keys.len);
+    try std.testing.expectEqualStrings("backend.modle", report.unknown_keys[0]);
+    var saw_api = false;
+    var saw_cache = false;
+    for (report.deprecated_keys) |k| {
+        if (std.mem.eql(u8, k, "backend.api")) saw_api = true;
+        if (std.mem.eql(u8, k, "backend.prompt_cache")) saw_cache = true;
+    }
+    try std.testing.expect(saw_api and saw_cache);
+}
+
 test "parseTomlConfig: valid keys and free-form extra_body/array-of-tables content do not warn(issue #45)" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
@@ -691,6 +740,7 @@ test "parseFileConfig: empty object falls back to defaults" {
     defer arena.deinit();
     const fc = try parseFileConfig(arena.allocator(), "{}", null);
     try std.testing.expectEqualStrings("http://127.0.0.1:11434/v1", fc.backend.base_url);
+    try std.testing.expectEqual(false, fc.backend.store);
     try std.testing.expectEqualStrings("OPENAI_API_KEY", fc.backend.api_key_env);
 }
 
@@ -857,7 +907,7 @@ test "applyEnvOverrides: string fields override backend and tools" {
     defer map.deinit();
     try map.put("SCOOT_BACKEND_BASE_URL", "https://example.test/v1");
     try map.put("SCOOT_BACKEND_MODEL", "gpt-override");
-    try map.put("SCOOT_BACKEND_PROMPT_CACHE", "anthropic");
+    try map.put("SCOOT_BACKEND_STORE", "true");
     try map.put("SCOOT_TOOLS_POLICY", "readonly");
 
     var cfg: Config = .{ .dirs = undefined };
@@ -866,7 +916,7 @@ test "applyEnvOverrides: string fields override backend and tools" {
 
     try std.testing.expectEqualStrings("https://example.test/v1", cfg.backend.base_url);
     try std.testing.expectEqualStrings("gpt-override", cfg.backend.model);
-    try std.testing.expectEqualStrings("anthropic", cfg.backend.prompt_cache);
+    try std.testing.expectEqual(true, cfg.backend.store);
     try std.testing.expectEqualStrings("readonly", cfg.tools.policy);
     try std.testing.expectEqual(@as(usize, 0), report.env_warnings.len);
 }
@@ -890,8 +940,15 @@ test "applyEnvOverrides: invalid enum string warns and keeps original value" {
     try std.testing.expectEqualStrings("guarded", cfg.tools.policy);
     try std.testing.expectEqualStrings("info", cfg.audit.level);
     try std.testing.expectEqual(@as(usize, 4), report.env_warnings.len);
-    try std.testing.expect(std.mem.indexOf(u8, report.env_warnings[1], "SCOOT_AGENT_COMPACTOR") != null);
-    try std.testing.expect(std.mem.indexOf(u8, report.env_warnings[2], "SCOOT_TOOLS_POLICY") != null);
+    var saw_compactor = false;
+    var saw_audit = false;
+    var saw_tools_policy = false;
+    for (report.env_warnings) |w| {
+        if (std.mem.indexOf(u8, w, "SCOOT_AGENT_COMPACTOR") != null) saw_compactor = true;
+        if (std.mem.indexOf(u8, w, "SCOOT_AUDIT_LEVEL") != null) saw_audit = true;
+        if (std.mem.indexOf(u8, w, "SCOOT_TOOLS_POLICY") != null) saw_tools_policy = true;
+    }
+    try std.testing.expect(saw_compactor and saw_audit and saw_tools_policy);
 }
 
 test "applyEnvOverrides: integer/bool fields parse" {

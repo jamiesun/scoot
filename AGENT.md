@@ -71,7 +71,7 @@ cp book/site-index.html site/index.html
 | `src/config.zig` | Structured config: backend, agent, tools, skills, audit, schedule |
 | `src/toml.zig` | Zero-dependency TOML subset parser |
 | `src/secret.zig` | Secret loading from env, 0600 token file, or credential command |
-| `src/llm.zig` | OpenAI-compatible `/v1/chat/completions` client with JSON schema output |
+| `src/llm.zig` | OpenAI-compatible Responses API (`/v1/responses`) client with strict JSON schema output |
 | `src/jsonio.zig` | Shared JSON string escaping |
 | `src/skill.zig` | Skill discovery and progressive disclosure |
 | `src/session.zig` | Short-term session message storage and JSONL persistence |
@@ -120,7 +120,7 @@ Long-running stability matters more than feature count.
 Changing these boundaries requires an explicit roadmap-level decision.
 
 1. No GUI, web UI, tray app, or desktop app.
-2. Only OpenAI-compatible API shape is supported. Do not add provider-specific protocol glue.
+2. Only the OpenAI-compatible Responses API (`/v1/responses`) shape is supported. Do not add Chat Completions or provider-specific protocol glue.
 3. No complex cloud sync. State stays local.
 4. Never execute unvalidated model output.
 5. Do not trade the small single-binary design for feature count.

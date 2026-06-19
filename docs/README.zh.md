@@ -20,7 +20,7 @@ OpenAI 兼容模型后端，让模型输出结构化 ReACT 步骤，再通过策
 | --- | --- |
 | 在终端里运行 Agent | 一个自包含二进制，同时支持单次任务和 REPL。 |
 | 状态保存在本地 | 配置、会话、技能、日志和 daemon 状态默认位于 `~/.scoot`。 |
-| 复用现有模型基础设施 | 支持本地或云端 OpenAI 兼容 `chat/completions` 后端。 |
+| 复用现有模型基础设施 | 支持本地或云端 OpenAI 兼容 Responses API 后端（Ollama >= 0.13.3、vLLM、OpenAI）。 |
 | 降低误操作风险 | 所有工具调用经过 `guarded`、`readonly` 或 `unrestricted` 策略检查。 |
 | 事后可审计 | Agent 步骤和工具决策都会落成本地 JSONL 状态。 |
 | 扩展行为 | 从本地目录发现 skills，并在需要时渐进式读取。 |
@@ -120,7 +120,8 @@ mkdir -p ~/.scoot
 cp config.example.toml ~/.scoot/config.toml
 ```
 
-编辑 `[backend]`，指向你的 OpenAI 兼容后端：
+编辑 `[backend]`，指向你的 OpenAI 兼容后端。Scoot 只讲 Responses API
+（`/v1/responses`），后端必须提供该接口（Ollama >= 0.13.3、vLLM 或 OpenAI）：
 
 ```toml
 [backend]

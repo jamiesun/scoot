@@ -37,7 +37,7 @@ Scoot should be:
 - **A policy-gated local executor.** File, search, shell, HTTP, skill, and
   parallel actions are validated and routed through explicit policy decisions.
 - **OpenAI-compatible at the boundary.** Local and hosted backends work as long
-  as they speak the OpenAI-compatible `chat/completions` shape.
+  as they speak the OpenAI-compatible Responses API (`/v1/responses`).
 - **Useful on small machines.** The Zig implementation, low dependency count,
   explicit allocation, and cross-compilation story are meant to fit edge hosts,
   NAS boxes, lab machines, and small servers.

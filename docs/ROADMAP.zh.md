@@ -68,7 +68,7 @@ Scoot 是一个运行在纯文本环境下的轻量级 AI Agent 守护进程（D
   对 `bash`、`grep`、`glob`、`file_read`、`file_write`、`file_edit`、`http_request` 的底层封装，构成 Agent 可调用的执行原语，**全部进程内自包含、零外部命令依赖**（裁剪 / 嵌入式 Linux 可用）。`bash`（`src/tools/bash.zig`）经 `/bin/sh -c` 执行、**硬超时**强制终止、输出上限与可选 cwd 沙盒；`file_*`（`src/tools/file.zig`）进程内读 / 覆盖写 / 唯一匹配编辑，自带大小上限；`grep`/`glob`（`src/tools/search.zig`）—— grep 走**自研 Thompson NFA 正则引擎**（`src/regex.zig`，线性时间、ReDoS 免疫，不依赖第三方正则），glob 走 `std.fs` 遍历；`http_request`（`src/tools/http.zig`）发 HTTP/HTTPS、**`std.Io.Select` 竞速硬超时**（真正中断挂死连接）、可配 CA。各工具均有单元测试守护（含黑洞地址超时实测）。
 
 - **✅🚧 OpenAI 协议适配（API Integration）**
-  仅对接 `/v1/chat/completions`；强制开启 `response_format: { type: "json_schema" }` 与 `strict: true`，从协议层把模型输出约束成结构化数据。`src/llm.zig` 已实现真实 HTTP 往返（`std.http.Client.fetch`）、紧凑请求体构造（强制 `json_schema` + `strict:true`，有测试验证）、防弹响应解析（`std.json` 容错，结构不符即 `MalformedResponse` 不 panic）与**可配 CA**（嵌入式 HTTPS-to-LLM）。🚧 流式（`stream`）与后端原生 Tool Calling 字段刻意不做——ReACT 经 `response_format` 约束结构化输出，对本地小模型更稳健（见「方向与意图」）。
+  只讲 OpenAI 兼容 Responses API（`/v1/responses`）：起始 system 消息映射为顶层 `instructions`，其余进入 `input` 数组，并强制结构化 JSON Schema 输出，从协议层把模型输出约束成结构化数据。传输默认无状态（`store=false`，每轮重发完整 `input`），让本地上下文压缩始终掌控全局。`src/llm.zig` 已实现真实 HTTP 往返（`std.http.Client.fetch`）、紧凑请求体构造（`text.format=json_schema`、`strict:true`，有测试验证）、防弹响应解析（`std.json` 容错，结构不符即 `MalformedResponse` 不 panic）与**可配 CA**（嵌入式 HTTPS-to-LLM）。可服务该接口的本地后端包括 Ollama >= 0.13.3 与 vLLM。🚧 流式（`stream`）与后端原生 Tool Calling 字段刻意不做——ReACT 经结构化输出约束推进，对本地小模型更稳健（见「方向与意图」）。
 
 - **✅ 调度引擎（Scheduler）**
   基于时间循环的触发器，支持 `every`（间隔）、`at`（固定时间点）与 5 字段 UTC `cron`（分钟/小时/日/月/周，支持 `*`、列表、范围和步进）——`src/schedule.zig` 已实现：`dueAt` 纯函数到点判定（时间可注入，便于防弹单测）、`tick`/`runForever` 守护循环（真实单调时钟，`--ticks N` 支持有界运行）。`scoot schedule list` 列出任务与**有效执行档**，`scoot schedule run` 进入守护循环到点唤起 Agent。**安全前置（铁律 #1）**：被调度 job 是无人在场的自主执行，故默认强制 `readonly` 安全档，`guarded` 绊线一律由 `effectiveMode` 矫正为 `readonly`（结构性保证，无人值守绝不跑在 guarded 之上）；用户可显式 `unrestricted`（自担风险，仍全程审计）。每个 job 用可重置 arena 承载 scratch，跑完即回收以保长效零泄漏。`schedule.enabled` 默认关闭，自主无人值守必须显式开启。
@@ -102,7 +102,7 @@ Scoot 是一个运行在纯文本环境下的轻量级 AI Agent 守护进程（D
 以下是不可越界的硬规则，除非用户明确修改边界，否则一律视为禁止项：
 
 - **绝不引入图形界面。** 不做任何 Web UI、桌面 GUI 或系统托盘。一切交互通过 CLI 与配置文件完成——这是“轻量、无冗余”的直接体现。
-- **绝不适配非标准 API。** 不为 Anthropic、Google 等非 OpenAI 格式的接口编写胶水代码。所有 LLM 后端必须经统一的 OpenAI 兼容接口接入（本地模型服务自带兼容层或外部网关自行抹平差异），避免多协议带来的维护熵增。
+- **绝不适配非标准 API。** 不为 Chat Completions、Anthropic、Google 等非 OpenAI Responses 格式的接口编写胶水代码。所有 LLM 后端必须经 OpenAI 兼容 Responses API（`/v1/responses`）接入（本地模型服务自带兼容层或外部网关自行抹平差异），避免多协议带来的维护熵增。
 - **绝不搞复杂的云端同步。** 不引入远程数据库，不做端到端加密的状态同步，不与任何特定网络栈强耦合。状态数据严格留在本地。
 - **绝不信任模型输出。** 任何未经 Schema 校验的模型响应都不得直接作为系统命令执行；校验不通过即拒绝并回灌错误，而非将就放行。
 - **绝不为功能数量牺牲单体简洁。** 不堆叠重型运行时、不做需要动态链接 / 加载原生代码的二进制插件体系；新增能力若会破坏“单文件、零臃肿依赖”的底盘，就不做。（注：Skill 机制加载的是**指令与数据**及经沙盒执行的脚本，不是可动态链接的原生插件，二者不冲突。）
