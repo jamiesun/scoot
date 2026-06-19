@@ -21,6 +21,17 @@ scoot [options] [command]
 
 ## 命令
 
+### 选择运行模式
+
+| 模式 | 工作来源 | 退出行为 | 什么时候用 |
+| --- | --- | --- | --- |
+| `scoot -e "<goal>"` | 命令行 prompt。 | 返回一个答案后退出。 | 要立即执行一个任务。 |
+| `scoot schedule run --ticks 1` | 配置里的 `[[schedule.jobs]]`。 | 轮询一次调度器后退出。 | cron、systemd timer 或 CI 负责调度时间。 |
+| `scoot daemon run` | 配置里的 `[[schedule.jobs]]`。 | 默认持续运行。 | Scoot 负责调度循环，外部 supervisor 负责保活。 |
+
+`daemon run` 不是 `-e` 的快捷写法：它不接收命令行里的临时 prompt，而是加载
+配置任务、检查触发器、写入 daemon pid/state 文件，并使用无人值守任务的安全规则。
+
 ### `repl`（默认）
 
 ```sh

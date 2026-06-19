@@ -25,6 +25,7 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 - 运行目录与 JSONL 审计/会话文件改为属主可读写，并对 JSONL 文件做有界 `.1` 轮转（#60、#61）
 - GitHub workflow 改用 Node 24 兼容 actions，并用 shell 安装 Zig，避免 Node 20 action 告警（#63）
 - `build_options` 同时导入可执行文件 root module 与库模块（#64）
+- `parseStep` 现在容忍兼容后端用 Markdown 代码块包裹步骤 JSON、或一次连续输出多个 JSON 对象，只执行第一个步骤，保持单步 ReACT 语义
 
 ### 修复
 

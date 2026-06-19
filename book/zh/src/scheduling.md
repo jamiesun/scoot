@@ -2,6 +2,27 @@
 
 Scoot 可通过前台守护循环运行**无人值守**的调度任务。自主执行**默认关闭** —— 必须显式启用。完整的生命周期/恢复参考见 [`docs/DAEMON.md`](https://github.com/jamiesun/scoot/blob/main/docs/DAEMON.md)。
 
+## 应该使用哪种模式
+
+在 `-e`、`schedule run` 和 `daemon run` 之间选择时，先看这张表：
+
+| 模式 | 是否读取配置任务 | 默认是否常驻 | 触发时间由谁负责 | 适用场景 |
+| --- | --- | --- | --- | --- |
+| `scoot -e "<goal>"` | 否 | 否 | 调用方 | 人或脚本要执行一个即时任务。 |
+| `scoot schedule run --ticks 1` | 是 | 否 | cron、systemd timer、CI | 外部调度器周期性唤起 Scoot。 |
+| `scoot schedule run` | 是 | 是 | 当前终端或进程管理器 | 简单前台调度循环，不需要 daemon 状态文件。 |
+| `scoot daemon run` | 是 | 是 | Scoot 循环 + systemd/launchd 等托管 | 长期无人值守调度，并需要 pid/state/stop/status 支持。 |
+
+`-e` 和 scheduled execution 是不同入口。`-e` 会立即运行命令行传入的 prompt，
+并使用普通配置里的工具策略。调度任务来自 `[[schedule.jobs]]`，由 `every_sec`、
+`at_unix` 或 `cron` 触发，并使用无人值守安全规则：job 的 mode 默认是
+`readonly`，`guarded` 会被矫正为有效 `readonly`。
+
+只有当你需要进程托管时，`systemd` 才有意义。使用 `scoot daemon run` 时，
+Scoot 负责调度循环，systemd 负责启动、重启、日志、环境变量、资源限制和
+SIGTERM 停止。如果你希望 systemd 也负责触发时间，请使用 systemd timer 调用
+`scoot schedule run --ticks 1`。
+
 ## 启用调度
 
 ```toml

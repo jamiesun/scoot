@@ -5,6 +5,7 @@
 # 用户指南
 
 - [安装](installation.md)
+- [设计理念](design-philosophy.md)
 - [配置](configuration.md)
 - [CLI 参考](cli.md)
 - [内建工具](tools.md)
@@ -13,6 +14,7 @@
 - [调度与守护进程](scheduling.md)
 - [会话与审计](sessions.md)
 - [Wasm 工具包](wasm-tools.md)
+- [最佳实践案例](best-practices.md)
 - [故障排查与 FAQ](troubleshooting.md)
 
 # 项目

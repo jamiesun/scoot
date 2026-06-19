@@ -4,6 +4,12 @@ Scoot's daemon mode is a foreground long-running process for scheduled jobs. It
 does not fork into the background; use a supervisor such as `systemd`, `launchd`,
 `tmux`, or a shell job when background ownership is needed.
 
+Daemon mode is for configured scheduled jobs, not for an ad hoc single prompt.
+Use `scoot -e "<goal>"` when you want one immediate task. Use `scoot daemon run`
+when `[[schedule.jobs]]` should be polled continuously and you want pid/state,
+`daemon status`, and `daemon stop` support. If an external scheduler should own
+the timing, prefer `scoot schedule run --ticks 1`.
+
 ## Commands
 
 ```sh
@@ -17,8 +23,8 @@ scoot daemon stop
 writes lifecycle state under the Scoot runtime directory, installs SIGTERM/SIGINT
 handlers, and runs the same unattended schedule loop as `schedule run`.
 
-`daemon status` prints the last recorded daemon state. It reports Scoot's own
-state file and pid file; it does not probe process liveness.
+`daemon status` prints the last recorded daemon state, reports Scoot's own state
+file and pid file, and probes the recorded pid when one is available.
 
 `daemon stop` reads `state/daemon.pid` and sends SIGTERM. The running daemon
 finishes the current tick, writes a stopped state, and removes the pid file. If a

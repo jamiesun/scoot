@@ -22,6 +22,18 @@ overridden with `--scoot-home` or `SCOOT_HOME`.
 
 ## Commands
 
+### Choosing A Run Mode
+
+| Mode | Source of work | Exit behavior | Use when |
+| --- | --- | --- | --- |
+| `scoot -e "<goal>"` | Command-line prompt. | Exits after one answer. | You want one immediate task. |
+| `scoot schedule run --ticks 1` | Configured `[[schedule.jobs]]`. | Exits after one scheduler poll. | cron, systemd timer, or CI owns the schedule. |
+| `scoot daemon run` | Configured `[[schedule.jobs]]`. | Runs forever by default. | Scoot owns the schedule loop and a supervisor keeps it alive. |
+
+`daemon run` is not a shortcut for `-e`: it never takes an ad hoc prompt from
+the command line. It loads configured jobs, checks their triggers, writes
+daemon pid/state files, and applies unattended job safety rules.
+
 ### `repl` (default)
 
 ```sh
