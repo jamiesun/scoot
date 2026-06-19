@@ -4,6 +4,7 @@
 //! 内置策略保持有限：`drop` 是旧行为与兜底地板，`extractive` 是确定式滚动纪要。
 const std = @import("std");
 const llm = @import("llm.zig");
+const jsonio = @import("jsonio.zig");
 const session = @import("session.zig");
 
 pub const Options = struct {
@@ -95,11 +96,11 @@ fn buildDropMarker(
 }
 
 const Extract = struct {
-    commands: std.ArrayList([]const u8) = .empty,
-    reads: std.ArrayList([]const u8) = .empty,
-    writes: std.ArrayList([]const u8) = .empty,
-    denials: std.ArrayList([]const u8) = .empty,
-    notes: std.ArrayList([]const u8) = .empty,
+    commands: Category = .{},
+    reads: Category = .{},
+    writes: Category = .{},
+    denials: Category = .{},
+    notes: Category = .{},
 
     fn collect(self: *Extract, arena: std.mem.Allocator, dropped: []const llm.Message) !void {
         var pending_command: ?[]const u8 = null;
@@ -127,45 +128,60 @@ const Extract = struct {
             std.mem.eql(u8, step.action, "outline") or
             std.mem.eql(u8, step.action, "skill"))
         {
-            try appendActionInput(arena, &self.reads, step.action, step.action_input);
+            try self.reads.addActionInput(arena, step.action, step.action_input);
         } else if (std.mem.eql(u8, step.action, "file_write") or
             std.mem.eql(u8, step.action, "file_edit"))
         {
-            try appendActionInput(arena, &self.writes, step.action, step.action_input);
+            try self.writes.addActionInput(arena, step.action, step.action_input);
         } else if (std.mem.eql(u8, step.action, "http_request") or
             std.mem.eql(u8, step.action, "parallel"))
         {
-            try appendActionInput(arena, &self.notes, step.action, step.action_input);
+            try self.notes.addActionInput(arena, step.action, step.action_input);
         }
     }
 
     fn collectObservation(self: *Extract, arena: std.mem.Allocator, content: []const u8, pending_command: ?[]const u8) !void {
         const first = firstLine(content);
-        if (std.mem.indexOf(u8, content, "动作被执行护栏拒绝") != null or
-            std.mem.indexOf(u8, content, "policy") != null)
-        {
+        if (std.mem.indexOf(u8, content, "动作被执行护栏拒绝") != null) {
             if (pending_command) |cmd| {
-                try appendClipped(arena, &self.denials, try std.fmt.allocPrint(arena, "{s} -> {s}", .{ cmd, first }));
+                try self.denials.add(arena, try std.fmt.allocPrint(arena, "{s} -> {s}", .{ cmd, first }));
             } else {
-                try appendClipped(arena, &self.denials, first);
+                try self.denials.add(arena, first);
             }
         } else if (std.mem.startsWith(u8, content, "[观察] 工具执行失败")) {
-            try appendClipped(arena, &self.notes, first);
+            try self.notes.add(arena, first);
         } else if (pending_command) |cmd| {
             if (std.mem.startsWith(u8, content, "[观察] 退出码=")) {
-                try appendClipped(arena, &self.commands, try std.fmt.allocPrint(arena, "{s} -> {s}", .{ cmd, first }));
+                try self.commands.add(arena, try std.fmt.allocPrint(arena, "{s} -> {s}", .{ cmd, first }));
             } else {
-                try appendClipped(arena, &self.commands, cmd);
+                try self.commands.add(arena, cmd);
             }
         } else if (std.mem.startsWith(u8, content, "[观察] 已写入") or
             std.mem.startsWith(u8, content, "[观察] 已编辑"))
         {
-            try appendClipped(arena, &self.writes, first);
+            try self.writes.add(arena, first);
         } else if (std.mem.indexOf(u8, content, "TODO") != null or
             std.mem.indexOf(u8, content, "todo") != null)
         {
-            try appendClipped(arena, &self.notes, first);
+            try self.notes.add(arena, first);
         }
+    }
+};
+
+const Category = struct {
+    items: std.ArrayList([]const u8) = .empty,
+    total: usize = 0,
+
+    fn addActionInput(self: *Category, arena: std.mem.Allocator, action: []const u8, input: []const u8) !void {
+        try self.add(arena, try std.fmt.allocPrint(arena, "{s} {s}", .{ action, input }));
+    }
+
+    fn add(self: *Category, arena: std.mem.Allocator, text: []const u8) !void {
+        self.total += 1;
+        if (self.items.items.len >= max_extract_items) return;
+        const clean = oneLine(text);
+        const n = @min(clean.len, max_extract_item_bytes);
+        try self.items.append(arena, try arena.dupe(u8, clean[0..n]));
     }
 };
 
@@ -197,28 +213,28 @@ fn buildExtractiveMarker(
         "[历史压缩:extractive] 已折叠较早的 {d} 条消息（约 {d} 字节）。system 指令、原始任务与最近 {d} 条消息已保留；以下是确定式抽取纪要，不替代 transcript 原文。\n",
         .{ elided_count, elided_bytes, keep_recent },
     );
-    try appendSection(gpa, &out, "文件/检索", ex.reads.items);
-    try appendSection(gpa, &out, "文件变更", ex.writes.items);
-    try appendSection(gpa, &out, "命令", ex.commands.items);
-    try appendSection(gpa, &out, "拒绝/错误", ex.denials.items);
-    try appendSection(gpa, &out, "待办/观察", ex.notes.items);
-    if (ex.reads.items.len == 0 and ex.writes.items.len == 0 and ex.commands.items.len == 0 and
-        ex.denials.items.len == 0 and ex.notes.items.len == 0)
+    try appendSection(gpa, &out, "文件/检索", ex.reads);
+    try appendSection(gpa, &out, "文件变更", ex.writes);
+    try appendSection(gpa, &out, "命令", ex.commands);
+    try appendSection(gpa, &out, "拒绝/错误", ex.denials);
+    try appendSection(gpa, &out, "待办/观察", ex.notes);
+    if (ex.reads.total == 0 and ex.writes.total == 0 and ex.commands.total == 0 and
+        ex.denials.total == 0 and ex.notes.total == 0)
     {
         try out.appendSlice(gpa, "- 未抽取到稳定结构化事实；如需更早细节请从 transcript 取回。\n");
     }
     return out.toOwnedSlice(gpa);
 }
 
-fn appendSection(gpa: std.mem.Allocator, out: *std.ArrayList(u8), title: []const u8, items: []const []const u8) !void {
-    if (items.len == 0) return;
+fn appendSection(gpa: std.mem.Allocator, out: *std.ArrayList(u8), title: []const u8, category: Category) !void {
+    if (category.total == 0) return;
     try appendFmt(gpa, out, "- {s}：", .{title});
-    const n = @min(items.len, max_extract_items);
-    for (items[0..n], 0..) |item, i| {
+    const items = category.items.items;
+    for (items, 0..) |item, i| {
         if (i != 0) try out.appendSlice(gpa, "；");
         try out.appendSlice(gpa, item);
     }
-    if (items.len > n) try appendFmt(gpa, out, "；另 {d} 项", .{items.len - n});
+    if (category.total > items.len) try appendFmt(gpa, out, "；另 {d} 项", .{category.total - items.len});
     try out.append(gpa, '\n');
 }
 
@@ -229,62 +245,8 @@ fn appendFmt(gpa: std.mem.Allocator, out: *std.ArrayList(u8), comptime fmt: []co
 }
 
 fn parseStoredStep(arena: std.mem.Allocator, content: []const u8) !StoredStep {
-    const json = firstJsonObject(content) orelse return error.MalformedStep;
+    const json = jsonio.firstJsonObject(content) orelse return error.MalformedStep;
     return std.json.parseFromSliceLeaky(StoredStep, arena, json, .{ .ignore_unknown_fields = true }) catch error.MalformedStep;
-}
-
-fn firstJsonObject(content: []const u8) ?[]const u8 {
-    const trimmed = std.mem.trim(u8, content, " \t\r\n");
-    const body = unwrapJsonFence(trimmed);
-    if (body.len == 0 or body[0] != '{') return null;
-
-    var depth: usize = 0;
-    var in_string = false;
-    var escaped = false;
-    for (body, 0..) |c, i| {
-        if (in_string) {
-            if (escaped) {
-                escaped = false;
-            } else if (c == '\\') {
-                escaped = true;
-            } else if (c == '"') {
-                in_string = false;
-            }
-            continue;
-        }
-
-        switch (c) {
-            '"' => in_string = true,
-            '{' => depth += 1,
-            '}' => {
-                if (depth == 0) return null;
-                depth -= 1;
-                if (depth == 0) return body[0 .. i + 1];
-            },
-            else => {},
-        }
-    }
-    return null;
-}
-
-fn unwrapJsonFence(content: []const u8) []const u8 {
-    if (!std.mem.startsWith(u8, content, "```")) return content;
-    var rest = content[3..];
-    if (std.mem.startsWith(u8, rest, "json")) rest = rest[4..];
-    rest = std.mem.trim(u8, rest, " \t\r\n");
-    if (std.mem.endsWith(u8, rest, "```")) rest = rest[0 .. rest.len - 3];
-    return std.mem.trim(u8, rest, " \t\r\n");
-}
-
-fn appendActionInput(arena: std.mem.Allocator, list: *std.ArrayList([]const u8), action: []const u8, input: []const u8) !void {
-    try appendClipped(arena, list, try std.fmt.allocPrint(arena, "{s} {s}", .{ action, input }));
-}
-
-fn appendClipped(arena: std.mem.Allocator, list: *std.ArrayList([]const u8), text: []const u8) !void {
-    if (list.items.len >= max_extract_items + 1) return;
-    const clean = oneLine(text);
-    const n = @min(clean.len, max_extract_item_bytes);
-    try list.append(arena, try arena.dupe(u8, clean[0..n]));
 }
 
 fn oneLine(text: []const u8) []const u8 {
@@ -368,6 +330,35 @@ test "extractive: 抽取文件、命令与拒绝信号并保留首尾" {
     try std.testing.expect(std.mem.indexOf(u8, summary, "护栏拒绝") != null);
     try std.testing.expectEqualStrings("RECENT-A", s.items()[3].content);
     try std.testing.expectEqualStrings("RECENT-U", s.items()[4].content);
+}
+
+test "extractive: 溢出数量使用真实计数且 policy 普通输出不误判为拒绝" {
+    const gpa = std.testing.allocator;
+    var s = session.Session.init("c4");
+    defer s.deinit(gpa);
+
+    try s.append(gpa, .system, "SYS");
+    try s.append(gpa, .user, "GOAL");
+    var i: usize = 0;
+    while (i < 10) : (i += 1) {
+        const step = try std.fmt.allocPrint(gpa, "{{\"thought\":\"读\",\"action\":\"file_read\",\"action_input\":\"{{\\\"path\\\":\\\"f{d}.zig\\\"}}\"}}", .{i});
+        defer gpa.free(step);
+        try s.append(gpa, .assistant, step);
+        try s.append(gpa, .user, "[观察] 读取文件。");
+    }
+    try s.append(gpa, .assistant, "{\"thought\":\"查\",\"action\":\"bash\",\"action_input\":\"grep policy config.toml\"}");
+    try s.append(gpa, .user, "[观察] 退出码=0\n--- stdout ---\npolicy = \"guarded\"");
+    try s.append(gpa, .assistant, "RECENT-A");
+    try s.append(gpa, .user, "RECENT-U");
+
+    const c = Compressor{ .extractive = {} };
+    try std.testing.expect(try c.compact(gpa, &s, .{ .keep_recent = 2 }));
+
+    const summary = s.items()[2].content;
+    try std.testing.expect(std.mem.indexOf(u8, summary, "另 4 项") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "命令") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "grep policy config.toml") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "拒绝/错误") == null);
 }
 
 test "fromString: 未知策略回落 drop" {

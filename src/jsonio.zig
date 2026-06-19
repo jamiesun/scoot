@@ -24,6 +24,51 @@ pub fn writeString(w: *std.Io.Writer, s: []const u8) !void {
     try w.writeByte('"');
 }
 
+/// 取文本中的第一个完整顶层 JSON 对象。
+/// 可容忍兼容后端把对象包在 ```json fence``` 中，或在对象后继续输出其它文本。
+pub fn firstJsonObject(content: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, content, " \t\r\n");
+    const body = unwrapJsonFence(trimmed);
+    if (body.len == 0 or body[0] != '{') return null;
+
+    var depth: usize = 0;
+    var in_string = false;
+    var escaped = false;
+    for (body, 0..) |c, i| {
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+
+        switch (c) {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                if (depth == 0) return null;
+                depth -= 1;
+                if (depth == 0) return body[0 .. i + 1];
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+pub fn unwrapJsonFence(content: []const u8) []const u8 {
+    if (!std.mem.startsWith(u8, content, "```")) return content;
+    var rest = content[3..];
+    if (std.mem.startsWith(u8, rest, "json")) rest = rest[4..];
+    rest = std.mem.trim(u8, rest, " \t\r\n");
+    if (std.mem.endsWith(u8, rest, "```")) rest = rest[0 .. rest.len - 3];
+    return std.mem.trim(u8, rest, " \t\r\n");
+}
+
 test "writeString 转义并产出可被 std.json 回解的合法字符串" {
     const gpa = std.testing.allocator;
     var aw: std.Io.Writer.Allocating = .init(gpa);
@@ -32,6 +77,12 @@ test "writeString 转义并产出可被 std.json 回解的合法字符串" {
     const parsed = try std.json.parseFromSlice([]const u8, gpa, aw.writer.buffered(), .{});
     defer parsed.deinit();
     try std.testing.expectEqualStrings("a\"b\\c\n\t\x01 末", parsed.value);
+}
+
+test "firstJsonObject: 支持 fenced JSON 与连续对象" {
+    try std.testing.expectEqualStrings("{\"a\":1}", firstJsonObject("```json\n{\"a\":1}\n```").?);
+    try std.testing.expectEqualStrings("{\"a\":{\"b\":\"}\"}}", firstJsonObject("{\"a\":{\"b\":\"}\"}} trailing").?);
+    try std.testing.expect(firstJsonObject("not json") == null);
 }
 
 test {
