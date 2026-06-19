@@ -3,6 +3,10 @@
 English | [中文](docs/README.zh.md)
 
 <p align="center">
+  <img src="docs/assets/scoot-logo.svg" alt="Scoot logo" width="160">
+</p>
+
+<p align="center">
   <img src="docs/assets/scoot-infographic.png" alt="Scoot - local-first AI agent daemon and CLI in pure Zig" width="100%">
 </p>
 
@@ -301,6 +305,8 @@ mdbook build book/en
 mdbook build book/zh
 mkdir -p site
 cp book/site-index.html site/index.html
+mkdir -p site/assets
+cp docs/assets/scoot-logo.svg docs/assets/scoot-favicon.svg docs/assets/scoot-favicon.png site/assets/
 ```
 
 ## Repository Layout
