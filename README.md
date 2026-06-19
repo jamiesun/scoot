@@ -72,7 +72,7 @@ The core runtime is usable today:
 
 - `scoot -e` for one-shot tasks and `scoot` / `scoot repl` for interactive use.
 - Built-in tools for shell, file read/write/edit, regex search, globbing, file
-  outlines, HTTP, skills, and bounded parallel read calls.
+  outlines, HTTP, skills, transcript recall, and bounded parallel read calls.
 - Policy modes: `guarded` by default, `readonly` for fail-closed runs, and
   `unrestricted` when you deliberately accept full local access.
 - TOML-first configuration with JSON fallback and secret loading from an
@@ -270,6 +270,7 @@ currently covers:
 - `grep`, `glob`, and `outline` for project inspection.
 - `http_request` for one bounded HTTP/HTTPS request.
 - `skill` for reading trusted local skill instructions and resources.
+- `recall` for retrieving exact earlier messages from the current session transcript.
 - `parallel` for 1-4 independent read-only calls.
 - `final` for returning the answer.
 

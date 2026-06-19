@@ -16,13 +16,18 @@ const llm = @import("llm.zig");
 const jsonio = @import("jsonio.zig");
 const audit = @import("audit.zig");
 
-/// 一次会话。`messages` 由 Session 的分配器拥有，跨回合存活。
+/// 一次会话。`messages` 是当前要发给模型的活跃上下文；`archive` 是完整
+/// transcript 归档，用于召回与落盘。压缩只改 `messages`，不得丢失 `archive`。
 pub const Session = struct {
     /// 会话标识（建议用时间戳 / uuid）；用于持久化文件名与日志。
     /// 内存由调用方持有，需保证其生命周期 >= Session。
     id: []const u8,
-    /// 消息流；内容副本与节点均由传入的 gpa 拥有。
+    /// 活跃消息流；内容由 `archive` 或 `active_only` 拥有。
     messages: std.ArrayList(llm.Message) = .empty,
+    /// 完整消息归档；由 append/appendMessage 写入，拥有原始消息内容。
+    archive: std.ArrayList(llm.Message) = .empty,
+    /// 只存在于活跃上下文中的合成消息，例如压缩标记。它们不进入完整 transcript。
+    active_only: std.ArrayList([]const u8) = .empty,
 
     pub fn init(id: []const u8) Session {
         return .{ .id = id };
@@ -37,7 +42,10 @@ pub const Session = struct {
     ) !void {
         const owned = try gpa.dupe(u8, content);
         errdefer gpa.free(owned);
-        try self.messages.append(gpa, .{ .role = role, .content = owned });
+        const m: llm.Message = .{ .role = role, .content = owned };
+        try self.messages.append(gpa, m);
+        errdefer _ = self.messages.pop();
+        try self.archive.append(gpa, m);
     }
 
     /// 便捷：追加一条已有的 llm.Message（内容同样会被复制）。
@@ -50,6 +58,11 @@ pub const Session = struct {
         return self.messages.items;
     }
 
+    /// 完整 transcript 视图。压缩后仍包含被活跃上下文折叠掉的原文消息。
+    pub fn archiveItems(self: *const Session) []const llm.Message {
+        return if (self.archive.items.len != 0) self.archive.items else self.messages.items;
+    }
+
     pub fn count(self: *const Session) usize {
         return self.messages.items.len;
     }
@@ -59,16 +72,24 @@ pub const Session = struct {
         return if (n == 0) null else self.messages.items[n - 1];
     }
 
+    /// 记录一条只属于活跃上下文的合成消息内容，例如压缩标记。
+    pub fn adoptActiveOnly(self: *Session, gpa: std.mem.Allocator, content: []const u8) !void {
+        try self.active_only.append(gpa, content);
+    }
+
     /// 释放消息流及其内容副本（必须用与 append 相同的 gpa）。
     pub fn deinit(self: *Session, gpa: std.mem.Allocator) void {
-        for (self.messages.items) |m| gpa.free(m.content);
+        for (self.archive.items) |m| gpa.free(m.content);
+        for (self.active_only.items) |content| gpa.free(content);
         self.messages.deinit(gpa);
+        self.archive.deinit(gpa);
+        self.active_only.deinit(gpa);
     }
 
     /// 以 JSONL（每行一条消息）把整段会话写入 `w`。
     /// 纯文本、可追加、可回溯，满足 ROADMAP「状态严格本地（SQLite 或纯文本）」与审计链路。
     pub fn writeJsonl(self: *const Session, w: *std.Io.Writer) !void {
-        for (self.messages.items) |m| {
+        for (self.archiveItems()) |m| {
             try writeMessageJson(w, m);
             try w.writeByte('\n');
         }
@@ -117,6 +138,7 @@ test "append 复制内容，独立于来源缓冲" {
 
     try std.testing.expectEqual(@as(usize, 1), s.count());
     try std.testing.expectEqualStrings("hi", s.items()[0].content);
+    try std.testing.expectEqualStrings("hi", s.archiveItems()[0].content);
     try std.testing.expectEqual(llm.Role.user, s.last().?.role);
 }
 

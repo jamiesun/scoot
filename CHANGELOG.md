@@ -22,6 +22,8 @@ heading when cutting a release.
   suffixes for every supported target.
 - Installer supports `SCOOT_INSTALL_FLAVOR=small` to select the small release
   artifact instead of the default `ReleaseSafe` artifact.
+- Native `recall` action can retrieve exact earlier messages from the current
+  session transcript archive after active context compaction (#99).
 
 ### Changed
 

@@ -61,7 +61,10 @@ fn compactWithMarker(
     while (k < drop_end) : (k += 1) elided_bytes += msgs[k].content.len;
 
     const marker = try markerFn(gpa, msgs[drop_start..drop_end], elided_count, elided_bytes, keep_recent);
-    errdefer gpa.free(marker);
+    var marker_owned_by_session = false;
+    errdefer if (!marker_owned_by_session) gpa.free(marker);
+    try sess.adoptActiveOnly(gpa, marker);
+    marker_owned_by_session = true;
 
     var rebuilt: std.ArrayList(llm.Message) = .empty;
     errdefer rebuilt.deinit(gpa);
@@ -71,9 +74,6 @@ fn compactWithMarker(
     rebuilt.appendAssumeCapacity(.{ .role = .user, .content = marker });
     i = drop_end;
     while (i < n) : (i += 1) rebuilt.appendAssumeCapacity(msgs[i]);
-
-    k = drop_start;
-    while (k < drop_end) : (k += 1) gpa.free(msgs[k].content);
 
     sess.messages.deinit(gpa);
     sess.messages = rebuilt;
@@ -261,7 +261,7 @@ fn firstLine(text: []const u8) []const u8 {
 const max_extract_items = 6;
 const max_extract_item_bytes = 160;
 
-test "drop: 保留 system+原始任务+最近 K，中段替换为标记，内容正确释放" {
+test "drop: 保留 system+原始任务+最近 K，中段替换为标记，归档保留原文" {
     const gpa = std.testing.allocator;
     var s = session.Session.init("c1");
     defer s.deinit(gpa);
@@ -281,6 +281,9 @@ test "drop: 保留 system+原始任务+最近 K，中段替换为标记，内容
     try std.testing.expect(std.mem.indexOf(u8, s.items()[2].content, "已省略较早的 2 条消息") != null);
     try std.testing.expectEqualStrings("recent-a", s.items()[3].content);
     try std.testing.expectEqualStrings("recent-u", s.items()[4].content);
+    try std.testing.expectEqual(@as(usize, 6), s.archiveItems().len);
+    try std.testing.expectEqualStrings("old-a", s.archiveItems()[2].content);
+    try std.testing.expectEqualStrings("old-u", s.archiveItems()[3].content);
 }
 
 test "drop: 无可压缩中段时返回 false" {

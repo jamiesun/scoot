@@ -573,6 +573,7 @@ fn policyDecisionForAction(
         },
         .parallel => policyDecisionForParallel(arena, mode, input),
         .skill => .allow, // 原生只读能力，刻意不受执行策略约束（与 agent.guard 对齐）。
+        .recall => .allow, // 当前会话 transcript 召回，原生只读能力。
         .final => .{ .deny = "final 不是可执行工具动作" },
     };
 }
@@ -606,6 +607,7 @@ fn policyDecisionForParallel(
             .bash => return .{ .deny = "parallel 禁止 bash；请使用结构化只读工具" },
             .file_write, .file_edit => return .{ .deny = "parallel 禁止写文件或编辑文件" },
             .skill => return .{ .deny = "parallel 禁止 skill；请用独立的 skill 动作读取技能指令" },
+            .recall => return .{ .deny = "parallel 禁止 recall；请用独立的 recall 动作读取会话原文" },
             .parallel => return .{ .deny = "parallel 禁止嵌套 parallel" },
             .final => return .{ .deny = "parallel 子调用不能是 final" },
         }
@@ -2099,6 +2101,10 @@ test "policyDecisionForAction: 复用工具策略语义" {
     switch (policyDecisionForAction(arena, .readonly, .glob, "{\"pattern\":\"**/*\",\"root\":\"..\"}")) {
         .deny => {},
         .allow => return error.ExpectedDeny,
+    }
+    switch (policyDecisionForAction(arena, .readonly, .recall, "{\"query\":\"old\"}")) {
+        .allow => {},
+        .deny => return error.ExpectedAllow,
     }
     switch (policyDecisionForAction(arena, .readonly, .file_write, "{\"path\":\"x\",\"content\":\"y\"}")) {
         .deny => {},

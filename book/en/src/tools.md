@@ -6,7 +6,7 @@ Every turn, the model must emit exactly one JSON step:
 { "thought": "one-line reasoning", "action": "<action>", "action_input": "<input>" }
 ```
 
-`action` must be one of the ten built-in actions below — Scoot never executes
+`action` must be one of the twelve built-in actions below — Scoot never executes
 free-form text. Each tool runs inside a sandbox with a **hard timeout**
 (`tools.timeout_ms`, default 30 s) and its output is returned to the model as the
 next *observation* (clipped to keep the context small). Whether a given action is
@@ -29,6 +29,7 @@ Prefer them over shelling out.
 | `outline` | Structural skeleton of a file | `{"path":...}` | yes |
 | `http_request` | One HTTP/HTTPS request | `{"method":...,"url":...,"body":...}` | depends on method |
 | `skill` | Read a loaded skill's files | `{"name":...,"path":"SKILL.md"}` | yes (native) |
+| `recall` | Search the current session transcript archive | `{"query":...}` or `{"seq":...}` | yes (native) |
 | `parallel` | 1–4 concurrent read-only calls | `{"calls":[...]}` | yes |
 | `final` | Return the answer and stop | answer text | — |
 
@@ -160,6 +161,25 @@ directory (absolute paths and `..` rejected), the name must be in the loaded set
 (unknown names return a recoverable observation listing what's available), and
 every read is audited. Content is returned up to ~32 KB. See [Skills](skills.md).
 
+## `recall`
+
+```json
+{ "query": "old error text", "limit": 8 }
+```
+
+```json
+{ "seq": 12, "context": 2 }
+```
+
+Searches the **current session's complete transcript archive** and returns exact
+JSONL-style message lines with `seq`, `role`, and `content`. This is native
+read-only capability, so it remains available in `readonly` mode.
+
+Use it when context compaction has kept only a summary but the model needs an
+earlier exact observation, command, or user instruction. `query` does literal
+substring matching; `seq` is 1-based and can include a small surrounding
+`context`. `limit` is capped to keep the recall result bounded.
+
 ## `parallel`
 
 ```json
@@ -171,9 +191,9 @@ every read is audited. Content is returned up to ~32 KB. See [Skills](skills.md)
 
 Runs **1–4 independent read-only calls** concurrently, preserving observation
 order. Only `file_read`, `grep`, `glob`, `outline`, and HTTP `GET`/`HEAD` are
-permitted — `bash`, writes, and nested `parallel` are rejected. Every child call
-still routes through the normal policy gate. Use it to fan out independent reads
-in one turn.
+permitted — `bash`, writes, `skill`, `recall`, and nested `parallel` are
+rejected. Every child call still routes through the normal policy gate. Use it
+to fan out independent reads in one turn.
 
 ## `final`
 
@@ -184,5 +204,6 @@ loop. In `-e` mode this text is what's printed to stdout.
 
 Tool output is fed back as an observation, but each is **clipped** to bound
 context growth (roughly: `bash` ~2 KB, `file_read`/`http_request` ~8 KB,
-`parallel` ~12 KB, `skill` ~32 KB). For large data, narrow your reads — use
-`grep`, globbed paths, or targeted ranges instead of dumping whole files.
+`parallel` ~12 KB, `skill` ~32 KB, `recall` ~16 KB). For large data, narrow your
+reads — use `grep`, globbed paths, targeted ranges, or a tighter `recall` query
+instead of dumping whole files.

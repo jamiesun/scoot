@@ -66,7 +66,7 @@ Optional review metadata:
   `references`.
 - `allowed_tools`: inline list of expected built-in tool actions:
   `bash`, `file_read`, `file_write`, `file_edit`, `grep`, `glob`,
-  `http_request`, and `parallel`.
+  `outline`, `http_request`, `skill`, `recall`, and `parallel`.
 - `scope`: one of `general`, `project`, `repository`, `domain`, or `workflow`.
 
 Compatibility fields such as `scoot_version`, `compatibility`, and

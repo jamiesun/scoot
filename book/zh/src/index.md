@@ -28,8 +28,8 @@ Scoot 是一个用纯 Zig 编写的轻量、本地优先的 AI agent **守护进
 ## 核心能力
 
 - **两个入口**——一次性的 `scoot -e "<goal>"` 与交互式 REPL。
-- **十个内建动作**——`bash`、`file_read`、`file_write`、`file_edit`、
-  `grep`、`glob`、`http_request`、`skill`、`parallel` 与 `final`。这些
+- **十二个内建动作**——`bash`、`file_read`、`file_write`、`file_edit`、
+  `grep`、`glob`、`outline`、`http_request`、`skill`、`recall`、`parallel` 与 `final`。这些
   结构化工具无需外部命令即可工作，因此在精简系统上行为完全一致。参见 [内建工具](tools.md)。
 - **三种执行策略**——`guarded`（交互式绊线）、`readonly`
   （fail-closed（失败即关闭）），以及 `unrestricted`（有审计但不设限），外加可选的
