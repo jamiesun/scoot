@@ -23,6 +23,8 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
   而不是默认的 `ReleaseSafe` 产物。
 - 新增原生 `recall` 动作，可在活跃上下文压缩后，从当前会话 transcript
   归档中取回较早的精确原文消息（#99）。
+- 稳定嵌入 API 现在把公共包根与 CLI/internal 模块分离，并加入会随测试编译的
+  最小嵌入示例（#106）。
 
 ### 变更
 

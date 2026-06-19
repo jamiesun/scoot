@@ -291,6 +291,7 @@ The full user guide is the bilingual mdBook under [`book/`](book/):
 - [Scheduling & Daemon](book/en/src/scheduling.md) - unattended jobs.
 - [Sessions & Audit](book/en/src/sessions.md) - local state formats.
 - [Wasm Tool Packages](book/en/src/wasm-tools.md) - package boundary.
+- [Embedding API](book/en/src/embed-api.md) - stable Zig package surface.
 - [Best Practice Cases](book/en/src/best-practices.md) - CI, operations, probes, and runbooks.
 - [Troubleshooting & FAQ](book/en/src/troubleshooting.md)
 
