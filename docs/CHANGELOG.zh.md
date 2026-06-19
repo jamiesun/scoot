@@ -15,13 +15,26 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 ## [未发布]
 
+## [0.2.0] - 2026-06-19
+
 ### 新增
 
+- `SCOOT_*` 环境变量覆盖，用于零配置与 CI 运行（#67）
+- `file_read` 支持 offset/limit 行窗口读取（#78）
+- 到达上下文预算时压缩历史，而不是直接中止运行（#81）
+- grep 支持匹配点前后的可选上下文行（#82）
+- 面向稳定模型 prompt 的配置化 prompt-cache breakpoint（#84）
+- 零依赖 `outline` 动作，用低 token 成本查看文件骨架（#85）
+- POSIX release 安装脚本，可下载、校验并安装匹配当前主机的二进制（#90）
 - CLI/REPL 运行结束后在 stderr 输出紧凑运行摘要，包含事件数、工具调用、策略拒绝、后端状态与 transcript 路径（#59）
 - `schedule.jobs` 支持分钟级 5 字段 UTC cron 调度（#65）
 
 ### 变更
 
+- `~/.agents/skills` 发现改为显式 opt-in，项目本地与 Scoot 本地 skills 仍默认启用（#87）
+- 同一次运行中的重复只读观察会被去重（#83）
+- Agent 观察结果会做 token 优化，包括去除 ANSI、head/tail 窗口与 token 上限（#80）
+- 每轮 thought 不再持久化到运行历史（#79）
 - 运行目录与 JSONL 审计/会话文件改为属主可读写，并对 JSONL 文件做有界 `.1` 轮转（#60、#61）
 - GitHub workflow 改用 Node 24 兼容 actions，并用 shell 安装 Zig，避免 Node 20 action 告警（#63）
 - `build_options` 同时导入可执行文件 root module 与库模块（#64）
@@ -29,8 +42,16 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 ### 修复
 
+- 语言切换入口移入 mdBook 导航图标区域（#86）
 - 非法的枚举型 `SCOOT_*` 覆盖现在会告警并保留原值，不再静默改变 policy/mode/level（#68）
 - `confine_writes` 现在会拒绝最终写入文件名本身为预置 symlink 的逃逸路径（#69）
+
+### 文档
+
+- 新增维护型 changelog，并让 release notes 从 changelog 派生（#66）
+- 改进 README 与用户指南结构，包括安装器文档、设计理念、最佳实践案例和 daemon/运行模式说明（#90）
+- 增加 Scoot logo、favicon 资产，以及带动效的文档站点入口页标识（#91）
+- 将 logo 合入 README/mdBook 信息图，并移除重复的独立 logo 块（#92）
 
 ## [0.1.0] - 2026-06-18
 
@@ -59,5 +80,6 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 - 完善首页/许可证元数据、信息图与双语用户指南（#6、#19、#36）
 
-[未发布]: https://github.com/jamiesun/scoot/compare/v0.1.0...HEAD
+[未发布]: https://github.com/jamiesun/scoot/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/jamiesun/scoot/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jamiesun/scoot/compare/v0.0.2...v0.1.0
