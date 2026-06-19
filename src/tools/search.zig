@@ -1,37 +1,41 @@
-//! 搜索工具：grep（内容，走自研 ReDoS 免疫正则）与 glob（路径，独立通配匹配）。
+//! Search tools: grep for content using the local ReDoS-immune regex engine,
+//! and glob for paths with independent wildcard matching.
 //!
-//! 自包含动机同 file.zig：裁剪 / 嵌入式 Linux 可能无系统 grep/find。
-//! grep 复用 `regex.zig`（线性时间，模型生成的正则不会把设备 CPU 拖死）。
-//! glob 不复用正则引擎——路径通配（`* ? [] **`）语义与正则不同（`*` 不跨 `/`，
-//! `**` 才跨目录），单独实现更清晰。
+//! Self-contained rationale matches file.zig: trimmed or embedded Linux may not
+//! have system grep/find. grep reuses `regex.zig`, which is linear-time so
+//! model-generated regexes cannot pin the CPU. glob does not reuse regex because
+//! path wildcard semantics differ: `*` does not cross `/`, while `**` does.
 const std = @import("std");
 const regex = @import("../regex.zig");
 
-/// grep 命中：1 起的行号 + 该行原文（指向被搜文本，arena 拥有其来源）。
+/// Grep hit: 1-based line number plus original line text borrowed from input.
 pub const Hit = struct {
     line: usize,
     text: []const u8,
 };
 
-/// 单次读取的默认上限（1 MiB），与 file.read 一致，挡住超大文件读爆内存。
+/// Default single-read limit (1 MiB), aligned with file.read.
 pub const default_read_limit: std.Io.Limit = .limited(1 << 20);
 
-/// glob 遍历的护栏：最大目录深度与最多收集结果数，防止超大树拖垮工具。
+/// Glob traversal guardrails: maximum depth and collected result count.
 pub const max_glob_depth: usize = 32;
 pub const default_max_results: usize = 500;
-/// grep 默认最多回报命中行数，避免海量命中挤爆上下文。
+/// Default maximum reported grep hits to keep context bounded.
 pub const default_max_hits: usize = 200;
-/// glob 模式长度上限：与 regex.max_pattern_len 对齐，挡住病态超长模式（issue #37）。
+/// Glob pattern length cap, aligned with regex.max_pattern_len (issue #37).
 pub const max_glob_pattern_len: usize = 4096;
-/// 单次 glob 最多访问的目录项：挡住超大/无界目录树（含 node_modules 等）导致的
-/// 时间与 arena 内存随树规模膨胀，而非随命中数膨胀（issue #38）。达到上限即返回已收集的部分结果。
+/// Maximum directory entries visited by one glob. This bounds time and arena
+/// memory by tree size, including node_modules, rather than hit count
+/// (issue #38). Hitting the cap returns already-collected partial results.
 pub const max_glob_entries: usize = 100_000;
-/// globRec 的回溯步数预算：把单次匹配的 CPU 硬封顶，杜绝病态模式（如 `*a*a*…*b`）的超线性回溯（issue #37）。
+/// Backtracking step budget for globRec, hard-capping CPU per match and blocking
+/// superlinear pathological patterns such as `*a*a*...*b` (issue #37).
 const glob_match_budget: u64 = 5_000_000;
-/// glob 遍历跳过的重型目录名（dotfile 已由 walk 单独跳过）：常见且通常不应纳入搜索（issue #38）。
+/// Heavy directory names skipped by glob traversal; dotfiles are skipped in walk.
 const ignored_dir_names = [_][]const u8{"node_modules"};
 
-/// 在一段文本里按行做正则匹配，返回命中行（含行号）。compile 一次、跨行复用 Matcher。
+/// Runs line-by-line regex matching over text and returns hits with line numbers.
+/// The pattern is compiled once and the matcher is reused across lines.
 pub fn grepText(arena: std.mem.Allocator, pattern: []const u8, text: []const u8, max_hits: usize) ![]Hit {
     var re = try regex.Regex.compile(arena, pattern);
     var m = try regex.Matcher.init(arena, &re);
@@ -58,7 +62,7 @@ pub fn grepText(arena: std.mem.Allocator, pattern: []const u8, text: []const u8,
     return hits.toOwnedSlice(arena);
 }
 
-/// 读取文件后在其内容上做 grep（路径相对 cwd）。
+/// Reads a file and greps its content. Path is relative to cwd.
 pub fn grepFile(
     arena: std.mem.Allocator,
     io: std.Io,
@@ -70,19 +74,22 @@ pub fn grepFile(
     return grepText(arena, pattern, text, max_hits);
 }
 
-/// grep 命中上下文块（issue #76）：一段连续行区间（相邻/重叠的命中已合并）+ 标记哪些行是命中。
-/// 行切片指向被搜文本（arena 拥有其来源）。让 agent 一次拿到命中点周边，省掉「grep 后再整读」。
+/// Grep context block (issue #76): one continuous line range, with adjacent or
+/// overlapping hits merged, plus a mask for hit lines. Line slices borrow from
+/// the searched text, whose source is arena-owned. This lets the agent receive
+/// nearby context without a follow-up whole-file read.
 pub const ContextBlock = struct {
-    start_line: usize, // 1 起：块首行号
-    lines: []const []const u8, // 块内各行原文（不含换行）
-    hit_mask: []const bool, // 与 lines 等长：true=命中行，false=上下文行
+    start_line: usize, // 1-based first line in the block.
+    lines: []const []const u8, // Original block lines, without newlines.
+    hit_mask: []const bool, // Same length as lines: true=hit, false=context.
 };
 
-/// 上下文行数上限：挡住「context 设得很大」导致单次观察吃满内存/预算（issue #76）。
+/// Context line cap to prevent one large context request from consuming budget.
 pub const max_grep_context: usize = 20;
 
-/// 带上下文的 grep：返回命中行前后各 `context` 行的块；相邻/重叠块合并（类似 grep -C）。
-/// `max_hits` 限制命中行数（非块数、非总行数）。`context` 会被夹到 [0, max_grep_context]。
+/// Grep with context: returns blocks containing each hit plus `context` lines
+/// before and after. Adjacent/overlapping blocks are merged like grep -C.
+/// `max_hits` limits hit lines, not blocks or total lines. `context` is clamped.
 pub fn grepTextContext(
     arena: std.mem.Allocator,
     pattern: []const u8,
@@ -92,7 +99,7 @@ pub fn grepTextContext(
 ) ![]ContextBlock {
     const ctx = @min(context, max_grep_context);
 
-    // 切行（不含换行；末尾换行不算额外空行，与编辑器约定一致）。
+    // Split lines without newlines; trailing newline does not add an empty line.
     var lines: std.ArrayList([]const u8) = .empty;
     var start: usize = 0;
     var idx: usize = 0;
@@ -106,7 +113,7 @@ pub fn grepTextContext(
     const total = lines.items.len;
     if (total == 0) return &.{};
 
-    // 命中行号（0 起），受 max_hits 约束。
+    // 0-based hit line numbers, capped by max_hits.
     var re = try regex.Regex.compile(arena, pattern);
     var m = try regex.Matcher.init(arena, &re);
     var hit_idx: std.ArrayList(usize) = .empty;
@@ -118,7 +125,7 @@ pub fn grepTextContext(
     }
     if (hit_idx.items.len == 0) return &.{};
 
-    // 把每个命中扩成 [hit-ctx, hit+ctx]，相邻/重叠区间合并成一块。
+    // Expand each hit to [hit-ctx, hit+ctx] and merge adjacent/overlapping ranges.
     var blocks: std.ArrayList(ContextBlock) = .empty;
     var bi: usize = 0;
     while (bi < hit_idx.items.len) {
@@ -129,7 +136,7 @@ pub fn grepTextContext(
         while (bj < hit_idx.items.len) : (bj += 1) {
             const h = hit_idx.items[bj];
             const h_lo = if (h >= ctx) h - ctx else 0;
-            if (h_lo > hi + 1) break; // 有间隔 → 另起一块
+            if (h_lo > hi + 1) break; // Gap: start another block.
             hi = @min(total - 1, h + ctx);
         }
         const n = hi - lo + 1;
@@ -146,7 +153,7 @@ pub fn grepTextContext(
     return blocks.toOwnedSlice(arena);
 }
 
-/// 读取文件后做带上下文的 grep（路径相对 cwd）。
+/// Reads a file and performs contextual grep. Path is relative to cwd.
 pub fn grepFileContext(
     arena: std.mem.Allocator,
     io: std.Io,
@@ -159,8 +166,9 @@ pub fn grepFileContext(
     return grepTextContext(arena, pattern, text, max_hits, context);
 }
 
-/// 在 `root` 子树下按 glob 模式匹配路径，返回匹配到的路径（相对 cwd，可直接喂 file_read）。
-/// 模式相对 `root` 匹配；`*`/`?`/`[]` 不跨 `/`，`**` 跨目录层级。隐藏文件（`.` 开头）跳过。
+/// Matches paths under `root` with a glob pattern and returns cwd-relative paths
+/// usable by file_read. The pattern is relative to `root`; `*`/`?`/`[]` do not
+/// cross `/`, while `**` crosses directories. Hidden files are skipped.
 pub fn glob(
     arena: std.mem.Allocator,
     io: std.Io,
@@ -169,16 +177,16 @@ pub fn glob(
     max_results: usize,
 ) ![][]const u8 {
     var results: std.ArrayList([]const u8) = .empty;
-    // 病态超长模式直接判空，不触发遍历（issue #37）。
+    // Pathologically long patterns produce no matches without traversal.
     if (pattern.len > max_glob_pattern_len) return results.toOwnedSlice(arena);
     var visited: usize = 0;
     try walk(arena, io, &results, pattern, root, "", 0, max_results, &visited);
     return results.toOwnedSlice(arena);
 }
 
-/// 递归遍历目录，对每个相对路径测试 glob，命中则收集（root 前缀后的可用路径）。
-/// `visited` 跨整棵子树累计已访问的目录项，达到 `max_glob_entries` 即停止，
-/// 使时间与内存随树规模有界，而非随命中数（issue #38）。
+/// Recursively walks directories, tests each relative path against the glob, and
+/// collects usable paths under the root prefix. `visited` counts entries across
+/// the whole subtree and stops at `max_glob_entries`, bounding cost by tree size.
 fn walk(
     arena: std.mem.Allocator,
     io: std.Io,
@@ -199,9 +207,9 @@ fn walk(
 
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
-        if (entry.name.len == 0 or entry.name[0] == '.') continue; // 跳过隐藏项
+        if (entry.name.len == 0 or entry.name[0] == '.') continue; // Skip hidden entries.
         visited.* += 1;
-        if (visited.* > max_glob_entries) return; // 访问项预算耗尽：返回已收集的部分结果（issue #38）
+        if (visited.* > max_glob_entries) return; // Entry budget exhausted; return partial results.
         const child_rel = if (rel.len == 0)
             try arena.dupe(u8, entry.name)
         else
@@ -215,9 +223,10 @@ fn walk(
             try results.append(arena, full);
             if (results.items.len >= max_results) return;
         }
-        // 是否递归进入：`.directory` 直接进；`.unknown`（部分文件系统的 DT_UNKNOWN，
-        // 如某些 NFS）需 stat 确认是否真为目录，否则真实子目录会被静默漏掉（issue #40）。
-        // stat 不跟随符号链接，沿用「仅普通目录才递归」的防环/防逃逸语义。
+        // Recurse into `.directory` directly. `.unknown`, such as DT_UNKNOWN on
+        // some filesystems, needs stat to avoid silently skipping real
+        // directories (issue #40). Do not follow symlinks; only plain
+        // directories recurse, preserving loop and escape protection.
         const is_dir = switch (entry.kind) {
             .directory => true,
             .unknown => blk: {
@@ -232,7 +241,7 @@ fn walk(
     }
 }
 
-/// 是否为应跳过的重型目录（issue #38）。
+/// Whether a directory is heavy enough to skip (issue #38).
 fn isIgnoredDir(name: []const u8) bool {
     for (ignored_dir_names) |n| {
         if (std.mem.eql(u8, name, n)) return true;
@@ -240,16 +249,18 @@ fn isIgnoredDir(name: []const u8) bool {
     return false;
 }
 
-/// glob 全路径匹配：`*`/`?`/`[]` 不跨 `/`，`**` 跨目录（`**/` 亦匹配零层目录）。
+/// Full-path glob match: `*`/`?`/`[]` do not cross `/`; `**` crosses directories
+/// and `**/` also matches zero directory levels.
 pub fn globMatch(pattern: []const u8, path: []const u8) bool {
-    if (pattern.len > max_glob_pattern_len) return false; // 病态超长模式：判不匹配（issue #37）
+    if (pattern.len > max_glob_pattern_len) return false; // Pathologically long pattern.
     var budget: u64 = glob_match_budget;
     return globRec(pattern, 0, path, 0, &budget);
 }
 
 fn globRec(pat: []const u8, p0: usize, str: []const u8, s0: usize, budget: *u64) bool {
-    // 回溯步数预算耗尽：硬封顶，杜绝病态模式的超线性回溯（issue #37）。
-    // 真正能匹配的对齐会在预算内被贪心命中并提前返回 true；耗尽只发生在无解的病态回溯上。
+    // Hard cap backtracking to prevent pathological superlinear behavior. Real
+    // matches are found greedily within budget; exhaustion only occurs on
+    // unsatisfiable pathological backtracking.
     if (budget.* == 0) return false;
     budget.* -= 1;
     var pi = p0;
@@ -259,17 +270,18 @@ fn globRec(pat: []const u8, p0: usize, str: []const u8, s0: usize, budget: *u64)
         switch (pc) {
             '*' => {
                 if (pi + 1 < pat.len and pat[pi + 1] == '*') {
-                    // '**'：跨目录。若紧跟 '/'，'**/' 可匹配零层目录或任意 '<dirs>/'。
+                    // '**' crosses directories. When followed by '/', '**/' can
+                    // match zero levels or any '<dirs>/' prefix.
                     if (pi + 2 < pat.len and pat[pi + 2] == '/') {
                         const rest = pi + 3;
-                        if (globRec(pat, rest, str, si, budget)) return true; // 零层目录
+                        if (globRec(pat, rest, str, si, budget)) return true; // Zero directory levels.
                         var k = si;
                         while (k < str.len) : (k += 1) {
                             if (str[k] == '/' and globRec(pat, rest, str, k + 1, budget)) return true;
                         }
                         return false;
                     }
-                    // '**' 在末尾或后接非 '/'：匹配任意字符（含 '/'）。
+                    // Trailing '**' or '**' before non-'/' matches any chars, including '/'.
                     const rest = pi + 2;
                     var k = si;
                     while (k <= str.len) : (k += 1) {
@@ -277,7 +289,7 @@ fn globRec(pat: []const u8, p0: usize, str: []const u8, s0: usize, budget: *u64)
                     }
                     return false;
                 }
-                // 单 '*'：匹配本段内任意非 '/' 串（含空）。
+                // Single '*' matches any non-'/' span in this path segment, including empty.
                 const rest = pi + 1;
                 var k = si;
                 while (true) {
@@ -308,8 +320,8 @@ fn globRec(pat: []const u8, p0: usize, str: []const u8, s0: usize, budget: *u64)
     return si == str.len;
 }
 
-/// 匹配 glob 字符类 `[...]`（pi 指向 '['）。命中与否写回，`next_pi` 置为 ']' 之后。
-/// 解析失败（无闭合 ']'）时把 '[' 当字面量处理。
+/// Matches a glob character class `[...]` with pi at '['. Writes match status
+/// and sets `next_pi` after ']'. If parsing fails, treats '[' as a literal.
 fn classMatch(pat: []const u8, pi: usize, ch: u8, next_pi: *usize) bool {
     var i = pi + 1;
     var negated = false;
@@ -327,7 +339,7 @@ fn classMatch(pat: []const u8, pi: usize, ch: u8, next_pi: *usize) bool {
             break;
         }
         first = false;
-        // 区间 a-z
+        // Range a-z.
         if (i + 2 < pat.len and pat[i + 1] == '-' and pat[i + 2] != ']') {
             if (ch >= pat[i] and ch <= pat[i + 2]) matched = true;
             i += 3;
@@ -337,7 +349,7 @@ fn classMatch(pat: []const u8, pi: usize, ch: u8, next_pi: *usize) bool {
         }
     }
     if (!has_close) {
-        // 非法类：把 '[' 当字面量，仅当 ch == '[' 时算匹配，消费一个字符。
+        // Invalid class: treat '[' as a literal and consume one character.
         next_pi.* = pi + 1;
         return ch == '[';
     }
@@ -345,9 +357,9 @@ fn classMatch(pat: []const u8, pi: usize, ch: u8, next_pi: *usize) bool {
     return matched != negated;
 }
 
-// ---- 测试 ----
+// ---- Tests ----
 
-test "grepText 行号与命中" {
+test "grepText line numbers and matches" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -361,7 +373,7 @@ test "grepText 行号与命中" {
     try std.testing.expectEqualStrings("bar end", hits[1].text);
 }
 
-test "grepText 正则与锚点、无命中" {
+test "grepText regex, anchors, and no matches" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -375,7 +387,7 @@ test "grepText 正则与锚点、无命中" {
     try std.testing.expectEqual(@as(usize, 0), none.len);
 }
 
-test "grepText max_hits 截断" {
+test "grepText max_hits truncation" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -384,17 +396,17 @@ test "grepText max_hits 截断" {
     try std.testing.expectEqual(@as(usize, 2), hits.len);
 }
 
-test "grepText max_hits 含无换行尾行不越界（issue #39）" {
+test "grepText max_hits handles line endings (issue #39)" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    // 恰好 max_hits 个带换行的命中 + 一个无换行的尾行命中：尾行不得绕过上限。
-    const text = "x\nx\nx"; // 三处命中，末行无 '\n'
+    // Exactly max_hits newline-terminated hits plus a final hit without newline.
+    const text = "x\nx\nx"; // Three hits; final line has no '\n'.
     const hits = try grepText(a, "x", text, 2);
     try std.testing.expectEqual(@as(usize, 2), hits.len);
 }
 
-test "grepTextContext 命中行带上下文 ±N 并标记命中（issue #76）" {
+test "grepTextContext hit lines include +/-N context and hit markers(issue #76)" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -412,23 +424,25 @@ test "grepTextContext 命中行带上下文 ±N 并标记命中（issue #76）" 
     try std.testing.expectEqual(false, b.hit_mask[2]);
 }
 
-test "grepTextContext 相邻命中的上下文块合并（issue #76）" {
+test "grepTextContext adjacent hit context blocks merge(issue #76)" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
-    // 命中第 2、4 行，±1 上下文 → 窗口 [1..3] 与 [3..5] 相邻，合并为一块。
+    // Hits on lines 2 and 4 with +/-1 context merge adjacent windows [1..3] and [3..5].
     const text = "a\nHIT\nc\nHIT\ne";
     const blocks = try grepTextContext(a, "HIT", text, 100, 1);
     try std.testing.expectEqual(@as(usize, 1), blocks.len);
     try std.testing.expectEqual(@as(usize, 1), blocks[0].start_line);
     try std.testing.expectEqual(@as(usize, 5), blocks[0].lines.len);
-    // 两个命中行被标记，其余为上下文。
+    // Two hit lines are marked; the rest are context.
     var hits: usize = 0;
-    for (blocks[0].hit_mask) |h| { if (h) hits += 1; }
+    for (blocks[0].hit_mask) |h| {
+        if (h) hits += 1;
+    }
     try std.testing.expectEqual(@as(usize, 2), hits);
 }
 
-test "grepTextContext 远离的命中各自成块（issue #76）" {
+test "grepTextContext distant hits form separate blocks(issue #76)" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -437,34 +451,34 @@ test "grepTextContext 远离的命中各自成块（issue #76）" {
     try std.testing.expectEqual(@as(usize, 2), blocks.len);
 }
 
-test "globMatch 病态模式不超时（issue #37）" {
-    // 多 '*' 且无匹配后缀的病态模式：受回溯预算硬封顶，必须很快返回 false 而非超线性回溯。
+test "globMatch pathological pattern does not time out(issue #37)" {
+    // Many '*' with no matching suffix must hit the backtracking cap quickly.
     try std.testing.expect(!globMatch("*a*a*a*a*a*a*a*a*b", "aaaaaaaaaaaaaaaaaaaaaaaa"));
-    // 能匹配的对齐仍在预算内命中。
+    // Matchable alignment still succeeds within budget.
     try std.testing.expect(globMatch("*a*a*b", "aaaab"));
-    // 超长模式直接判不匹配。
+    // Overlong pattern is rejected as no-match.
     const long = "*" ** (max_glob_pattern_len + 1);
     try std.testing.expect(!globMatch(long, "x"));
 }
 
-test "globMatch 基础通配（* ? 不跨 /）" {
+test "globMatch basic wildcard where * and ? do not cross /" {
     try std.testing.expect(globMatch("*.zig", "main.zig"));
-    try std.testing.expect(!globMatch("*.zig", "src/main.zig")); // * 不跨 /
+    try std.testing.expect(!globMatch("*.zig", "src/main.zig")); // * does not cross /.
     try std.testing.expect(globMatch("src/*.zig", "src/main.zig"));
     try std.testing.expect(globMatch("?.txt", "a.txt"));
     try std.testing.expect(!globMatch("?.txt", "ab.txt"));
     try std.testing.expect(!globMatch("*.zig", "main.zigx"));
 }
 
-test "globMatch ** 跨目录（含零层）" {
-    try std.testing.expect(globMatch("**/*.zig", "main.zig")); // 零层目录
+test "globMatch double star matches directories" {
+    try std.testing.expect(globMatch("**/*.zig", "main.zig")); // Zero directory levels.
     try std.testing.expect(globMatch("**/*.zig", "src/tools/bash.zig"));
     try std.testing.expect(globMatch("src/**/*.zig", "src/a/b/c.zig"));
     try std.testing.expect(globMatch("src/**", "src/a/b"));
     try std.testing.expect(!globMatch("src/**/*.zig", "lib/a.zig"));
 }
 
-test "globMatch 字符类" {
+test "globMatch character classes" {
     try std.testing.expect(globMatch("[abc].zig", "a.zig"));
     try std.testing.expect(!globMatch("[abc].zig", "d.zig"));
     try std.testing.expect(globMatch("v[0-9].txt", "v3.txt"));
@@ -472,7 +486,7 @@ test "globMatch 字符类" {
     try std.testing.expect(!globMatch("[^x].txt", "x.txt"));
 }
 
-test "glob 真实目录遍历" {
+test "glob walks directories" {
     const a_gpa = std.testing.allocator;
     const io = std.testing.io;
     const cwd = std.Io.Dir.cwd();
@@ -482,7 +496,7 @@ test "glob 真实目录遍历" {
     try cwd.createDirPath(io, dir);
     try cwd.createDirPath(io, dir ++ "/sub");
 
-    // 写两个 .zig 与一个 .txt。
+    // Write two .zig files and one .txt.
     const file = @import("file.zig");
     try file.write(io, dir ++ "/a.zig", "x");
     try file.write(io, dir ++ "/sub/b.zig", "y");
@@ -494,7 +508,7 @@ test "glob 真实目录遍历" {
 
     const zigs = try glob(a, io, "**/*.zig", dir, default_max_results);
     try std.testing.expectEqual(@as(usize, 2), zigs.len);
-    // 结果应带 root 前缀，可直接 file_read。
+    // Results include the root prefix and can be fed directly to file_read.
     var saw_a = false;
     var saw_b = false;
     for (zigs) |p| {

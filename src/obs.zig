@@ -1,19 +1,26 @@
-//! 观察优化器（issue #75）：工具输出进入会话历史前的纯函数瘦身层。
+//! Observation optimizer (issue #75): a pure shrinking layer before tool output
+//! enters session history.
 //!
-//! 目标是提高「有效信息 / token」比，统一两件事：
-//!   1. 命令类输出（bash/http 失败栈等）：剥 ANSI、折叠空白/空行、按「头+尾」双向保留——
-//!      关键信号（退出码、错误栈）常在尾部，head-only 截断会把它吃掉。
-//!   2. 所有观察的截断口径从**字节**改为**token 估算**：CJK ≈1 token/字但占 3 字节，
-//!      字节口径会让中文与 ASCII 的预算严重不一致。
+//! The goal is a better useful-information-per-token ratio and a unified policy:
+//!   1. Command-like output, such as bash/http failures, strips ANSI, collapses
+//!      whitespace and blank lines, and keeps both head and tail. Key signals
+//!      such as exit codes and error stacks often sit in the tail, so head-only
+//!      truncation loses them.
+//!   2. All observation truncation moves from raw bytes to token estimates. CJK
+//!      is roughly one token per character but three bytes, so byte budgets make
+//!      Chinese and ASCII observations inconsistent.
 //!
-//! 重要约束：`stripAnsi` / `collapseBlank` 会改写字节，**绝不可**用于 file_read/grep 等
-//! 需要逐字节匹配（供后续 file_edit 的 old_str 精确命中）的内容；那类内容只走
-//! `truncateTokens`（窗口内逐字节保真）。命令输出才走 `optimizeStream`。
+//! Important constraint: `stripAnsi` and `collapseBlank` rewrite bytes, so they
+//! must never touch byte-exact content such as file_read/grep output that later
+//! file_edit may need to match exactly. Those paths only use `truncateTokens`,
+//! which preserves bytes inside retained windows. Command output uses
+//! `optimizeStream`.
 const std = @import("std");
 
-/// 粗略 token 估算（零依赖启发式，不追求与具体 tokenizer 对齐）：
-/// 多字节 UTF-8 起始字节（CJK/emoji 等，≈1 token/字）按 1 计；ASCII 文本约 4 字节/token。
-/// 仅用于给「头+尾」截断一个比纯字节更稳的预算口径。
+/// Rough token estimate with a zero-dependency heuristic, not tokenizer parity:
+/// each multibyte UTF-8 starter (CJK, emoji, etc.) counts as one token, while
+/// ASCII text is approximated as four bytes per token. This only gives head/tail
+/// truncation a stabler budget than raw bytes.
 pub fn estimateTokens(s: []const u8) usize {
     var tokens: usize = 0;
     var ascii_bytes: usize = 0;
@@ -32,8 +39,9 @@ pub fn estimateTokens(s: []const u8) usize {
     return tokens;
 }
 
-/// 从 `s` 开头消费 token，返回累计达到 `target` 个 token 时的字节下标（不足则返回 s.len）。
-/// 与 estimateTokens 同口径：每 4 个 ASCII 字节算 1 token，每个多字节字算 1 token。
+/// Consumes tokens from the start of `s` and returns the byte index where
+/// `target` tokens have been reached, or s.len if insufficient. Uses the same
+/// estimate as estimateTokens.
 fn forwardByteAtTokens(s: []const u8, target: usize) usize {
     if (target == 0) return 0;
     var i: usize = 0;
@@ -57,8 +65,10 @@ fn forwardByteAtTokens(s: []const u8, target: usize) usize {
     return s.len;
 }
 
-/// 剥除 ANSI/VT 转义序列：CSI（`ESC [ … final`）、OSC（`ESC ] … BEL|ST`）、以及其它双字节 ESC。
-/// **命令输出专用**——切勿用于需逐字节匹配的内容。无 ESC 时走快路径原样返回（不分配）。
+/// Strips ANSI/VT escape sequences: CSI (`ESC [ ... final`), OSC
+/// (`ESC ] ... BEL|ST`), and other two-byte ESC sequences. Command-output only:
+/// do not use for byte-exact content. If no ESC exists, returns the original
+/// slice without allocation.
 pub fn stripAnsi(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
     if (std.mem.indexOfScalar(u8, s, 0x1b) == null) return s;
     var out: std.ArrayList(u8) = .empty;
@@ -70,16 +80,16 @@ pub fn stripAnsi(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
             i += 1;
             continue;
         }
-        // ESC：单独结尾直接丢弃。
+        // Lone trailing ESC is dropped.
         if (i + 1 >= s.len) break;
         const n = s[i + 1];
         if (n == '[') {
-            // CSI：参数字节后跟一个 0x40–0x7e 的 final 字节。
+            // CSI: parameter bytes followed by a 0x40-0x7e final byte.
             i += 2;
             while (i < s.len and (s[i] < 0x40 or s[i] > 0x7e)) i += 1;
             if (i < s.len) i += 1;
         } else if (n == ']') {
-            // OSC：以 BEL(0x07) 或 ST(ESC \) 终止。
+            // OSC: terminated by BEL(0x07) or ST(ESC \).
             i += 2;
             while (i < s.len) {
                 if (s[i] == 0x07) {
@@ -93,22 +103,24 @@ pub fn stripAnsi(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
                 i += 1;
             }
         } else {
-            // 其它两字节转义（ESC + 单字节）整体丢弃。
+            // Other two-byte escapes (ESC + one byte) are dropped.
             i += 2;
         }
     }
     return out.items;
 }
 
-/// 折叠空白：每行先取最后一个回车（`\r`，终端覆盖语义）之后的内容、去尾随空白；
-/// 连续空行压成至多一个空行；丢弃首尾空行。**命令输出专用**（会改写字节）。
+/// Collapses whitespace: for each line, keep content after the last carriage
+/// return to model terminal overwrite semantics, trim trailing whitespace,
+/// compress consecutive blank lines to at most one, and drop leading/trailing
+/// blank lines. Command-output only because it rewrites bytes.
 pub fn collapseBlank(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     var pending_blank = false;
     var wrote_any = false;
     var it = std.mem.splitScalar(u8, s, '\n');
     while (it.next()) |raw| {
-        // 进度条/spinner 用 \r 原地覆盖：只保留最后一段。
+        // Progress bars and spinners use \r in-place overwrites; keep the final segment.
         const after_cr = if (std.mem.lastIndexOfScalar(u8, raw, '\r')) |cr| raw[cr + 1 ..] else raw;
         const line = std.mem.trimEnd(u8, after_cr, " \t");
         if (line.len == 0) {
@@ -126,9 +138,11 @@ pub fn collapseBlank(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
     return out.items;
 }
 
-/// token 友好的「头+尾」截断：估算 token ≤ `max_tokens` 时原样返回；否则保留头部（~60%）
-/// 与尾部（~40%，关键信号常在此），中间替换为占位行。按行边界裁剪以免割裂半行。
-/// 不剥 ANSI、不折叠空白——窗口内逐字节保真，可安全用于 file_read/grep 内容。
+/// Token-friendly head/tail truncation. If estimated tokens fit `max_tokens`,
+/// returns the original slice. Otherwise keeps roughly 60% head and 40% tail,
+/// where key signals often live, replacing the middle with a placeholder line.
+/// Cuts on line boundaries to avoid half-lines. Does not strip ANSI or collapse
+/// whitespace, preserving bytes inside retained windows for file_read/grep.
 pub fn truncateTokens(arena: std.mem.Allocator, s: []const u8, max_tokens: usize) ![]const u8 {
     if (max_tokens == 0) return s;
     const total = estimateTokens(s);
@@ -137,28 +151,29 @@ pub fn truncateTokens(arena: std.mem.Allocator, s: []const u8, max_tokens: usize
     const head_tokens = max_tokens * 6 / 10;
     const tail_tokens = max_tokens - head_tokens;
 
-    // 头：消费 head_tokens，向后吸到行尾（含换行）。
+    // Head: consume head_tokens, then extend to the end of the line.
     var head_end = forwardByteAtTokens(s, head_tokens);
     if (std.mem.indexOfScalarPos(u8, s, head_end, '\n')) |nl| head_end = nl + 1;
 
-    // 尾：跳过 (total - tail_tokens) 个 token，落点回退到所在行行首。
+    // Tail: skip (total - tail_tokens) tokens, then retreat to the line start.
     const skip = if (total > tail_tokens) total - tail_tokens else 0;
     var tail_start = forwardByteAtTokens(s, skip);
     if (std.mem.lastIndexOfScalar(u8, s[0..tail_start], '\n')) |nl| tail_start = nl + 1;
 
-    // 头尾重叠/逆序：截断不划算，原样返回。
+    // Overlap or inversion means truncation is not worthwhile.
     if (tail_start <= head_end) return s;
 
     const omitted = tail_start - head_end;
     return std.fmt.allocPrint(
         arena,
-        "{s}…（省略中段 {d} 字节）\n{s}",
+        "{s}...(omitted middle {d} bytes)\n{s}",
         .{ s[0..head_end], omitted, s[tail_start..] },
     );
 }
 
-/// 命令输出一站式瘦身：剥 ANSI → 折叠空白 → 头+尾 token 截断。
-/// 仅用于 bash 等命令流；file_read/grep 等保真内容只用 truncateTokens。
+/// One-stop command-output shrinking: strip ANSI, collapse blanks, then head/tail
+/// token truncation. Only for command streams such as bash; byte-exact content
+/// such as file_read/grep uses truncateTokens only.
 pub fn optimizeStream(arena: std.mem.Allocator, s: []const u8, max_tokens: usize) ![]const u8 {
     const no_ansi = try stripAnsi(arena, s);
     const collapsed = try collapseBlank(arena, no_ansi);
@@ -167,20 +182,20 @@ pub fn optimizeStream(arena: std.mem.Allocator, s: []const u8, max_tokens: usize
 
 const testing = std.testing;
 
-test "estimateTokens：ASCII ~len/4，CJK ~字数" {
+test "estimateTokens:ASCII ~len/4 and multibyte ~char count" {
     try testing.expectEqual(@as(usize, 0), estimateTokens(""));
-    // 8 个 ASCII 字符 → 2 token。
+    // Eight ASCII characters -> 2 tokens.
     try testing.expectEqual(@as(usize, 2), estimateTokens("abcdefgh"));
-    // 3 个汉字（各 3 字节）→ 3 token，而非 9。
-    try testing.expectEqual(@as(usize, 3), estimateTokens("中文字"));
+    // Three Chinese characters, three bytes each -> 3 tokens, not 9.
+    try testing.expectEqual(@as(usize, 3), estimateTokens("ééé"));
 }
 
-test "stripAnsi：剥除颜色与光标序列，无 ESC 走快路径" {
+test "stripAnsi:strips colors and cursor sequences; no ESC uses fast path" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    // 无 ESC：返回同一底层切片。
+    // No ESC: returns the same underlying slice.
     const plain = "hello world";
     try testing.expectEqual(plain.ptr, (try stripAnsi(arena, plain)).ptr);
 
@@ -188,7 +203,7 @@ test "stripAnsi：剥除颜色与光标序列，无 ESC 走快路径" {
     try testing.expectEqualStrings("ERROR: boom", out);
 }
 
-test "stripAnsi：OSC 标题序列以 BEL/ST 终止均被剥除" {
+test "stripAnsi:OSC title sequences terminated by BEL/ST are stripped" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -197,7 +212,7 @@ test "stripAnsi：OSC 标题序列以 BEL/ST 终止均被剥除" {
     try testing.expectEqualStrings("link", try stripAnsi(arena, "\x1b]8;;http://x\x1b\\link"));
 }
 
-test "collapseBlank：折叠空行、去尾随空白、\\r 覆盖" {
+test "collapseBlank normalizes blank lines, spaces, and carriage returns" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -206,7 +221,7 @@ test "collapseBlank：折叠空行、去尾随空白、\\r 覆盖" {
     try testing.expectEqualStrings("100% done", try collapseBlank(arena, "10%\r50%\r100% done\n"));
 }
 
-test "truncateTokens：未超预算原样返回（同切片）" {
+test "truncateTokens:returns original slice under budget" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -215,7 +230,7 @@ test "truncateTokens：未超预算原样返回（同切片）" {
     try testing.expectEqual(s.ptr, (try truncateTokens(arena, s, 100)).ptr);
 }
 
-test "truncateTokens：超预算保留头与尾，丢中段" {
+test "truncateTokens:keeps head and tail when over budget" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -230,10 +245,10 @@ test "truncateTokens：超预算保留头与尾，丢中段" {
     try testing.expect(out.len < buf.items.len);
     try testing.expect(std.mem.indexOf(u8, out, "HEAD-MARKER") != null);
     try testing.expect(std.mem.indexOf(u8, out, "EXIT-CODE-7-TAIL") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "省略中段") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "omitted middle") != null);
 }
 
-test "optimizeStream：ANSI+空白+尾部信号一起处理且尾部退出码保留" {
+test "optimizeStream strips ANSI noise, handles tail signal, and preserves tail exit_code" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -245,7 +260,7 @@ test "optimizeStream：ANSI+空白+尾部信号一起处理且尾部退出码保
     try buf.appendSlice(arena, "exit=42\n");
 
     const out = try optimizeStream(arena, buf.items, 80);
-    try testing.expect(std.mem.indexOf(u8, out, "\x1b[") == null); // ANSI 已剥
-    try testing.expect(std.mem.indexOf(u8, out, "exit=42") != null); // 尾部信号保留
+    try testing.expect(std.mem.indexOf(u8, out, "\x1b[") == null); // ANSI stripped.
+    try testing.expect(std.mem.indexOf(u8, out, "exit=42") != null); // Tail signal retained.
     try testing.expect(out.len < buf.items.len);
 }

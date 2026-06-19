@@ -74,16 +74,21 @@ pub fn previousRunWasUnclean(state: ?State) bool {
     return std.mem.eql(u8, s.status, "running");
 }
 
-/// 进程存活探测（issue #53）：用 signal 0 探针判断 `pid` 是否对应一个仍存活的进程。
+/// Process liveness probe (issue #53): use signal 0 to check whether `pid`
+/// still belongs to a live process.
 ///
-/// 设计取舍：项目未链接 libc，且 0.16 无 `std.posix.flock`/`open`，故不引入文件锁或
-/// 全量监督，仅做轻量探活以缩小失败模式（陈旧 PID、误判 running）。signal 0 不会真正投递
-/// 信号，只触发内核的权限/存在性检查：
-///   - 成功返回         → 进程存在且本进程有权限 → 存活
-///   - error.PermissionDenied → 进程存在但属于他人 → 仍视为存活
-///   - 其它（ProcessNotFound 等） → 进程不存在 → 非存活
-/// 残留风险：PID 复用可能把“恰好复用同号的新进程”误判为存活，这是无进程身份信息时不可消除的，
-/// 已在 issue #53 中作为可接受的文档化残留。pid <= 0 一律视为非存活（避免 kill 的进程组语义）。
+/// Tradeoff: the project does not link libc, and Zig 0.16 lacks
+/// `std.posix.flock`/`open`, so this avoids file locks or full supervision.
+/// The lightweight probe narrows stale-PID and false-running failure modes.
+/// Signal 0 does not deliver a real signal; it only asks the kernel to check
+/// permission and existence:
+///   - success -> process exists and is accessible -> alive
+///   - error.PermissionDenied -> process exists but belongs to another user -> alive
+///   - anything else, such as ProcessNotFound -> not alive
+/// Residual risk: PID reuse can misclassify a new process with the same PID as
+/// alive. Without process identity metadata this cannot be eliminated, and is
+/// documented as accepted residual risk in issue #53. pid <= 0 is always dead
+/// to avoid `kill` process-group semantics.
 pub fn pidAlive(pid: i64) bool {
     if (pid <= 0) return false;
     const sig0: std.posix.SIG = @enumFromInt(0);
@@ -162,15 +167,15 @@ test "previousRunWasUnclean only flags running state" {
 }
 
 test "pidAlive: current process alive, invalid and unused pids dead (issue #53)" {
-    // 当前进程必然存活。
+    // The current process must be alive.
     const self_pid: i64 = @intCast(std.posix.system.getpid());
     try std.testing.expect(pidAlive(self_pid));
 
-    // 非法 pid（<=0）一律视为非存活，避免触发 kill 的进程组语义。
+    // Invalid pids (<=0) are always dead to avoid kill process-group semantics.
     try std.testing.expect(!pidAlive(0));
     try std.testing.expect(!pidAlive(-1));
 
-    // 一个几乎不可能被占用的超大 pid：探针应判为非存活。
+    // A huge, nearly impossible pid should probe as dead.
     try std.testing.expect(!pidAlive(2_000_000_000));
 }
 

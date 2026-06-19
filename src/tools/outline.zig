@@ -1,18 +1,21 @@
-//! 零依赖结构骨架（outline）：用按语言的轻量**行启发式**从源码 / Markdown 抽出函数与
-//! 类型签名、标题层级，给 agent 一份「先看结构再决定要不要窗口读」的低 token 概览
-//! （issue #77）。
+//! Zero-dependency structure outline: lightweight language-specific line
+//! heuristics extract functions, type signatures, and heading hierarchy from
+//! source or Markdown, giving the agent a low-token "inspect structure first"
+//! overview (issue #77).
 //!
-//! 取向（铁律：自包含单二进制）：刻意**不**引入 AST / 外部 ast-grep——那与零依赖单二进制
-//! 冲突。故本模块是 best-effort：求「够用的骨架」而非精确解析。Zig / Markdown 走精确规则
-//! （仓库自身语言 + 文档），其余语言走一组关键字前缀的通用启发式（不可避免有漏/误）。
+//! Design stance: intentionally avoid ASTs or external ast-grep because they
+//! conflict with a self-contained single binary. This module is best-effort:
+//! enough structure, not exact parsing. Zig and Markdown use precise rules for
+//! this repo's own code and docs; other languages use generic keyword-prefix
+//! heuristics with unavoidable misses and false positives.
 const std = @import("std");
 
-/// 骨架行数上限：超大文件也不让概览本身爆 token（超出即截断并在观察里注明）。
+/// Outline entry cap; huge files cannot make the overview itself explode.
 pub const max_entries: usize = 400;
 
 pub const Lang = enum { zig, markdown, generic };
 
-/// 一条结构行：1 起行号 + 精简文本（指向输入 `text`，零拷贝；调用方须保证 text 生命周期）。
+/// One structure line: 1-based line number plus compact text borrowed from input.
 pub const Entry = struct {
     line: usize,
     text: []const u8,
@@ -21,11 +24,11 @@ pub const Entry = struct {
 pub const Result = struct {
     lang: Lang,
     entries: []const Entry,
-    /// 命中数达到 max_entries 被截断（仍是有用骨架，只是不完整）。
+    /// True when entries hit max_entries and the useful outline is incomplete.
     truncated: bool = false,
 };
 
-/// 按扩展名猜测语言；未知 → generic。
+/// Guesses language by extension; unknown paths are generic.
 pub fn detectLang(path: []const u8) Lang {
     const dot = std.mem.lastIndexOfScalar(u8, path, '.') orelse return .generic;
     const ext = path[dot + 1 ..];
@@ -37,11 +40,11 @@ pub fn detectLang(path: []const u8) Lang {
     return .generic;
 }
 
-/// 从已读入的文本抽结构行。`Entry.text` 指向 `text` 的切片（零拷贝）。
+/// Extracts structure lines from already-read text. `Entry.text` borrows `text`.
 pub fn extract(arena: std.mem.Allocator, text: []const u8, lang: Lang) !Result {
     var list: std.ArrayList(Entry) = .empty;
     var truncated = false;
-    var in_fence = false; // 仅 markdown：围栏代码块内不当标题。
+    var in_fence = false; // Markdown only: ignore headings inside fenced code.
 
     var line_no: usize = 0;
     var it = std.mem.splitScalar(u8, text, '\n');
@@ -69,7 +72,7 @@ pub fn extract(arena: std.mem.Allocator, text: []const u8, lang: Lang) !Result {
     return .{ .lang = lang, .entries = try list.toOwnedSlice(arena), .truncated = truncated };
 }
 
-/// 去掉签名行尾部的 ` {}` / ` {` 与尾随空白，让骨架更紧凑（不改变可读性）。
+/// Removes trailing ` {}` / ` {` and whitespace to keep outlines compact.
 fn cleanSig(trimmed: []const u8) []const u8 {
     var s = std.mem.trimEnd(u8, trimmed, " \t");
     if (std.mem.endsWith(u8, s, "{}")) {
@@ -87,12 +90,12 @@ fn startsWithAny(s: []const u8, comptime prefixes: []const []const u8) bool {
     return false;
 }
 
-/// Zig：函数 / 测试（任意缩进，含 struct 内方法）+ 顶层（缩进 0）类型与公开声明。
-/// 跳过顶层 `... = @import(...)` 导入行（低价值噪声）。
+/// Zig: functions/tests at any indentation, including struct methods, plus
+/// top-level types and public declarations. Skips top-level imports as noise.
 fn zigMatch(indent: usize, trimmed: []const u8) ?[]const u8 {
     if (startsWithAny(trimmed, &.{
-        "pub fn ",     "fn ",        "pub inline fn ", "inline fn ",
-        "export fn ",  "pub export fn ", "test ",
+        "pub fn ",    "fn ",            "pub inline fn ", "inline fn ",
+        "export fn ", "pub export fn ", "test ",
     })) return cleanSig(trimmed);
     if (indent == 0) {
         if (std.mem.indexOf(u8, trimmed, "= @import(") != null) return null;
@@ -102,7 +105,7 @@ fn zigMatch(indent: usize, trimmed: []const u8) ?[]const u8 {
     return null;
 }
 
-/// Markdown：ATX 标题（`#`..`######` 后跟空格），围栏代码块（``` / ~~~）内不计。
+/// Markdown: ATX headings (`#`..`######` followed by space), excluding fences.
 fn mdMatch(in_fence: *bool, trimmed: []const u8) ?[]const u8 {
     if (std.mem.startsWith(u8, trimmed, "```") or std.mem.startsWith(u8, trimmed, "~~~")) {
         in_fence.* = !in_fence.*;
@@ -115,21 +118,22 @@ fn mdMatch(in_fence: *bool, trimmed: []const u8) ?[]const u8 {
     return null;
 }
 
-/// 通用启发式：按一组定义关键字前缀匹配（覆盖 Python/JS/TS/Go/Rust/Java/C# 等关键字引导
-/// 的语言）。限缩进 ≤ 4（顶层 + 一层嵌套，如类内方法）压噪。对 C/C++ 这类「类型引导」定义
-/// 会漏，属已知取舍。
+/// Generic heuristic: match definition keyword prefixes across Python, JS/TS,
+/// Go, Rust, Java, C#, and similar languages. Indentation is capped at <= 4
+/// spaces to reduce noise from deep blocks. Type-led C/C++ definitions are a
+/// known miss.
 fn genericMatch(indent: usize, trimmed: []const u8) ?[]const u8 {
     if (indent > 4) return null;
     if (startsWithAny(trimmed, &.{
-        "def ",       "class ",     "func ",      "function ", "fn ",
-        "pub fn ",    "struct ",    "type ",      "interface ", "impl ",
-        "trait ",     "enum ",      "module ",    "namespace ", "package ",
-        "export ",    "public ",    "private ",   "protected ", "async ",
+        "def ",    "class ",  "func ",    "function ",  "fn ",
+        "pub fn ", "struct ", "type ",    "interface ", "impl ",
+        "trait ",  "enum ",   "module ",  "namespace ", "package ",
+        "export ", "public ", "private ", "protected ", "async ",
     })) return cleanSig(trimmed);
     return null;
 }
 
-test "detectLang：按扩展名识别 zig / markdown / 其它" {
+test "detectLang:detects zig / markdown / other by extension" {
     try std.testing.expectEqual(Lang.zig, detectLang("src/main.zig"));
     try std.testing.expectEqual(Lang.markdown, detectLang("README.md"));
     try std.testing.expectEqual(Lang.markdown, detectLang("docs/X.MARKDOWN"));
@@ -137,7 +141,7 @@ test "detectLang：按扩展名识别 zig / markdown / 其它" {
     try std.testing.expectEqual(Lang.generic, detectLang("Makefile"));
 }
 
-test "extract zig：抓函数 / 测试 / 顶层类型，跳过 import 与局部 const" {
+test "extract zig:extracts functions / tests / top-level types and skips imports/local consts" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -157,7 +161,7 @@ test "extract zig：抓函数 / 测试 / 顶层类型，跳过 import 与局部 
     const r = try extract(arena, src, .zig);
     try std.testing.expectEqual(Lang.zig, r.lang);
 
-    // 期望命中：Agent 类型、run 方法、helper、test；不含 import 与局部 const。
+    // Expected hits: Agent type, run method, helper, test; no import or local const.
     try std.testing.expect(hasLineText(r.entries, "pub const Agent = struct"));
     try std.testing.expect(hasLineText(r.entries, "pub fn run(self: *Agent) !void"));
     try std.testing.expect(hasLineText(r.entries, "fn helper() void"));
@@ -169,7 +173,7 @@ test "extract zig：抓函数 / 测试 / 顶层类型，跳过 import 与局部 
     }
 }
 
-test "extract markdown：抓 ATX 标题，围栏代码块内的 # 不计" {
+test "extract markdown:extracts ATX headings and ignores # inside fenced code blocks" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -191,7 +195,7 @@ test "extract markdown：抓 ATX 标题，围栏代码块内的 # 不计" {
     try std.testing.expect(hasLineText(r.entries, "### Subsection"));
 }
 
-test "extract generic：关键字引导的定义命中，深缩进忽略" {
+test "extract generic symbols and headings" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -209,14 +213,14 @@ test "extract generic：关键字引导的定义命中，深缩进忽略" {
     try std.testing.expect(hasLineText(r.entries, "class Foo:"));
     try std.testing.expect(hasLineText(r.entries, "def method(self):"));
     try std.testing.expect(hasLineText(r.entries, "def top_level():"));
-    // 深缩进（>4 空格）的嵌套 def 被忽略，import 不是定义关键字。
+    // Deeply indented nested def is ignored; import is not a definition keyword.
     for (r.entries) |e| {
         try std.testing.expect(std.mem.indexOf(u8, e.text, "deeply_nested") == null);
         try std.testing.expect(std.mem.indexOf(u8, e.text, "import os") == null);
     }
 }
 
-test "extract：超过 max_entries 截断并置位" {
+test "extract:sets truncated when exceeding max_entries" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();

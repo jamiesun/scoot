@@ -1,5 +1,6 @@
-//! 执行沙盒：Agent 可调用的底层原语。
-//! 每个工具都必须具备硬超时；绝不直接执行未经校验的模型输出。
+//! Execution sandbox: low-level primitives callable by the agent.
+//! Every tool must have a hard timeout, and unvalidated model output must never
+//! execute directly.
 const std = @import("std");
 
 pub const bash = @import("bash.zig");
@@ -8,12 +9,12 @@ pub const search = @import("search.zig");
 pub const http = @import("http.zig");
 pub const outline = @import("outline.zig");
 
-/// 工具执行的统一结果。
+/// Unified tool execution result.
 pub const Result = struct {
     stdout: []const u8 = "",
     stderr: []const u8 = "",
     exit_code: i32 = 0,
-    /// 是否因硬超时被强制终止。
+    /// Whether execution was force-terminated by a hard timeout.
     timed_out: bool = false,
 };
 
