@@ -26,6 +26,8 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 - 上下文压缩现在通过 `Compressor` 策略接缝执行，同时保持现有 `drop`
   行为作为默认策略（#97）。
+- 新增内置 `extractive` 压缩器，并支持通过 `agent.compactor` /
+  `SCOOT_AGENT_COMPACTOR` 选择；默认仍为 `drop`（#97）。
 
 ### 修复
 

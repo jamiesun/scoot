@@ -48,6 +48,7 @@ ephemeral, run-once-then-discard execution.
 | `SCOOT_BACKEND_PROMPT_CACHE` | `backend.prompt_cache` | string (`off` / `anthropic`) |
 | `SCOOT_BACKEND_EXTRA_BODY` | `backend.extra_body` | JSON object |
 | `SCOOT_AGENT_DEFAULT_MODE` | `agent.default_mode` | string (`goal`/`plan`) |
+| `SCOOT_AGENT_COMPACTOR` | `agent.compactor` | string (`drop`/`extractive`) |
 | `SCOOT_AGENT_MAX_TURNS` | `agent.max_turns` | integer |
 | `SCOOT_AGENT_CONTEXT_BUDGET_BYTES` | `agent.context_budget_bytes` | integer |
 | `SCOOT_TOOLS_POLICY` | `tools.policy` | string (`guarded`/`readonly`/`unrestricted`) |
@@ -174,22 +175,27 @@ The cognition engine.
 | --- | --- | --- | --- |
 | `max_turns` | u32 | `32` | Maximum ReACT turns before the agent stops, to bound runaway loops. |
 | `default_mode` | string | `goal` | Cognition mode. `goal` is implemented today; `plan` is reserved (see Roadmap) and does not yet change execution. |
+| `compactor` | string | `drop` | Context compaction strategy: `drop` keeps the old count marker; `extractive` writes a deterministic summary of files, commands, denials, and notable observations. |
 | `context_budget_bytes` | usize | `0` | Cumulative prompt-history budget in **bytes**. `0` disables it. |
 
 **`context_budget_bytes`** guards small-context backends. When the running
 transcript would exceed this size, the agent first **compacts history** —
 keeping the system prompt, the original task, and the most recent turns while
-replacing older tool transcripts with a short summary marker — so a long run can
-continue instead of aborting. It only fails fast (with a clear error) *before*
-the next backend call if the transcript is still over budget after compaction
-(the budget is too small for even the minimal retained context). Bytes are a
-coarse proxy for tokens — pick a conservative value below your backend's context
-window (turn count is still bounded by `max_turns`).
+using `agent.compactor`. `drop` is the smallest and most conservative behavior:
+it replaces older tool transcripts with a short count marker. `extractive`
+keeps a deterministic navigation summary, such as files read or changed,
+commands and exit codes, policy denials, and obvious TODO-like observations.
+It only fails fast (with a clear error) *before* the next backend call if the
+transcript is still over budget after compaction (the budget is too small for
+even the minimal retained context). Bytes are a coarse proxy for tokens — pick a
+conservative value below your backend's context window (turn count is still
+bounded by `max_turns`).
 
 ```toml
 [agent]
 max_turns = 32
 default_mode = "goal"
+compactor = "drop"               # or "extractive"
 context_budget_bytes = 0          # e.g. 120000 for a ~32k-token backend
 ```
 

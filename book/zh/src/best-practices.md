@@ -180,6 +180,7 @@ base_url = "http://127.0.0.1:11434/v1"
 model = "qwen2.5"
 
 [agent]
+compactor = "extractive"
 context_budget_bytes = 80000
 
 [schedule]

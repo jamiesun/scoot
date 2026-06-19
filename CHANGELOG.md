@@ -27,6 +27,8 @@ heading when cutting a release.
 
 - Context compaction now goes through a `Compressor` strategy seam while keeping
   the existing `drop` behavior as the default (#97).
+- Added the built-in `extractive` compactor and `agent.compactor` /
+  `SCOOT_AGENT_COMPACTOR` selection while keeping `drop` as the default (#97).
 
 ### Fixed
 
