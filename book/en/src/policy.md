@@ -92,6 +92,13 @@ own directory contents to the model even under `readonly` — this is part of th
 defined read boundary, not a bypass, so do not treat `readonly` as a sandbox
 against untrusted skills.
 
+## The `recall` Action Is Native
+
+`recall` reads only the current session's transcript archive. It has no file,
+network, or process side effects, so it is also native and allowed in
+`readonly`. Unlike `skill`, it does not widen the filesystem read surface; it
+only returns content already present in the session transcript.
+
 ## Opt-in Hardening (guarded only)
 
 Two flags tighten `guarded` mode. Both default to `false` and apply **only in

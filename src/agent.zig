@@ -69,6 +69,7 @@ pub const system_prompt =
     \\  - "outline"：以极低 token 取回一个文件的「结构骨架」——源码的函数/类型签名、Markdown 的标题层级；action_input 是 JSON 对象 {"path":"文件路径"}。用于在**不整读**大文件的前提下先了解其结构，再决定要不要用 file_read 行窗口精读某段。零依赖启发式（按扩展名识别 Zig / Markdown，其余走通用关键字匹配），是 best-effort 概览而非精确解析。
     \\  - "http_request"：发起一次 HTTP/HTTPS 请求；action_input 是 JSON 对象 {"method":"GET","url":"https://...","body":"可选请求体"}。method 取 GET/POST/PUT/DELETE/HEAD/PATCH。返回状态码与响应体；带硬超时，绝不挂死。
     \\  - "skill"：读取一个已装载技能的指令或资源文件。这是 Scoot 的原生只读能力，不受执行策略限制（即便 readonly 也可用）；action_input 是 JSON 对象 {"name":"技能名","path":"技能目录内的相对路径（可选，默认 SKILL.md）"}。仅能读取「可用技能」清单中列出技能其目录内的文件，用于按需取回该技能的完整操作指令（技能里要你执行的 bash/写/网络动作仍各自受执行策略约束）。
+    \\  - "recall"：从当前会话的完整 transcript 归档中召回原文；这是原生只读能力，即便较早上下文已被压缩也可用。action_input 是 JSON 对象，按关键字查 {"query":"关键词","limit":8}，或按序号查 {"seq":12,"context":2}。seq 从 1 开始。
     \\  - "parallel"：并发执行 1-4 个彼此独立的只读调用；action_input 是 JSON 对象 {"calls":[{"action":"file_read","input":"{\"path\":\"README.md\"}"},{"action":"grep","input":"{\"pattern\":\"Scoot\",\"path\":\"AGENT.md\"}"}]}。只允许 file_read / grep / glob / outline / HTTP GET 或 HEAD；禁止 bash、写操作、嵌套 parallel。
     \\  - "final"：给出最终答复；action_input 是给用户的答复文本。
     \\
@@ -83,7 +84,7 @@ pub const system_prompt =
 ;
 
 /// 模型可选的动作。
-pub const Action = enum { bash, file_read, file_write, file_edit, grep, glob, outline, http_request, skill, parallel, final };
+pub const Action = enum { bash, file_read, file_write, file_edit, grep, glob, outline, http_request, skill, recall, parallel, final };
 
 /// 一个解析后的 ReACT 步骤。
 pub const Step = struct {
@@ -103,6 +104,7 @@ const GlobArgs = struct { pattern: []const u8, root: []const u8 = "." };
 const OutlineArgs = struct { path: []const u8 };
 const HttpArgs = struct { method: []const u8 = "GET", url: []const u8, body: ?[]const u8 = null };
 const SkillArgs = struct { name: []const u8, path: []const u8 = "SKILL.md" };
+const RecallArgs = struct { query: ?[]const u8 = null, seq: ?usize = null, context: ?usize = null, limit: ?usize = null };
 const ParallelCallArgs = struct {
     action: []const u8,
     input: []const u8 = "",
@@ -344,7 +346,7 @@ pub const Agent = struct {
                             // 工具执行也是阻塞点（bash / http_request 可能很慢），观察结果只能在
                             // 执行**返回后**打印；执行前先标记「正在执行哪个工具」，等待期不致静默。
                             self.traceRunning(turn + 1, step.action);
-                            var observation: []const u8 = self.execTool(arena, step.action, step.action_input) catch |err|
+                            var observation: []const u8 = self.execToolWithSession(arena, sess, step.action, step.action_input) catch |err|
                                 try toolErrorObservation(arena, err);
                             // 只读动作内容去重（issue #73）：重复读取且观察未变时，用简短引用替换
                             // 全文回灌，避免同份内容在历史里反复堆叠、逐回合重发。
@@ -371,6 +373,7 @@ pub const Agent = struct {
             .file_write, .file_edit => self.guardWrite(arena, action, input),
             .http_request => self.guardHttp(arena, input),
             .skill => .allow, // 见下：读取技能指令是原生只读能力，刻意置于执行策略之外。
+            .recall => .allow, // 从本会话 transcript 归档召回原文，原生只读且无外部副作用。
             .parallel => self.guardParallel(arena, input),
             // 调用方契约：`run` 在调用 guard 前已就地处理 .final（终态不过护栏）。
             // 这里**不 panic**而是降级为 deny（防弹/铁律 #4）：未来若某调用方误把
@@ -491,6 +494,7 @@ pub const Agent = struct {
                 .bash => return .{ .deny = "parallel 禁止 bash；请使用结构化只读工具" },
                 .file_write, .file_edit => return .{ .deny = "parallel 禁止写文件或编辑文件" },
                 .skill => return .{ .deny = "parallel 禁止 skill；请用独立的 skill 动作读取技能指令" },
+                .recall => return .{ .deny = "parallel 禁止 recall；请用独立的 recall 动作读取会话原文" },
                 .parallel => return .{ .deny = "parallel 禁止嵌套 parallel" },
                 .final => return .{ .deny = "parallel 子调用不能是 final" },
             }
@@ -508,6 +512,10 @@ pub const Agent = struct {
     /// 任何失败（参数畸形 / IO 错误 / 超时）都以 error 上抛，由调用处转成观察回灌，
     /// 全程不 panic（铁律 #4）。
     fn execTool(self: *Agent, arena: std.mem.Allocator, action: Action, input: []const u8) ![]const u8 {
+        return self.execToolWithSession(arena, null, action, input);
+    }
+
+    fn execToolWithSession(self: *Agent, arena: std.mem.Allocator, sess: ?*const session.Session, action: Action, input: []const u8) ![]const u8 {
         return switch (action) {
             .bash => try self.runBash(arena, input),
             .file_read => blk: {
@@ -558,6 +566,11 @@ pub const Agent = struct {
             .skill => blk: {
                 const args = try parseToolArgs(SkillArgs, arena, input);
                 break :blk try self.readSkill(arena, args.name, args.path);
+            },
+            .recall => blk: {
+                const args = try parseToolArgs(RecallArgs, arena, input);
+                const s = sess orelse return error.RecallUnavailable;
+                break :blk try recallObservation(arena, s, args);
             },
             // 调用方契约：`run` 在调用 execTool 前已就地处理 .final。降级为 error 而非
             // unreachable：契约被破坏时 run 会把它转成「工具执行失败」观察回灌，不 panic。
@@ -803,6 +816,11 @@ const skill_read_limit: std.Io.Limit = .limited(1 << 20);
 /// 技能内容回灌观察的截断上限：比普通 file_read 更宽——SKILL.md 是模型按需取回的
 /// 完整操作指令，截断会丢失步骤；但仍设硬上限挡住异常大文件撑爆上下文。
 const skill_observation_tokens = 8000;
+/// recall 返回当前会话 transcript 原文。默认小窗口，避免把压缩省下的上下文又撑回去。
+const recall_default_limit = 8;
+const recall_max_hits = 20;
+const recall_max_context = 3;
+const recall_observation_tokens = 4000;
 
 /// parallel v0 是显式 fan-out，不是 DAG 执行器。小上限避免拖垮本地 runtime。
 const max_parallel_calls = 4;
@@ -857,10 +875,10 @@ fn historyBytes(messages: []const llm.Message) usize {
 /// 对常见错误给出可操作的纠正提示，引导模型自我修复（铁律 #4：失败即反馈而非中断）。
 fn toolErrorObservation(arena: std.mem.Allocator, err: anyerror) ![]u8 {
     const hint = switch (err) {
-        error.MalformedArgs => "action_input 不是合法的参数 JSON。file_read 用 {\"path\":\"...\"}；file_write 用 {\"path\":\"...\",\"content\":\"...\"}；file_edit 用 {\"path\":\"...\",\"old\":\"...\",\"new\":\"...\"}；grep 用 {\"pattern\":\"...\",\"path\":\"...\"}；glob 用 {\"pattern\":\"...\"}；http_request 用 {\"method\":\"GET\",\"url\":\"...\"}。",
+        error.MalformedArgs => "action_input 不是合法的参数 JSON。file_read 用 {\"path\":\"...\"}；file_write 用 {\"path\":\"...\",\"content\":\"...\"}；file_edit 用 {\"path\":\"...\",\"old\":\"...\",\"new\":\"...\"}；grep 用 {\"pattern\":\"...\",\"path\":\"...\"}；glob 用 {\"pattern\":\"...\"}；http_request 用 {\"method\":\"GET\",\"url\":\"...\"}；recall 用 {\"query\":\"...\"} 或 {\"seq\":1}。",
         error.UnknownMethod => "http_request 的 method 无法识别。请用 GET/POST/PUT/DELETE/HEAD/PATCH 之一。",
         error.ParallelWriteHttp => "parallel 只允许 HTTP GET/HEAD，不允许 POST/PUT/PATCH/DELETE。",
-        error.UnsupportedParallelAction => "parallel 只允许 file_read / grep / glob / HTTP GET 或 HEAD。",
+        error.UnsupportedParallelAction => "parallel 只允许 file_read / grep / glob / outline / HTTP GET 或 HEAD。",
         error.PatternNotFound => "file_edit 的 old 文本未在文件中找到。请先用 file_read 读出确切文本再编辑。",
         error.AmbiguousMatch => "file_edit 的 old 文本在文件中出现多次。请提供更长、唯一的上下文片段以定位。",
         error.EmptyPattern => "file_edit 的 old 不能为空。",
@@ -870,6 +888,7 @@ fn toolErrorObservation(arena: std.mem.Allocator, err: anyerror) ![]u8 {
         error.AccessDenied => "对目标路径没有访问权限。",
         error.IsDir => "目标路径是目录而非文件。",
         error.UnexpectedAction => "内部错误：动作被路由到了错误的执行分支（不应发生）。请重试或换一种动作。",
+        error.RecallUnavailable => "recall 只能在运行中的会话内使用。请换用 file_read/grep，或在下一步重试。",
         else => @errorName(err),
     };
     return std.fmt.allocPrint(arena, "[观察] 工具执行失败：{s}", .{hint});
@@ -1007,6 +1026,82 @@ fn formatHttpResponse(arena: std.mem.Allocator, url: []const u8, resp: tools.htt
         "[观察] http {s} 状态码={d}，响应体（{d} 字节）：\n{s}",
         .{ url, resp.status, resp.body.len, clipped },
     );
+}
+
+fn recallObservation(arena: std.mem.Allocator, sess: *const session.Session, args: RecallArgs) ![]const u8 {
+    const msgs = sess.archiveItems();
+    if (msgs.len == 0)
+        return arena.dupe(u8, "[观察] recall 当前会话 transcript 为空。");
+
+    var out: std.Io.Writer.Allocating = .init(arena);
+    const w = &out.writer;
+    const context = @min(args.context orelse 0, recall_max_context);
+    const limit = normalizeRecallLimit(args.limit);
+
+    if (args.seq) |seq| {
+        if (seq == 0 or seq > msgs.len) {
+            return std.fmt.allocPrint(arena, "[观察] recall seq={d} 超出范围；当前 transcript 序号为 1..{d}。", .{ seq, msgs.len });
+        }
+        const idx = seq - 1;
+        const start = if (idx > context) idx - context else 0;
+        const end = @min(msgs.len, idx + context + 1);
+        try w.print("[观察] recall 当前会话 transcript seq={d}（上下文 ±{d}，返回 {d} 条）：\n", .{ seq, context, end - start });
+        var i = start;
+        while (i < end) : (i += 1) try writeRecallJsonLine(w, i + 1, msgs[i]);
+        return clipTo(arena, out.written(), recall_observation_tokens);
+    }
+
+    const raw_query = args.query orelse
+        return arena.dupe(u8, "[观察] recall 需要 query 或 seq，例如 {\"query\":\"关键词\",\"limit\":8} 或 {\"seq\":12,\"context\":2}。");
+    const query = std.mem.trim(u8, raw_query, " \t\r\n");
+    if (query.len == 0)
+        return arena.dupe(u8, "[观察] recall query 不能为空；请给出要查找的关键词。");
+
+    var selected = try arena.alloc(bool, msgs.len);
+    @memset(selected, false);
+    var hit_count: usize = 0;
+    for (msgs, 0..) |m, i| {
+        if (hit_count >= limit) break;
+        if (!recallMatches(m, query)) continue;
+        hit_count += 1;
+        const start = if (i > context) i - context else 0;
+        const end = @min(msgs.len, i + context + 1);
+        var j = start;
+        while (j < end) : (j += 1) selected[j] = true;
+    }
+    if (hit_count == 0)
+        return std.fmt.allocPrint(arena, "[观察] recall 在当前会话 transcript 中未找到关键词：{s}", .{query});
+
+    var returned: usize = 0;
+    for (selected) |is_selected| {
+        if (is_selected) returned += 1;
+    }
+    try w.print("[观察] recall 当前会话 transcript query={s} 命中 {d} 处（limit={d}，上下文 ±{d}，返回 {d} 条）：\n", .{ query, hit_count, limit, context, returned });
+    for (selected, 0..) |is_selected, i| {
+        if (is_selected) try writeRecallJsonLine(w, i + 1, msgs[i]);
+    }
+    return clipTo(arena, out.written(), recall_observation_tokens);
+}
+
+fn normalizeRecallLimit(limit: ?usize) usize {
+    const v = limit orelse recall_default_limit;
+    if (v == 0) return recall_default_limit;
+    return @min(v, recall_max_hits);
+}
+
+fn recallMatches(m: llm.Message, query: []const u8) bool {
+    return std.mem.indexOf(u8, m.content, query) != null or
+        std.mem.indexOf(u8, @tagName(m.role), query) != null;
+}
+
+fn writeRecallJsonLine(w: *std.Io.Writer, seq: usize, m: llm.Message) !void {
+    try w.writeAll("{\"seq\":");
+    try w.print("{d}", .{seq});
+    try w.writeAll(",\"role\":\"");
+    try w.writeAll(@tagName(m.role));
+    try w.writeAll("\",\"content\":");
+    try jsonio.writeString(w, m.content);
+    try w.writeAll("}\n");
 }
 
 /// 把工具执行结果格式化成回灌给模型的「观察」文本（arena 拥有）。
@@ -1753,6 +1848,72 @@ test "run: 预算过小、压缩后仍超限则 fail-fast（issue #71）" {
     while (i < 12) : (i += 1) try sess.append(gpa, .user, "observation-payload-block");
 
     try std.testing.expectError(error.ContextBudgetExceeded, ag.run(gpa, &sess));
+}
+
+test "recallObservation: 从完整归档召回已被活跃上下文压缩的原文（issue #99）" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var sess = session.Session.init("t-recall");
+    defer sess.deinit(gpa);
+    try sess.append(gpa, .system, "SYS");
+    try sess.append(gpa, .user, "GOAL");
+    try sess.append(gpa, .assistant, "OLD-STEP");
+    try sess.append(gpa, .user, "SECRET-RECALL-ORIGINAL");
+    try sess.append(gpa, .assistant, "RECENT");
+
+    try std.testing.expect(try compressor.default.compact(gpa, &sess, .{ .keep_recent = 1 }));
+    for (sess.items()) |m| {
+        try std.testing.expect(std.mem.indexOf(u8, m.content, "SECRET-RECALL-ORIGINAL") == null);
+    }
+
+    const obs_by_query = try recallObservation(arena, &sess, .{ .query = "SECRET-RECALL-ORIGINAL", .limit = 2 });
+    try std.testing.expect(std.mem.indexOf(u8, obs_by_query, "\"seq\":4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, obs_by_query, "SECRET-RECALL-ORIGINAL") != null);
+
+    const obs_by_seq = try recallObservation(arena, &sess, .{ .seq = 3, .context = 1 });
+    try std.testing.expect(std.mem.indexOf(u8, obs_by_seq, "\"seq\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, obs_by_seq, "\"seq\":4") != null);
+}
+
+test "run: recall 可在压缩后召回较早 transcript 原文（issue #99）" {
+    const gpa = std.testing.allocator;
+    var brain = ScriptedBrain{ .steps = &.{
+        "{\"thought\":\"召回旧细节\",\"action\":\"recall\",\"action_input\":\"{\\\"query\\\":\\\"NEEDLE-RECALL-HIDDEN\\\"}\"}",
+        "{\"thought\":\"完成\",\"action\":\"final\",\"action_input\":\"done\"}",
+    } };
+    var ag = testAgent(&brain, 16);
+    ag.compactor = compressor.default;
+    ag.context_budget_bytes = 3000;
+
+    var sess = session.Session.init("t-recall-run");
+    defer sess.deinit(gpa);
+    try sess.append(gpa, .system, "SYS");
+    try sess.append(gpa, .user, "GOAL");
+
+    var i: usize = 0;
+    while (i < 12) : (i += 1) {
+        try sess.append(gpa, .assistant, "{\"action\":\"bash\",\"action_input\":\"x\"}");
+        try sess.append(gpa, .user, "old observation payload NEEDLE-RECALL-HIDDEN " ++ ("x" ** 200));
+    }
+    while (i < 16) : (i += 1) {
+        try sess.append(gpa, .assistant, "{\"action\":\"bash\",\"action_input\":\"recent\"}");
+        try sess.append(gpa, .user, "recent small observation");
+    }
+    try std.testing.expect(historyBytes(sess.items()) > ag.context_budget_bytes);
+
+    const reply = try ag.run(gpa, &sess);
+    defer gpa.free(reply);
+    try std.testing.expectEqualStrings("done", reply);
+
+    var saw_recall = false;
+    for (sess.archiveItems()) |m| {
+        if (std.mem.indexOf(u8, m.content, "[观察] recall") != null and
+            std.mem.indexOf(u8, m.content, "NEEDLE-RECALL-HIDDEN") != null) saw_recall = true;
+    }
+    try std.testing.expect(saw_recall);
 }
 
 test "run: parallel 并发执行本地只读工具并按输入顺序回灌" {

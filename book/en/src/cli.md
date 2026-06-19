@@ -102,6 +102,7 @@ scoot policy check bash "rm -rf /" --mode guarded      # deny
 scoot policy check bash "ls -la"   --mode readonly     # deny (no shell in readonly)
 scoot policy check file_read '{"path":"README.md"}' --mode readonly  # allow
 scoot policy check skill '{"name":"demo"}' --mode readonly           # allow (native)
+scoot policy check recall '{"query":"old"}' --mode readonly          # allow (native)
 ```
 
 This is the fastest way to understand the policy model — see

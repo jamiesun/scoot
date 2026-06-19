@@ -6,7 +6,7 @@
 { "thought": "one-line reasoning", "action": "<action>", "action_input": "<input>" }
 ```
 
-`action` 必须是下面十个内建动作之一——Scoot 绝不执行
+`action` 必须是下面十二个内建动作之一——Scoot 绝不执行
 自由格式文本。每个工具都在带 **硬超时**（`tools.timeout_ms`，默认 30 秒）的沙盒中运行，
 其输出作为下一个 *观察* 返回给模型（会被裁剪以保持上下文精简）。某个动作是否
 被允许，取决于当前生效的 [执行策略](policy.md)。
@@ -27,6 +27,7 @@
 | `outline` | 文件结构骨架 | `{"path":...}` | 是 |
 | `http_request` | 一次 HTTP/HTTPS 请求 | `{"method":...,"url":...,"body":...}` | 取决于方法 |
 | `skill` | 读取已加载技能的文件 | `{"name":...,"path":"SKILL.md"}` | 是（原生） |
+| `recall` | 搜索当前会话 transcript 归档 | `{"query":...}` 或 `{"seq":...}` | 是（原生） |
 | `parallel` | 1–4 个并发只读调用 | `{"calls":[...]}` | 是 |
 | `final` | 返回答复并停止 | 答复文本 | — |
 
@@ -153,6 +154,24 @@
 （未知名称返回一个可恢复的观察，列出可用项），并且
 每次读取都被审计。内容最多返回约 32 KB。参见 [技能](skills.md)。
 
+## `recall`
+
+```json
+{ "query": "old error text", "limit": 8 }
+```
+
+```json
+{ "seq": 12, "context": 2 }
+```
+
+搜索 **当前会话的完整 transcript 归档**，返回带 `seq`、`role` 与
+`content` 的 JSONL 风格原文消息行。这是原生只读能力，因此在 `readonly`
+模式下也可用。
+
+当上下文压缩只保留摘要，而模型需要较早的精确观察、命令或用户指令时使用它。
+`query` 做字面量子串匹配；`seq` 从 1 开始，可带少量前后 `context`。
+`limit` 会被封顶，避免召回结果重新撑爆上下文。
+
 ## `parallel`
 
 ```json
@@ -164,8 +183,8 @@
 
 并发运行 **1–4 个独立的只读调用**，保留观察
 顺序。仅允许 `file_read`、`grep`、`glob`、`outline` 与 HTTP `GET`/`HEAD`——
-`bash`、写入与嵌套的 `parallel` 都被拒绝。每个子调用仍会
-经过正常的策略门。用它在一个回合中并行扇出独立的读取。
+`bash`、写入、`skill`、`recall` 与嵌套的 `parallel` 都被拒绝。每个子调用
+仍会经过正常的策略门。用它在一个回合中并行扇出独立的读取。
 
 ## `final`
 
@@ -176,5 +195,6 @@
 
 工具输出会作为观察反馈，但每个都会被 **裁剪** 以约束
 上下文增长（大致为：`bash` ~2 KB，`file_read`/`http_request` ~8 KB，
-`parallel` ~12 KB，`skill` ~32 KB）。对于大数据，请收窄你的读取——使用
-`grep`、glob 路径，或定向范围，而不是倾倒整个文件。
+`parallel` ~12 KB，`skill` ~32 KB，`recall` ~16 KB）。对于大数据，请收窄
+你的读取——使用 `grep`、glob 路径、定向范围，或更精确的 `recall` 查询，
+而不是倾倒整个文件。

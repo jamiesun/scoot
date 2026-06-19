@@ -21,6 +21,8 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
   `ReleaseSmall` 产物。
 - 安装脚本支持 `SCOOT_INSTALL_FLAVOR=small`，可选择 small release 产物，
   而不是默认的 `ReleaseSafe` 产物。
+- 新增原生 `recall` 动作，可在活跃上下文压缩后，从当前会话 transcript
+  归档中取回较早的精确原文消息（#99）。
 
 ### 变更
 

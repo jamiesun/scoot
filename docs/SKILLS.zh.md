@@ -52,7 +52,7 @@ scope: workflow
 可选审查元数据：
 
 - `capabilities`：内联列表，可使用 `instructions`、`scripts`、`references`。
-- `allowed_tools`：预期使用的内建工具动作列表，可使用 `bash`、`file_read`、`file_write`、`file_edit`、`grep`、`glob`、`http_request`、`parallel`。
+- `allowed_tools`：预期使用的内建工具动作列表，可使用 `bash`、`file_read`、`file_write`、`file_edit`、`grep`、`glob`、`outline`、`http_request`、`skill`、`recall`、`parallel`。
 - `scope`：`general`、`project`、`repository`、`domain`、`workflow` 之一。
 
 `scoot_version`、`compatibility`、`requires_scoot` 等兼容性字段会被明确拒绝，直到 Scoot 定义版本门槛。

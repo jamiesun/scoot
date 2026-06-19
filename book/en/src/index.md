@@ -30,8 +30,8 @@ The loop repeats until the model emits a `final` answer or hits `max_turns`.
 ## Core Capabilities
 
 - **Two entry points** — one-shot `scoot -e "<goal>"` and an interactive REPL.
-- **Ten built-in actions** — `bash`, `file_read`, `file_write`, `file_edit`,
-  `grep`, `glob`, `http_request`, `skill`, `parallel`, and `final`. The
+- **Twelve built-in actions** — `bash`, `file_read`, `file_write`, `file_edit`,
+  `grep`, `glob`, `outline`, `http_request`, `skill`, `recall`, `parallel`, and `final`. The
   structured tools work without external commands, so they behave identically on
   stripped-down systems. See [Built-in Tools](tools.md).
 - **Three execution policies** — `guarded` (interactive tripwire), `readonly`
