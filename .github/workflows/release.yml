@@ -66,7 +66,7 @@ jobs:
           artifact="scoot-${version}-${{ matrix.asset }}"
           mkdir -p dist/scoot
           cp zig-out/bin/scoot dist/scoot/
-          cp README.md config.example.toml dist/scoot/
+          cp README.md config.example.toml install.sh dist/scoot/
           cp -R docs dist/scoot/docs
           tar -C dist -czf "${artifact}.tar.gz" scoot
           sha256sum "${artifact}.tar.gz" > "${artifact}.tar.gz.sha256"
@@ -120,6 +120,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           mapfile -t files < <(find dist-artifacts -type f | sort)
+          files+=(install.sh)
           if [ "${{ steps.notes.outputs.source }}" = "changelog" ]; then
             notes_args=(--notes-file "${{ steps.notes.outputs.file }}")
           else

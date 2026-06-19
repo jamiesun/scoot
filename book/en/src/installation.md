@@ -13,6 +13,38 @@ source or download a tagged release artifact.
 Supported release targets: `linux-amd64`, `linux-arm64`, `linux-armv7`,
 `macos-amd64`, `macos-arm64`.
 
+## Install Latest Release
+
+The install script detects your host OS/CPU, downloads the matching latest
+release archive plus its `.sha256` file, verifies the checksum, and installs the
+`scoot` binary.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jamiesun/scoot/main/install.sh | sh
+```
+
+By default it installs to `/usr/local/bin` and uses `sudo` if needed. To install
+without sudo, choose a user-writable directory that is on your `PATH`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jamiesun/scoot/main/install.sh | env SCOOT_INSTALL_DIR="$HOME/.local/bin" sh
+```
+
+Pin a specific release when reproducibility matters:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jamiesun/scoot/main/install.sh | env SCOOT_INSTALL_VERSION=v0.1.0 sh
+```
+
+Supported installer environment variables:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SCOOT_INSTALL_DIR` | `/usr/local/bin` | Destination directory for the binary. |
+| `SCOOT_INSTALL_VERSION` | `latest` | Release tag to install, with or without leading `v`. |
+| `SCOOT_INSTALL_BINARY` | `scoot` | Installed binary name. |
+| `SCOOT_INSTALL_REPO` | `jamiesun/scoot` | GitHub repository to download from. |
+
 ## Build From Source
 
 ```sh
@@ -45,7 +77,7 @@ Each tagged release publishes a `.tar.gz` per target plus a `.sha256` checksum.
 # Pick the archive for your platform from the Releases page, then:
 sha256sum -c scoot-<target>.tar.gz.sha256
 tar -xzf scoot-<target>.tar.gz
-install -m 0755 scoot /usr/local/bin/scoot
+install -m 0755 scoot/scoot /usr/local/bin/scoot
 scoot --version
 ```
 
