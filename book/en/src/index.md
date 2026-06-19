@@ -1,6 +1,10 @@
 # Scoot
 
 <p align="center">
+  <img src="assets/scoot-logo.svg" alt="Scoot logo" width="160">
+</p>
+
+<p align="center">
   <img src="assets/scoot-infographic.png" alt="Scoot — local-first AI agent daemon and CLI in pure Zig, showing the ReACT loop, built-in tools, and execution policies" width="100%">
 </p>
 

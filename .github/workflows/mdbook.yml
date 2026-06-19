@@ -48,6 +48,8 @@ jobs:
         run: |
           mkdir -p site
           cp book/site-index.html site/index.html
+          mkdir -p site/assets
+          cp docs/assets/scoot-logo.svg docs/assets/scoot-favicon.svg docs/assets/scoot-favicon.png site/assets/
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5

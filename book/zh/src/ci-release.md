@@ -15,6 +15,8 @@ mdbook build book/en
 mdbook build book/zh
 mkdir -p site
 cp book/site-index.html site/index.html
+mkdir -p site/assets
+cp docs/assets/scoot-logo.svg docs/assets/scoot-favicon.svg docs/assets/scoot-favicon.png site/assets/
 ```
 
 ## 文档站点

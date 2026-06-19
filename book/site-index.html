@@ -6,6 +6,8 @@
 <title>scoot — auditable AI agent daemon in pure Zig</title>
 <meta name="description" content="Scoot is a lightweight, auditable AI agent daemon and CLI written in pure Zig. Local-first, one small binary, no GUI, no plaintext secrets.">
 <meta name="color-scheme" content="dark">
+<link rel="icon" href="assets/scoot-favicon.svg" type="image/svg+xml">
+<link rel="shortcut icon" href="assets/scoot-favicon.png" type="image/png">
 <meta property="og:title" content="scoot">
 <meta property="og:description" content="A lightweight, auditable AI agent daemon and CLI — written in pure Zig.">
 <style>
@@ -104,7 +106,7 @@
     border-radius:7px;color:var(--amber);background:rgba(255,178,74,.06);
     box-shadow:0 0 18px rgba(255,178,74,.14) inset,0 0 22px rgba(255,178,74,.08);
   }
-  .brand .mk b{font-size:18px;line-height:1;text-shadow:0 0 10px rgba(255,178,74,.7)}
+  .brand .mk img{width:24px;height:24px;display:block;object-fit:contain}
   .brand .nm{font-size:15px}
   .brand .nm i{color:var(--faint);font-style:normal}
   .top nav{display:flex;align-items:center;gap:.4rem;font-size:12.5px}
@@ -122,6 +124,51 @@
     padding:clamp(1rem,3.4vh,2.6rem) 0;max-width:1180px;width:100%;min-width:0;margin:0 auto;
   }
   .intro{min-width:0}
+  .hero-mark{
+    position:relative;width:clamp(116px,12vw,164px);aspect-ratio:1;margin:0 0 .9rem -0.35rem;
+    display:grid;place-items:center;isolation:isolate;
+  }
+  .hero-mark img{
+    width:100%;height:100%;display:block;object-fit:contain;
+    transform-origin:48% 58%;
+    animation:mark-drift 5.8s cubic-bezier(.45,0,.25,1) infinite;
+    will-change:transform;
+  }
+  .hero-mark::before{
+    content:"";position:absolute;inset:12%;border:1px solid rgba(204,214,222,.22);
+    border-radius:42% 46% 52% 44%;transform:rotate(-7deg);
+    animation:mark-guard 5.8s ease-in-out infinite;
+  }
+  .hero-mark::after{
+    content:"";position:absolute;left:-18%;top:56%;width:46%;height:2px;
+    background:linear-gradient(90deg,transparent,rgba(70,230,255,.72),transparent);
+    transform:translateX(-18px) skewX(-18deg);opacity:0;
+    animation:mark-streak 2.6s cubic-bezier(.2,.8,.2,1) infinite;
+    will-change:transform,opacity;
+  }
+  .hero-mark .edge{
+    position:absolute;left:-4%;top:61%;width:21%;height:2px;background:var(--amber);
+    opacity:.9;transform:skewX(-18deg);animation:mark-edge 3.2s ease-in-out infinite;
+    will-change:transform,opacity;
+  }
+  @keyframes mark-drift{
+    0%,100%{transform:translate3d(0,0,0) rotate(-.6deg)}
+    42%{transform:translate3d(4px,-5px,0) rotate(.9deg)}
+    70%{transform:translate3d(-2px,2px,0) rotate(-.2deg)}
+  }
+  @keyframes mark-guard{
+    0%,100%{opacity:.35;transform:scale(.96) rotate(-7deg)}
+    50%{opacity:.72;transform:scale(1.03) rotate(-7deg)}
+  }
+  @keyframes mark-streak{
+    0%,58%{opacity:0;transform:translateX(-20px) skewX(-18deg)}
+    68%{opacity:.95}
+    100%{opacity:0;transform:translateX(92px) skewX(-18deg)}
+  }
+  @keyframes mark-edge{
+    0%,100%{opacity:.55;transform:translateX(0) skewX(-18deg)}
+    50%{opacity:.95;transform:translateX(-6px) skewX(-18deg)}
+  }
   .kick{
     display:inline-flex;align-items:center;gap:.55rem;font-size:11.5px;letter-spacing:.26em;
     text-transform:uppercase;color:var(--cyan);margin-bottom:.95rem;
@@ -304,6 +351,7 @@
   @media (max-width:390px), (max-height:720px){
     .stage{padding:.72rem .78rem .55rem}
     .brand .mk{width:27px;height:27px;border-radius:6px}
+    .brand .mk img{width:21px;height:21px}
     .brand .nm{font-size:13.5px}
     .top nav a{font-size:10.5px;padding:.28rem .38rem}
     .kick{font-size:9.3px;line-height:1.35;margin-bottom:.5rem}
@@ -325,6 +373,8 @@
   @media (prefers-reduced-motion:reduce){
     *{animation-duration:.001s!important;animation-iteration-count:1!important;transition:none!important}
     .grain{display:none}
+    .hero-mark img{transform:none}
+    .hero-mark::after,.hero-mark .edge{display:none}
     .stage{opacity:1}
   }
 </style>
@@ -347,7 +397,7 @@
 <main class="stage" id="stage" aria-hidden="false">
   <header class="top">
     <div class="brand">
-      <span class="mk"><b>&gt;</b></span>
+      <span class="mk"><img src="assets/scoot-favicon.svg" alt=""></span>
       <span class="nm">scoot <i>// daemon</i></span>
     </div>
     <nav>
@@ -359,6 +409,10 @@
 
   <section class="hero">
     <div class="intro">
+      <div class="hero-mark" aria-hidden="true">
+        <img src="assets/scoot-logo.svg" alt="">
+        <span class="edge"></span>
+      </div>
       <div class="kick"><span class="pip"></span>local-first · auditable · no plaintext secrets</div>
       <h1 class="word">scoot</h1>
       <p class="tag">A lightweight AI agent daemon &amp; CLI, written in <b>pure Zig</b>.</p>
