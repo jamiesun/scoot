@@ -41,6 +41,7 @@ ephemeral, run-once-then-discard execution.
 | --- | --- | --- |
 | `SCOOT_BACKEND_BASE_URL` | `backend.base_url` | string |
 | `SCOOT_BACKEND_MODEL` | `backend.model` | string |
+| `SCOOT_BACKEND_TIMEOUT_MS` | `backend.timeout_ms` | integer |
 | `SCOOT_BACKEND_API_KEY_ENV` | `backend.api_key_env` | string (names the var holding the token) |
 | `SCOOT_BACKEND_API_KEY_FILE` | `backend.api_key_file` | string |
 | `SCOOT_BACKEND_API_KEY_CMD` | `backend.api_key_cmd` | string |
@@ -127,6 +128,7 @@ stays effective and token use stays bounded.
 | --- | --- | --- | --- |
 | `base_url` | string | `http://127.0.0.1:11434/v1` | OpenAI-compatible endpoint base URL. |
 | `model` | string | `qwen2.5` | Model name sent to the backend. |
+| `timeout_ms` | u64 | `120000` | Hard timeout for one backend Responses API call, in milliseconds. `0` disables the deadline. |
 | `api_key_env` | string | `OPENAI_API_KEY` | Environment variable used as the **first** token source. |
 | `api_key_file` | string? | unset → `~/.scoot/token` | Path to a `0600` token file. Used after the env source. |
 | `api_key_cmd` | string? | unset | Command that prints a token (e.g. `pass show openai`). Used last. |

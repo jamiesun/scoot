@@ -15,6 +15,8 @@ pub const default_context_budget_bytes: usize = 80_000;
 pub const Backend = struct {
     base_url: []const u8 = "http://127.0.0.1:11434/v1",
     model: []const u8 = "qwen2.5",
+    /// Hard timeout for one backend Responses API call. 0 disables the deadline.
+    timeout_ms: u64 = 120_000,
     /// Environment variable name used to read the token. Plaintext is not stored here.
     api_key_env: []const u8 = "OPENAI_API_KEY",
     /// Token file path; null uses ~/.scoot/token.
@@ -473,6 +475,7 @@ pub const Config = struct {
         // Backend, excluding plaintext secrets.
         if (envVal(env, "SCOOT_BACKEND_BASE_URL")) |v| self.backend.base_url = try arena.dupe(u8, v);
         if (envVal(env, "SCOOT_BACKEND_MODEL")) |v| self.backend.model = try arena.dupe(u8, v);
+        try overrideEnvInt(u64, env, "SCOOT_BACKEND_TIMEOUT_MS", &self.backend.timeout_ms, &warnings, arena);
         if (envVal(env, "SCOOT_BACKEND_API_KEY_ENV")) |v| self.backend.api_key_env = try arena.dupe(u8, v);
         if (envVal(env, "SCOOT_BACKEND_API_KEY_FILE")) |v| self.backend.api_key_file = try arena.dupe(u8, v);
         if (envVal(env, "SCOOT_BACKEND_API_KEY_CMD")) |v| self.backend.api_key_cmd = try arena.dupe(u8, v);
@@ -593,6 +596,7 @@ test "parseTomlConfig: TOML to FileConfig with extra_body passthrough and per-se
         \\[backend]
         \\base_url = "https://x.azure.com/openai/v1"
         \\model = "gpt-5.5"
+        \\timeout_ms = 90000
         \\store = true
         \\api_key_env = "WJT_AZURE_OPENAI_API_KEY"
         \\
@@ -609,6 +613,7 @@ test "parseTomlConfig: TOML to FileConfig with extra_body passthrough and per-se
     const fc = try parseTomlConfig(arena.allocator(), src, null);
     try std.testing.expectEqualStrings("https://x.azure.com/openai/v1", fc.backend.base_url);
     try std.testing.expectEqualStrings("gpt-5.5", fc.backend.model);
+    try std.testing.expectEqual(@as(u64, 90_000), fc.backend.timeout_ms);
     try std.testing.expectEqual(true, fc.backend.store);
     try std.testing.expectEqualStrings("WJT_AZURE_OPENAI_API_KEY", fc.backend.api_key_env);
     try std.testing.expectEqualStrings("guarded", fc.tools.policy);
@@ -907,6 +912,7 @@ test "applyEnvOverrides: string fields override backend and tools" {
     defer map.deinit();
     try map.put("SCOOT_BACKEND_BASE_URL", "https://example.test/v1");
     try map.put("SCOOT_BACKEND_MODEL", "gpt-override");
+    try map.put("SCOOT_BACKEND_TIMEOUT_MS", "4321");
     try map.put("SCOOT_BACKEND_STORE", "true");
     try map.put("SCOOT_TOOLS_POLICY", "readonly");
 
@@ -916,6 +922,7 @@ test "applyEnvOverrides: string fields override backend and tools" {
 
     try std.testing.expectEqualStrings("https://example.test/v1", cfg.backend.base_url);
     try std.testing.expectEqualStrings("gpt-override", cfg.backend.model);
+    try std.testing.expectEqual(@as(u64, 4321), cfg.backend.timeout_ms);
     try std.testing.expectEqual(true, cfg.backend.store);
     try std.testing.expectEqualStrings("readonly", cfg.tools.policy);
     try std.testing.expectEqual(@as(usize, 0), report.env_warnings.len);
@@ -958,6 +965,7 @@ test "applyEnvOverrides: integer/bool fields parse" {
     defer map.deinit();
     try map.put("SCOOT_AGENT_MAX_TURNS", "7");
     try map.put("SCOOT_AGENT_COMPACTOR", "extractive");
+    try map.put("SCOOT_BACKEND_TIMEOUT_MS", "9876");
     try map.put("SCOOT_TOOLS_TIMEOUT_MS", "1234");
     try map.put("SCOOT_TOOLS_CONFINE_WRITES", "true");
     try map.put("SCOOT_TOOLS_BLOCK_INTERNAL_HTTP", "0");
@@ -969,6 +977,7 @@ test "applyEnvOverrides: integer/bool fields parse" {
 
     try std.testing.expectEqual(@as(u32, 7), cfg.agent.max_turns);
     try std.testing.expectEqualStrings("extractive", cfg.agent.compactor);
+    try std.testing.expectEqual(@as(u64, 9876), cfg.backend.timeout_ms);
     try std.testing.expectEqual(@as(u64, 1234), cfg.tools.timeout_ms);
     try std.testing.expectEqual(true, cfg.tools.confine_writes);
     try std.testing.expectEqual(false, cfg.tools.block_internal_http);
