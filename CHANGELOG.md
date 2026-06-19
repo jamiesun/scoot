@@ -25,15 +25,18 @@ heading when cutting a release.
 
 ### Changed
 
-- Context compaction now goes through a `Compressor` strategy seam while keeping
-  the existing `drop` behavior as the default (#97).
+- Context compaction now goes through a `Compressor` strategy seam with `drop`
+  retained as the smallest fallback strategy (#97).
 - Added the built-in `extractive` compactor and `agent.compactor` /
-  `SCOOT_AGENT_COMPACTOR` selection while keeping `drop` as the default (#97).
+  `SCOOT_AGENT_COMPACTOR` selection (#97).
 
 ### Fixed
 
 - `-e` and REPL runs now get per-process session transcript ids instead of
   appending every run to shared `cli.jsonl` and `repl.jsonl` files (#95).
+- Default agent configuration now enables a conservative context budget with
+  `extractive` compaction, while `context_budget_bytes = 0` still explicitly
+  disables the guard (#96).
 
 ## [0.2.0] - 2026-06-19
 

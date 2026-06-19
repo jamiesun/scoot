@@ -22,6 +22,8 @@ const pathsafe = @import("paths.zig");
 const jsonio = @import("jsonio.zig");
 const obs = @import("obs.zig");
 
+pub const default_context_budget_bytes: usize = 80_000;
+
 // 双轨认知模式（goal / plan，见 ROADMAP 方向二）暂未实现：plan 模式的执行 DAG
 // 尚未落地，故此处不保留「定义却从不读取」的死字段（曾经的 Mode 枚举 + Agent.mode），
 // 以免误导读者以为切到 plan 会改变执行。待真正实现计划模式时再引入并接通该字段。
@@ -207,10 +209,10 @@ pub const Agent = struct {
     /// 上下文预算（字节，0=关闭）：跨回合累计的提示历史超过此值时，先通过 `compactor`
     /// 压缩历史，让 run 继续推进，而非直接中止整个任务（旧行为）或任由请求体无界增长。
     /// 仅当压缩后仍超限（连最小保留集都放不下、预算配得过小）时才 fail-fast。
-    context_budget_bytes: usize = 0,
-    /// 上下文压缩策略。默认 `drop` 保持旧行为：保留 system + 原始任务 + 最近若干条，
-    /// 中段较早消息替换为摘要标记。后续 extractive / plugin 策略只需替换这个接缝。
-    compactor: compressor.Compressor = compressor.default,
+    context_budget_bytes: usize = default_context_budget_bytes,
+    /// 上下文压缩策略。默认 `extractive`：保留 system + 原始任务 + 最近若干条，
+    /// 中段较早消息替换为确定式导航纪要；`drop` 仍是最小兜底策略。
+    compactor: compressor.Compressor = .{ .extractive = {} },
     /// 单条工具调用的硬超时（毫秒）。
     tool_timeout_ms: u64 = 30_000,
     /// 可选审计日志：非 null 时把每步 思考/工具调用/观察/终态/错误 留痕（铁律：可审计）。
@@ -1433,6 +1435,14 @@ test "historyBytes：累加各消息 content 字节数（issue #28 纯函数）"
         .{ .role = .user, .content = "fghij" }, // 5
     };
     try std.testing.expectEqual(@as(usize, 10), historyBytes(&msgs));
+}
+
+test "Agent 默认开启上下文预算并使用 extractive 压缩器（issue #96）" {
+    var brain = ScriptedBrain{ .steps = &.{} };
+    const ag = testAgent(&brain, 16);
+
+    try std.testing.expectEqual(@as(usize, default_context_budget_bytes), ag.context_budget_bytes);
+    try std.testing.expectEqual(compressor.Compressor.extractive, std.meta.activeTag(ag.compactor));
 }
 
 test "run：上下文预算超限时在调用后端前 fail-fast（issue #28）" {
