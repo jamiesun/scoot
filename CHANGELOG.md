@@ -23,6 +23,11 @@ heading when cutting a release.
 - Installer supports `SCOOT_INSTALL_FLAVOR=small` to select the small release
   artifact instead of the default `ReleaseSafe` artifact.
 
+### Fixed
+
+- `-e` and REPL runs now get per-process session transcript ids instead of
+  appending every run to shared `cli.jsonl` and `repl.jsonl` files (#95).
+
 ## [0.2.0] - 2026-06-19
 
 ### Added
