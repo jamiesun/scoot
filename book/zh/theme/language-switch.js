@@ -9,10 +9,11 @@
     if (!buttons || document.querySelector(".language-switch")) return;
 
     var link = document.createElement("a");
-    link.className = "icon-button language-switch";
+    link.className = "language-switch";
     link.href = targetHref();
-    link.textContent = "English";
+    link.textContent = "EN";
     link.title = "Switch to English documentation";
+    link.setAttribute("aria-label", "Switch to English documentation");
     buttons.insertBefore(link, buttons.firstChild);
   }
 

@@ -1,12 +1,43 @@
 .language-switch {
+  align-items: center;
+  background: color-mix(in srgb, var(--links) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--links) 42%, transparent);
+  border-radius: 999px;
+  box-sizing: border-box;
+  color: var(--links);
   cursor: pointer;
-  font-size: 0.8rem;
-  font-weight: 500;
-  padding: 0 4px;
-  line-height: var(--menu-bar-height, 50px);
+  display: inline-flex;
+  font-size: 0.76rem;
+  font-weight: 700;
+  height: 26px;
+  justify-content: center;
+  letter-spacing: 0;
+  line-height: 1;
+  margin: 0 10px 0 4px;
+  min-width: 42px;
+  padding: 0 12px;
   text-decoration: none;
-  color: var(--icons);
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+  transform: translateY(-5px);
+  vertical-align: middle;
 }
+
 .language-switch:hover {
-  color: var(--icons-hover);
+  background: color-mix(in srgb, var(--links) 18%, transparent);
+  border-color: color-mix(in srgb, var(--links) 70%, transparent);
+  color: var(--links);
+}
+
+.right-buttons .language-switch {
+  margin-top: 3px;
+}
+
+@media (max-width: 480px) {
+  .language-switch {
+    min-width: 36px;
+    padding: 0 10px;
+  }
 }

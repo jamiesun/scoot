@@ -9,11 +9,11 @@
     if (!buttons || document.querySelector(".language-switch")) return;
 
     var link = document.createElement("a");
-    link.className = "icon-button language-switch";
+    link.className = "language-switch";
     link.href = targetHref();
     link.textContent = "中文";
     link.title = "Switch to Chinese documentation";
-    // Insert before the first icon button (print) so it sits alongside them
+    link.setAttribute("aria-label", "Switch to Chinese documentation");
     buttons.insertBefore(link, buttons.firstChild);
   }
 
