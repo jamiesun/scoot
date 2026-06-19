@@ -22,6 +22,11 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 - 安装脚本支持 `SCOOT_INSTALL_FLAVOR=small`，可选择 small release 产物，
   而不是默认的 `ReleaseSafe` 产物。
 
+### 变更
+
+- 上下文压缩现在通过 `Compressor` 策略接缝执行，同时保持现有 `drop`
+  行为作为默认策略（#97）。
+
 ### 修复
 
 - `-e` 与 REPL 运行现在会获得每进程独立的 session transcript id，

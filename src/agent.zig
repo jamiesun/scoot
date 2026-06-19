@@ -14,6 +14,7 @@
 const std = @import("std");
 const llm = @import("llm.zig");
 const session = @import("session.zig");
+const compressor = @import("compressor.zig");
 const tools = @import("tools/tools.zig");
 const audit = @import("audit.zig");
 const policy = @import("policy.zig");
@@ -203,13 +204,13 @@ pub const Agent = struct {
     complete_fn: CompleteFn,
     /// 回合上限：防止模型陷入工具调用死循环拖垮守护进程。
     max_turns: u32 = 16,
-    /// 上下文预算（字节，0=关闭）：跨回合累计的提示历史超过此值时，先**压缩历史**
-    /// （保留 system + 原始任务 + 最近若干条，中段较早消息替换为摘要标记，见
-    /// session.compact / issue #71）让 run 继续推进，而非直接中止整个任务（旧行为）或
-    /// 任由请求体无界增长。仅当压缩后仍超限（连最小保留集都放不下、预算配得过小）时
-    /// 才 fail-fast（`error.ContextBudgetExceeded`）。压缩即时缩小发往后端的历史，token
-    /// 成本随之下降；arena backing 下被丢弃内容不立即回收但语义安全（见 session.compact）。
+    /// 上下文预算（字节，0=关闭）：跨回合累计的提示历史超过此值时，先通过 `compactor`
+    /// 压缩历史，让 run 继续推进，而非直接中止整个任务（旧行为）或任由请求体无界增长。
+    /// 仅当压缩后仍超限（连最小保留集都放不下、预算配得过小）时才 fail-fast。
     context_budget_bytes: usize = 0,
+    /// 上下文压缩策略。默认 `drop` 保持旧行为：保留 system + 原始任务 + 最近若干条，
+    /// 中段较早消息替换为摘要标记。后续 extractive / plugin 策略只需替换这个接缝。
+    compactor: compressor.Compressor = compressor.default,
     /// 单条工具调用的硬超时（毫秒）。
     tool_timeout_ms: u64 = 30_000,
     /// 可选审计日志：非 null 时把每步 思考/工具调用/观察/终态/错误 留痕（铁律：可审计）。
@@ -267,7 +268,7 @@ pub const Agent = struct {
             if (self.context_budget_bytes != 0) {
                 var used = historyBytes(sess.items());
                 if (used > self.context_budget_bytes) {
-                    const compacted = sess.compact(backing, history_keep_recent) catch false;
+                    const compacted = self.compactor.compact(backing, sess, .{ .keep_recent = history_keep_recent }) catch false;
                     if (compacted) {
                         used = historyBytes(sess.items());
                         self.traceCompacted(turn + 1, used);
@@ -788,7 +789,6 @@ const history_keep_recent = 8;
 /// 观察截断预算一律以 **token 估算**为口径（issue #75）：字节口径会让 CJK（≈1 token/字、
 /// 占 3 字节）与 ASCII 的预算严重不一致。下列数值约为旧字节上限的 1/4（ASCII 字节/token 比），
 /// 使 ASCII 场景体量基本不变，CJK 场景按 token 收敛到一致预算。
-
 /// 单条流（bash stdout/stderr 等）观察的最大 token 数，超出走「头+尾」截断，挡住脏/海量输出。
 const observation_stream_tokens = 500;
 
