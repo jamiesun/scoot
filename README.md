@@ -3,10 +3,6 @@
 English | [中文](docs/README.zh.md)
 
 <p align="center">
-  <img src="docs/assets/scoot-logo.svg" alt="Scoot logo" width="160">
-</p>
-
-<p align="center">
   <img src="docs/assets/scoot-infographic.png" alt="Scoot - local-first AI agent daemon and CLI in pure Zig" width="100%">
 </p>
 
