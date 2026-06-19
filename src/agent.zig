@@ -4,7 +4,7 @@
 //!   - Do not depend on backend-native tool_calls, because local small-model
 //!     support varies. Each turn instead forces json_schema output for one
 //!     structured step: {thought, action, action_input}. This preserves
-//!     response_format=json_schema + strict, works with any OpenAI-compatible
+//!     strict JSON schema output, works with any configured OpenAI-compatible
 //!     backend including basic local models, and reuses defensive parsing.
 //!   - action in {bash, file_read, ..., parallel, final}: tools execute through a
 //!     unified guardrail with hard timeouts, output returns as observation, and

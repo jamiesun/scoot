@@ -1,11 +1,18 @@
-//! LLM backend adapter: only targets OpenAI `/v1/chat/completions`.
+//! LLM backend adapter for the OpenAI Responses API (`/v1/responses`).
 //!
 //! Hard rules implemented here:
-//!   #2 Only OpenAI protocol; when a schema is provided, force
-//!      `response_format=json_schema` with `strict:true`.
-//!   #4 Never trust model output: all responses go through defensive std.json
+//!   #2 Only the OpenAI Responses protocol. Structured ReACT steps use
+//!      `text.format=json_schema` with `strict:true` when a schema is provided.
+//!      Chat Completions transport was removed (issue #110); a backend that only
+//!      speaks Chat Completions must sit behind a Responses-compatible gateway.
+//!   #4 Never trust model output: every response goes through defensive std.json
 //!      parsing. Bad data returns errors for upper layers to wrap into System
 //!      Error feedback and retry, never panic.
+//! Transport is stateless by default: each call resends the full input, so scoot
+//! keeps local ownership of context (local compaction, audit, recovery). The
+//! model-side storage/chaining mechanics (response ids, `previous_response_id`,
+//! `store`) live in `ModelContext` at this transport boundary and never leak into
+//! agent or tool execution modules.
 //! Memory: all temporary allocations use the per-call arena supplied by the
 //! caller. Returned `content` points into that arena and must be copied to
 //! long-lived storage before the arena is released.
@@ -19,27 +26,7 @@ pub const Message = struct {
     content: []const u8,
 };
 
-/// Backend prompt-cache hint mode (issue #72).
-/// - `off` by default: sends no cache markers and preserves old byte-for-byte
-///   request bodies. Backends such as OpenAI, vLLM, and SGLang that auto-cache
-///   stable prefixes do not need extra fields, and strict backends avoid unknown
-///   field errors.
-/// - `anthropic`: adds an Anthropic-style `cache_control:{type:ephemeral}`
-///   breakpoint on the stable instruction prefix, the last leading system
-///   message, so the fixed prefix can be billed or computed as cached. Enable
-///   only on Anthropic-compatible gateways.
-pub const PromptCache = enum {
-    off,
-    anthropic,
-
-    /// Parses a config string; unknown values fall back to `off`, leaving body unchanged.
-    pub fn parse(s: []const u8) PromptCache {
-        if (std.mem.eql(u8, s, "anthropic")) return .anthropic;
-        return .off;
-    }
-};
-
-/// Optional parameters for one chat/completions call.
+/// Optional parameters for one model API call.
 pub const ChatOptions = struct {
     /// JSON Schema object as raw JSON text. Non-null forces structured output.
     json_schema: ?[]const u8 = null,
@@ -49,10 +36,44 @@ pub const ChatOptions = struct {
     temperature: ?f32 = null,
 };
 
-/// Result of one chat/completions call after defensive JSON parsing.
+/// Result of one model API call after defensive JSON parsing.
 pub const Completion = struct {
     content: []const u8,
     finish_reason: []const u8 = "",
+    /// Responses object id (e.g. `resp_...`); empty when absent. Captured to
+    /// enable opt-in `previous_response_id` chaining owned by `ModelContext`.
+    id: []const u8 = "",
+};
+
+/// Model-side context owned at the transport boundary (issue #110). It holds the
+/// OpenAI Responses storage/chaining mechanics so they never leak into agent or
+/// tool execution modules.
+///
+/// Default is fully stateless: `store=false` and no `previous_response_id`, so
+/// each call resends the full input and scoot keeps local ownership of context.
+/// `last_response_id` is captured from each response so future opt-in chaining is
+/// possible without shipping a half-working toggle. Tool code never reads this.
+pub const ModelContext = struct {
+    /// Whether to ask the backend to persist the response server-side. Off by
+    /// default to keep model context local and auditable.
+    store: bool = false,
+    /// Explicit chaining pointer. Null (default) means stateless: send the full
+    /// input every turn. Set only by an opt-in chaining policy, never by tools.
+    previous_response_id: ?[]const u8 = null,
+    /// Last response id captured from the backend, kept in a fixed buffer so it
+    /// survives the per-call arena.
+    last_response_id_buf: [128]u8 = undefined,
+    last_response_id_len: usize = 0,
+
+    pub fn lastResponseId(self: *const ModelContext) []const u8 {
+        return self.last_response_id_buf[0..self.last_response_id_len];
+    }
+
+    fn rememberResponseId(self: *ModelContext, id: []const u8) void {
+        const n = @min(id.len, self.last_response_id_buf.len);
+        @memcpy(self.last_response_id_buf[0..n], id[0..n]);
+        self.last_response_id_len = n;
+    }
 };
 
 pub const Client = struct {
@@ -67,8 +88,8 @@ pub const Client = struct {
     /// config.Backend.extra_body. Only objects are accepted; non-objects are
     /// ignored. Each value is serialized through std.json, so the body stays valid.
     extra_body: ?std.json.Value = null,
-    /// Prompt-cache hint mode (issue #72). Default `off` leaves request bodies unchanged.
-    prompt_cache: PromptCache = .off,
+    /// Model-side storage/chaining context (issue #110).
+    model_ctx: ModelContext = .{},
     /// Last backend failure response summary, stored in a fixed buffer because
     /// the per-call arena may be gone after errors propagate.
     last_error_status: u16 = 0,
@@ -84,7 +105,7 @@ pub const Client = struct {
         return self.last_error_body_buf[0..self.last_error_body_len];
     }
 
-    /// Performs one chat/completions request and returns defensively parsed output.
+    /// Performs one OpenAI Responses request and returns defensively parsed output.
     /// Connection failures, non-2xx statuses, and malformed responses return
     /// errors instead of panicking; upper layers decide retry or user feedback.
     pub fn chat(
@@ -94,8 +115,16 @@ pub const Client = struct {
         opts: ChatOptions,
     ) !Completion {
         self.clearLastError();
-        const body = try buildRequestBody(arena, self.model, messages, opts, self.extra_body, self.prompt_cache);
-        const url = try std.fmt.allocPrint(arena, "{s}/chat/completions", .{self.base_url});
+        const body = try buildRequestBody(
+            arena,
+            self.model,
+            messages,
+            opts,
+            self.extra_body,
+            self.model_ctx.store,
+            self.model_ctx.previous_response_id,
+        );
+        const url = try std.fmt.allocPrint(arena, "{s}/responses", .{self.base_url});
 
         var http_client: std.http.Client = .{ .allocator = arena, .io = self.io };
         defer http_client.deinit();
@@ -132,10 +161,12 @@ pub const Client = struct {
         if (code == 401 or code == 403) return error.Unauthorized;
         if (code < 200 or code >= 300) return error.BackendError;
 
-        return parseCompletion(arena, response_body) catch |err| {
+        const completion = parseCompletion(arena, response_body) catch |err| {
             self.rememberBackendResponse(code, response_body);
             return err;
         };
+        if (completion.id.len > 0) self.model_ctx.rememberResponseId(completion.id);
+        return completion;
     }
 
     fn clearLastError(self: *Client) void {
@@ -153,54 +184,58 @@ pub const Client = struct {
     }
 };
 
-/// Builds a compact OpenAI request body. Providing schema forces
-/// response_format=json_schema/strict. Non-null `extra_body` merges its object
-/// members into the top level for dynamic fields such as service_tier.
-/// `prompt_cache=anthropic` adds Anthropic-style cache breakpoints to stable
-/// instruction prefixes; `off` preserves old byte-for-byte behavior.
+/// Builds an OpenAI Responses request body. Leading consecutive `system` messages
+/// map to the top-level `instructions` field (the stable instruction prefix the
+/// backend caches natively); the remaining messages become typed `input` items.
+/// Providing a schema forces `text.format=json_schema/strict`. `store` controls
+/// server-side persistence; non-null `previous_response_id` chains from a prior
+/// response. Non-null `extra_body` merges its object members into the top level
+/// for dynamic fields such as reasoning controls.
 pub fn buildRequestBody(
     arena: std.mem.Allocator,
     model: []const u8,
     messages: []const Message,
     opts: ChatOptions,
     extra_body: ?std.json.Value,
-    prompt_cache: PromptCache,
+    store: bool,
+    previous_response_id: ?[]const u8,
 ) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(arena);
     const w = &aw.writer;
 
-    // Cache breakpoint index (issue #72): computed only for anthropic; off keeps
-    // content as plain strings.
-    const cache_idx: ?usize = if (prompt_cache == .anthropic) cacheBreakpointIndex(messages) else null;
-
     try w.writeAll("{\"model\":");
     try jsonio.writeString(w, model);
-    try w.writeAll(",\"stream\":false");
+    try w.writeAll(if (store) ",\"store\":true" else ",\"store\":false");
+    if (previous_response_id) |pid| {
+        try w.writeAll(",\"previous_response_id\":");
+        try jsonio.writeString(w, pid);
+    }
     if (opts.temperature) |t| try w.print(",\"temperature\":{d}", .{t});
 
-    try w.writeAll(",\"messages\":[");
-    for (messages, 0..) |m, i| {
-        if (i != 0) try w.writeByte(',');
+    // Stable instruction prefix: the leading system segment carries system_prompt,
+    // tool descriptions, and the skill manifest, which stay byte-stable across the
+    // loop. Sending it as `instructions` lets the backend cache the fixed prefix.
+    const sys_end = leadingSystemEnd(messages);
+    if (sys_end > 0) {
+        try w.writeAll(",\"instructions\":");
+        try writeJoinedSystem(w, arena, messages[0..sys_end]);
+    }
+
+    try w.writeAll(",\"input\":[");
+    var first = true;
+    for (messages[sys_end..]) |m| {
+        if (!first) try w.writeByte(',');
+        first = false;
         try w.writeAll("{\"role\":\"");
         try w.writeAll(@tagName(m.role));
-        if (cache_idx == i) {
-            // Cache breakpoint: content uses content-parts carrying Anthropic
-            // cache_control. This is still a valid OpenAI content-parts shape;
-            // send only when explicitly enabled because unsupported backends may
-            // ignore or reject the extension.
-            try w.writeAll("\",\"content\":[{\"type\":\"text\",\"text\":");
-            try jsonio.writeString(w, m.content);
-            try w.writeAll(",\"cache_control\":{\"type\":\"ephemeral\"}}]}");
-        } else {
-            try w.writeAll("\",\"content\":");
-            try jsonio.writeString(w, m.content);
-            try w.writeByte('}');
-        }
+        try w.writeAll("\",\"content\":");
+        try jsonio.writeString(w, m.content);
+        try w.writeByte('}');
     }
     try w.writeByte(']');
 
     if (opts.json_schema) |schema| {
-        try w.writeAll(",\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{\"name\":");
+        try w.writeAll(",\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":");
         try jsonio.writeString(w, opts.schema_name);
         try w.writeAll(",\"strict\":true,\"schema\":");
         try w.writeAll(schema); // Caller-provided valid JSON Schema object.
@@ -213,11 +248,34 @@ pub fn buildRequestBody(
     return aw.writer.buffered();
 }
 
+/// Counts the leading consecutive `system` messages, the stable instruction
+/// prefix mapped to `instructions`. No leading system message returns 0.
+fn leadingSystemEnd(messages: []const Message) usize {
+    var i: usize = 0;
+    while (i < messages.len and messages[i].role == .system) : (i += 1) {}
+    return i;
+}
+
+/// Writes the system segment as one JSON string. Multiple system messages are
+/// joined with blank lines so the instruction prefix stays a single field.
+fn writeJoinedSystem(w: *std.Io.Writer, arena: std.mem.Allocator, sys: []const Message) !void {
+    if (sys.len == 1) {
+        try jsonio.writeString(w, sys[0].content);
+        return;
+    }
+    var joined: std.Io.Writer.Allocating = .init(arena);
+    for (sys, 0..) |m, i| {
+        if (i != 0) try joined.writer.writeAll("\n\n");
+        try joined.writer.writeAll(m.content);
+    }
+    try jsonio.writeString(w, joined.writer.buffered());
+}
+
 /// Injects user-configured extra_body object members into the top-level request
 /// body. Defensive behavior: only JSON objects are accepted; non-objects are
 /// ignored so bad config cannot create malformed request bodies. Values are
 /// serialized through std.json. Injection at the end means extra_body overwrites
-/// duplicate keys; config should not redefine core fields like model/messages.
+/// duplicate keys; config should not redefine core fields like model/input.
 fn writeExtraBody(w: *std.Io.Writer, extra: std.json.Value) !void {
     if (extra != .object) return;
     var it = extra.object.iterator();
@@ -229,44 +287,64 @@ fn writeExtraBody(w: *std.Io.Writer, extra: std.json.Value) !void {
     }
 }
 
-/// Cache breakpoint for the stable instruction prefix (issue #72): pick the last
-/// message in the leading consecutive system segment. system_prompt, tool
-/// descriptions, and skill manifest live there and stay byte-stable across the
-/// loop. Marking it with cache_control caches the fixed prefix. No system message
-/// returns null, making this a no-op.
-fn cacheBreakpointIndex(messages: []const Message) ?usize {
-    var last: ?usize = null;
-    for (messages, 0..) |m, i| {
-        if (m.role != .system) break;
-        last = i;
+/// Defensively parses a Responses API response. Prefers a top-level `output_text`
+/// convenience field when present; otherwise concatenates `output[].content[]`
+/// entries with type `output_text`. A `refusal` part with no text output is
+/// surfaced as content with finish_reason `refusal` so upper layers can feed it
+/// back through the standard correction path instead of treating it as malformed.
+/// Any structural mismatch returns MalformedResponse, never panics.
+pub fn parseCompletion(arena: std.mem.Allocator, body: []const u8) !Completion {
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{}) catch return error.MalformedResponse;
+    if (parsed != .object) return error.MalformedResponse;
+    const obj = parsed.object;
+
+    const id = if (obj.get("id")) |v|
+        (if (v == .string) v.string else "")
+    else
+        "";
+    const finish_reason = if (obj.get("status")) |status|
+        (if (status == .string) status.string else "")
+    else
+        "";
+
+    if (obj.get("output_text")) |value| {
+        if (value == .string and value.string.len > 0) {
+            return .{ .content = value.string, .finish_reason = finish_reason, .id = id };
+        }
     }
-    return last;
+
+    const output = obj.get("output") orelse return error.MalformedResponse;
+    if (output != .array) return error.MalformedResponse;
+
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    const w = &aw.writer;
+    var found = false;
+    var refusal: ?[]const u8 = null;
+    for (output.array.items) |item| {
+        if (item != .object) continue;
+        const content = item.object.get("content") orelse continue;
+        if (content != .array) continue;
+        for (content.array.items) |part| {
+            if (part != .object) continue;
+            const typ = part.object.get("type") orelse continue;
+            if (typ != .string) continue;
+            if (std.mem.eql(u8, typ.string, "output_text")) {
+                const text = part.object.get("text") orelse continue;
+                if (text != .string) continue;
+                try w.writeAll(text.string);
+                found = true;
+            } else if (std.mem.eql(u8, typ.string, "refusal")) {
+                const text = part.object.get("refusal") orelse continue;
+                if (text == .string) refusal = text.string;
+            }
+        }
+    }
+    if (found) return .{ .content = aw.writer.buffered(), .finish_reason = finish_reason, .id = id };
+    if (refusal) |r| return .{ .content = r, .finish_reason = "refusal", .id = id };
+    return error.MalformedResponse;
 }
 
-/// Defensively parses a chat/completions response and extracts first choice
-/// message.content. Any structural mismatch returns MalformedResponse, never panic.
-pub fn parseCompletion(arena: std.mem.Allocator, body: []const u8) error{MalformedResponse}!Completion {
-    const Resp = struct {
-        choices: []const struct {
-            message: struct {
-                content: ?[]const u8 = null,
-            } = .{},
-            finish_reason: ?[]const u8 = null,
-        } = &.{},
-    };
-    const parsed = std.json.parseFromSliceLeaky(Resp, arena, body, .{
-        .ignore_unknown_fields = true,
-    }) catch return error.MalformedResponse;
-
-    if (parsed.choices.len == 0) return error.MalformedResponse;
-    const content = parsed.choices[0].message.content orelse return error.MalformedResponse;
-    return .{
-        .content = content,
-        .finish_reason = parsed.choices[0].finish_reason orelse "",
-    };
-}
-
-test "buildRequestBody emits valid JSON and forces json_schema/strict" {
+test "buildRequestBody emits Responses input and forces text.format json_schema/strict" {
     const gpa = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
@@ -276,19 +354,64 @@ test "buildRequestBody emits valid JSON and forces json_schema/strict" {
         .{ .role = .system, .content = "sys" },
         .{ .role = .user, .content = "hi \"there\"\n" },
     };
-    const body = try buildRequestBody(arena, "qwen2.5", &msgs, .{
+    const body = try buildRequestBody(arena, "gpt-5.1", &msgs, .{
         .json_schema = "{\"type\":\"object\"}",
-        .schema_name = "scoot_reply",
-    }, null, .off);
+        .schema_name = "scoot_step",
+    }, null, false, null);
 
     // Must be valid JSON.
     const v = try std.json.parseFromSlice(std.json.Value, gpa, body, .{});
     defer v.deinit();
     try std.testing.expect(v.value == .object);
-    // Forces structured output.
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"response_format\"") != null);
+    // Responses shape: input array, text.format strict schema, model echoed.
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"input\":[") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"text\":{\"format\":{\"type\":\"json_schema\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"strict\":true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"model\":\"qwen2.5\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"model\":\"gpt-5.1\"") != null);
+    // No Chat Completions leftovers.
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"messages\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "response_format") == null);
+}
+
+test "buildRequestBody maps leading system messages to instructions, not input" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const msgs = [_]Message{
+        .{ .role = .system, .content = "SYS-PROMPT" },
+        .{ .role = .system, .content = "SKILL-MANIFEST" },
+        .{ .role = .user, .content = "do it" },
+        .{ .role = .assistant, .content = "step" },
+    };
+    const body = try buildRequestBody(arena, "m", &msgs, .{}, null, false, null);
+
+    const v = try std.json.parseFromSlice(std.json.Value, gpa, body, .{});
+    defer v.deinit();
+    // Both system messages are joined into the single instructions string.
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"instructions\":\"SYS-PROMPT\\n\\nSKILL-MANIFEST\"") != null);
+    // Only non-system turns remain in input; no system role item is emitted.
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"role\":\"system\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"role\":\"user\",\"content\":\"do it\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"role\":\"assistant\",\"content\":\"step\"") != null);
+}
+
+test "buildRequestBody store flag and previous_response_id chaining" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const msgs = [_]Message{.{ .role = .user, .content = "hi" }};
+
+    const stateless = try buildRequestBody(arena, "m", &msgs, .{}, null, false, null);
+    try std.testing.expect(std.mem.indexOf(u8, stateless, "\"store\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stateless, "previous_response_id") == null);
+
+    const chained = try buildRequestBody(arena, "m", &msgs, .{}, null, true, "resp_123");
+    try std.testing.expect(std.mem.indexOf(u8, chained, "\"store\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, chained, "\"previous_response_id\":\"resp_123\"") != null);
 }
 
 test "buildRequestBody injects extra_body extra fields(dynamic passthrough)" {
@@ -296,7 +419,7 @@ test "buildRequestBody injects extra_body extra fields(dynamic passthrough)" {
     var parsed = try std.json.parseFromSlice(
         std.json.Value,
         gpa,
-        "{\"service_tier\":\"priority\",\"reasoning_effort\":\"high\"}",
+        "{\"reasoning\":{\"effort\":\"high\"},\"service_tier\":\"priority\"}",
         .{},
     );
     defer parsed.deinit();
@@ -306,12 +429,10 @@ test "buildRequestBody injects extra_body extra fields(dynamic passthrough)" {
     const arena = arena_state.allocator();
 
     const msgs = [_]Message{.{ .role = .user, .content = "hi" }};
-    const body = try buildRequestBody(arena, "gpt-5.5", &msgs, .{}, parsed.value, .off);
+    const body = try buildRequestBody(arena, "gpt-5.5", &msgs, .{}, parsed.value, false, null);
 
-    // Extra fields are passed through into the request body.
     try std.testing.expect(std.mem.indexOf(u8, body, "\"service_tier\":\"priority\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"reasoning_effort\":\"high\"") != null);
-    // Still valid JSON with core fields intact.
+    try std.testing.expect(std.mem.indexOf(u8, body, "\"reasoning\":{\"effort\":\"high\"}") != null);
     const v = try std.json.parseFromSlice(std.json.Value, gpa, body, .{});
     defer v.deinit();
     try std.testing.expect(v.value == .object);
@@ -328,103 +449,60 @@ test "buildRequestBody ignores non-object extra_body(defensive)" {
     const arena = arena_state.allocator();
 
     const msgs = [_]Message{.{ .role = .user, .content = "hi" }};
-    const body = try buildRequestBody(arena, "m", &msgs, .{}, parsed.value, .off);
+    const body = try buildRequestBody(arena, "m", &msgs, .{}, parsed.value, false, null);
 
-    // Non-objects are ignored; request remains valid and does not splice raw 42.
     const v = try std.json.parseFromSlice(std.json.Value, gpa, body, .{});
     defer v.deinit();
     try std.testing.expect(v.value == .object);
     try std.testing.expect(std.mem.indexOf(u8, body, ",42") == null);
 }
 
-test "buildRequestBody: prompt_cache=off writes no cache markers(zero side effects,issue #72)" {
+test "parseCompletion extracts output_text, nested message content, and id" {
     const gpa = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const msgs = [_]Message{
-        .{ .role = .system, .content = "sys" },
-        .{ .role = .user, .content = "hi" },
-    };
-    const body = try buildRequestBody(arena, "m", &msgs, .{}, null, .off);
+    const direct = try parseCompletion(arena,
+        \\{"id":"resp_1","status":"completed","output_text":"{\"action\":\"final\"}"}
+    );
+    try std.testing.expectEqualStrings("{\"action\":\"final\"}", direct.content);
+    try std.testing.expectEqualStrings("completed", direct.finish_reason);
+    try std.testing.expectEqualStrings("resp_1", direct.id);
 
-    // Default mode: content remains plain strings with no cache_control or parts.
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"content\":\"sys\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"content\":\"hi\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "cache_control") == null);
+    const nested = try parseCompletion(arena,
+        \\{"id":"resp_2","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}]}
+    );
+    try std.testing.expectEqualStrings("hello", nested.content);
+    try std.testing.expectEqualStrings("resp_2", nested.id);
 }
 
-test "buildRequestBody: prompt_cache=anthropic adds cache_control breakpoint to system prefix(issue #72)" {
+test "parseCompletion surfaces refusal and rejects malformed without panic" {
     const gpa = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    const msgs = [_]Message{
-        .{ .role = .system, .content = "sys-PFX" },
-        .{ .role = .user, .content = "u" },
-        .{ .role = .assistant, .content = "a" },
-    };
-    const body = try buildRequestBody(arena, "m", &msgs, .{}, null, .anthropic);
-
-    // System prefix becomes content-parts with an ephemeral breakpoint.
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"content\":[{\"type\":\"text\",\"text\":\"sys-PFX\",\"cache_control\":{\"type\":\"ephemeral\"}}]") != null);
-    // Non-prefix messages remain plain strings without breakpoints or extra weight.
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"content\":\"u\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, body, "\"content\":\"a\"") != null);
-    // Still valid JSON.
-    const v = try std.json.parseFromSlice(std.json.Value, gpa, body, .{});
-    defer v.deinit();
-    try std.testing.expect(v.value == .object);
-}
-
-test "cacheBreakpointIndex chooses final initial system message and returns null without system (issue #72)" {
-    const a = [_]Message{
-        .{ .role = .system, .content = "s0" },
-        .{ .role = .system, .content = "s1" },
-        .{ .role = .user, .content = "u" },
-        .{ .role = .system, .content = "later-sys-ignored" },
-    };
-    try std.testing.expectEqual(@as(?usize, 1), cacheBreakpointIndex(&a));
-
-    const b = [_]Message{.{ .role = .user, .content = "u" }};
-    try std.testing.expectEqual(@as(?usize, null), cacheBreakpointIndex(&b));
-
-    try std.testing.expectEqual(@as(?usize, null), cacheBreakpointIndex(&[_]Message{}));
-}
-
-test "PromptCache.parse: anthropic / off / unknown falls back to off(issue #72)" {
-    try std.testing.expectEqual(PromptCache.anthropic, PromptCache.parse("anthropic"));
-    try std.testing.expectEqual(PromptCache.off, PromptCache.parse("off"));
-    try std.testing.expectEqual(PromptCache.off, PromptCache.parse("bogus"));
-    try std.testing.expectEqual(PromptCache.off, PromptCache.parse(""));
-}
-
-test "parseCompletion extracts content(normal response)" {
-    const gpa = std.testing.allocator;
-    var arena_state = std.heap.ArenaAllocator.init(gpa);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
-    const body =
-        \\{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"total_tokens":3}}
-    ;
-    const c = try parseCompletion(arena, body);
-    try std.testing.expectEqualStrings("hello", c.content);
-    try std.testing.expectEqualStrings("stop", c.finish_reason);
-}
-
-test "parseCompletion defensive failures return MalformedResponse without panic" {
-    const gpa = std.testing.allocator;
-    var arena_state = std.heap.ArenaAllocator.init(gpa);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
+    const refused = try parseCompletion(arena,
+        \\{"id":"resp_3","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"refusal","refusal":"I cannot help with that."}]}]}
+    );
+    try std.testing.expectEqualStrings("I cannot help with that.", refused.content);
+    try std.testing.expectEqualStrings("refusal", refused.finish_reason);
 
     try std.testing.expectError(error.MalformedResponse, parseCompletion(arena, "not json <<<"));
-    try std.testing.expectError(error.MalformedResponse, parseCompletion(arena, "{\"choices\":[]}"));
+    try std.testing.expectError(error.MalformedResponse, parseCompletion(arena, "{\"output\":[]}"));
     try std.testing.expectError(error.MalformedResponse, parseCompletion(arena, "{}"));
-    try std.testing.expectError(error.MalformedResponse, parseCompletion(arena, "{\"choices\":[{\"message\":{}}]}"));
+}
+
+test "ModelContext captures last response id within fixed buffer" {
+    var mc: ModelContext = .{};
+    try std.testing.expectEqualStrings("", mc.lastResponseId());
+    mc.rememberResponseId("resp_abc");
+    try std.testing.expectEqualStrings("resp_abc", mc.lastResponseId());
+
+    const long = "resp_" ++ ("x" ** 200);
+    mc.rememberResponseId(long);
+    try std.testing.expectEqual(mc.last_response_id_buf.len, mc.lastResponseId().len);
 }
 
 test "Client reports backend failure response" {

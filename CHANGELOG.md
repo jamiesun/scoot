@@ -26,13 +26,32 @@ heading when cutting a release.
   session transcript archive after active context compaction (#99).
 - Stable embedding API surface now separates the public package root from the
   CLI/internal module and includes a compiled minimal embed example (#106).
+- `backend.store` config key and `SCOOT_BACKEND_STORE` override to opt into
+  Responses API server-side response persistence; defaults to off so Scoot
+  stays stateless and local-first (#110).
 
 ### Changed
 
+- Scoot now speaks only the OpenAI Responses API (`/v1/responses`): leading
+  system messages map to the top-level `instructions` field, the rest become the
+  `input` array, and transport is stateless by default (full `input` resent each
+  turn) so local context compaction stays in control. Requires a Responses-capable
+  backend such as Ollama >= 0.13.3, vLLM, or OpenAI (#110).
 - Context compaction now goes through a `Compressor` strategy seam with `drop`
   retained as the smallest fallback strategy (#97).
 - Added the built-in `extractive` compactor and `agent.compactor` /
   `SCOOT_AGENT_COMPACTOR` selection (#97).
+
+### Removed
+
+- OpenAI Chat Completions transport, the `backend.api` selector, and the
+  `SCOOT_BACKEND_API` override; the Responses API is now the only transport.
+  Configs that still set `api` are ignored with a one-line deprecation warning
+  (#110).
+- The `backend.prompt_cache` hint and `SCOOT_BACKEND_PROMPT_CACHE` override
+  (with the Anthropic-style `cache_control` breakpoint); the `instructions`
+  field is natively prompt-cached, so the manual hint is obsolete. Stale keys are
+  ignored with a deprecation warning (#110).
 
 ### Fixed
 

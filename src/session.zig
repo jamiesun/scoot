@@ -8,6 +8,17 @@
 //! history carrier: appended content is copied into Session-owned allocation and
 //! is independent of source arena lifetime.
 //!
+//! Two contexts, deliberately separated (issue #110):
+//!   - Local execution context (this module): the durable record of what
+//!     happened locally — tool observations, policy denials, and the full
+//!     transcript persisted as JSONL for recall and audit replay. It is owned by
+//!     scoot and never depends on any model-side storage mechanic.
+//!   - Model context (llm.ModelContext): the transport-side view sent to the
+//!     model plus opt-in response-storage/chaining state (`store`,
+//!     `previous_response_id`). Scoot stays stateless by default and rebuilds the
+//!     model's `input` from this local log every turn, so compaction stays local
+//!     and token use stays bounded.
+//!
 //! Responsibility boundary:
 //!   - Session handles short-term, single-session message records and optional
 //!     persistence.
@@ -20,8 +31,9 @@ const jsonio = @import("jsonio.zig");
 const audit = @import("audit.zig");
 
 /// One session. `messages` is the active context sent to the model; `archive` is
-/// the complete transcript for recall and persistence. Compaction only changes
-/// `messages` and must not lose `archive`.
+/// the complete execution log for recall and persistence. Compaction only changes
+/// `messages` and must not lose `archive`. Model-side response storage and
+/// chaining state live separately in `llm.ModelContext`, never here.
 pub const Session = struct {
     /// Session id, preferably timestamp or UUID, used in persistence filenames
     /// and logs. Memory is caller-owned and must outlive Session.
@@ -206,6 +218,37 @@ test "persist appends JSONL to <dir>/<id>.jsonl and can read back" {
 
     const st = try cwd.statFile(io, dir ++ "/conv1.jsonl", .{});
     try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), st.permissions.toMode() & 0o777);
+}
+
+test "context separation: execution log survives model-context compaction; transport state lives in llm.ModelContext" {
+    const gpa = std.testing.allocator;
+    var s = Session.init("sep1");
+    defer s.deinit(gpa);
+
+    try s.append(gpa, .system, "you are scoot");
+    try s.append(gpa, .user, "goal: list files");
+    try s.append(gpa, .assistant, "{\"tool\":\"shell\"}"); // a model step
+    try s.append(gpa, .user, "observation: a.txt b.txt"); // an execution-context observation
+    try std.testing.expectEqual(@as(usize, 4), s.count());
+
+    // Emulate compaction: the active *model context* drops earlier turns, but the
+    // *execution log* (archive) must retain the full transcript untouched.
+    s.messages.shrinkRetainingCapacity(1); // keep only the leading system message
+    const marker = try gpa.dupe(u8, "[compacted 3 messages]");
+    try s.adoptActiveOnly(gpa, marker); // adopts a gpa-owned slice, freed in deinit
+
+    try std.testing.expectEqual(@as(usize, 1), s.items().len); // model context shrank
+    try std.testing.expectEqual(@as(usize, 4), s.archiveItems().len); // execution log intact
+    // The tool observation is still in the execution log after compaction.
+    try std.testing.expectEqualStrings("observation: a.txt b.txt", s.archiveItems()[3].content);
+
+    // Model-side transport state (response storage / chaining) lives in
+    // llm.ModelContext, never in Session: the two contexts are separate types and
+    // scoot is stateless by default.
+    const mc: llm.ModelContext = .{};
+    try std.testing.expectEqual(false, mc.store);
+    try std.testing.expectEqual(@as(?[]const u8, null), mc.previous_response_id);
+    try std.testing.expectEqual(@as(usize, 0), mc.lastResponseId().len);
 }
 
 test {

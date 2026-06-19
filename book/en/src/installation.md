@@ -6,7 +6,8 @@ source or download a tagged release artifact.
 ## Requirements
 
 - **Zig 0.16.0 or newer** to build from source. No other build dependency.
-- A reachable **OpenAI-compatible** chat/completions backend (local or remote).
+- A reachable **OpenAI-compatible** Responses API (`/v1/responses`) backend
+  (local or remote).
 - A POSIX shell (`/bin/sh`) for the `bash` tool. The structured tools
   (`file_read`, `grep`, `glob`, `http_request`, …) need no external commands.
 
@@ -158,8 +159,9 @@ discovery, and the audit log path. Fix anything it flags before running a goal.
 
 ## Backend Examples
 
-Scoot speaks only the OpenAI-compatible `chat/completions` protocol. Anything
-that implements it works.
+Scoot speaks only the OpenAI-compatible Responses API (`/v1/responses`).
+Ollama ≥ 0.13.3 and vLLM support it statelessly; anything else must sit behind a
+Responses-compatible gateway.
 
 ### Ollama (local, default)
 

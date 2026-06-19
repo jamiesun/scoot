@@ -43,7 +43,7 @@ zig build -Doptimize=ReleaseSafe    # 嵌入式 / 生产部署推荐档（见下
 | `src/config.zig` | 结构化配置（backend / agent / tools / skills / audit）；TOML 优先 / JSON 回落 |
 | `src/toml.zig` | 自研零依赖 TOML 子集解析器（→ `std.json.Value`，复用 JSON 类型映射） |
 | `src/secret.zig` | 密钥管理：env → 文件(0600) → 凭证命令，脱敏 |
-| `src/llm.zig` | LLM 适配（仅 OpenAI `/v1/chat/completions`）：HTTP 往返 + 强制 json_schema/strict + 防弹解析 |
+| `src/llm.zig` | LLM 适配（OpenAI Responses API `/v1/responses`）：HTTP 往返 + 强制 json_schema/strict + 防弹解析 |
 | `src/jsonio.zig` | 共享 JSON 字符串转义（session / llm 复用） |
 | `src/skill.zig` | Skill 机制：发现 / 选择 / 按需加载（渐进式披露） |
 | `src/session.zig` | 会话：跨回合存活的消息流 + JSONL 序列化（短期记忆载体） |
@@ -106,7 +106,7 @@ zig build -Doptimize=ReleaseSafe    # 嵌入式 / 生产部署推荐档（见下
 违反前必须先回到 ROADMAP 与用户确认是否改边界：
 
 1. **不引入图形界面**：只有 CLI + 配置文件。不写 Web UI / GUI / 托盘。
-2. **只对接 OpenAI 协议**：仅 `/v1/chat/completions`，强制 `response_format=json_schema` 与 tool calling `strict=true`。**不要**为 Anthropic / Google 等非 OpenAI 格式写胶水代码。
+2. **只对接 OpenAI 协议**：仅支持 OpenAI 兼容 Responses API（`/v1/responses`），强制结构化 JSON Schema 输出。Chat Completions 已移除；**不要**为 Chat Completions 或 Anthropic / Google 等非 OpenAI 格式写胶水代码。
 3. **不搞复杂云端同步**：状态严格本地（`~/.scoot/`，SQLite 或纯文本）。不引入远程数据库、E2E 同步，不与特定网络栈强耦合。
 4. **绝不信任模型输出**：任何未经 Schema 校验的模型响应都不得直接执行；解析失败要包装成 System Error 回灌触发重试，**不准 panic**。
 5. **不为功能数量牺牲单体简洁**：不堆重型运行时、不做需要动态链接 / 加载原生代码的二进制插件体系。新增依赖前先问：它会破坏“单文件、零臃肿依赖”吗？（Skill 加载的是指令 + 数据 + 沙盒脚本，不是原生插件，不在此列。）

@@ -25,12 +25,27 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
   归档中取回较早的精确原文消息（#99）。
 - 稳定嵌入 API 现在把公共包根与 CLI/internal 模块分离，并加入会随测试编译的
   最小嵌入示例（#106）。
+- 新增 `backend.store` 配置项与 `SCOOT_BACKEND_STORE` 覆盖，可选择让后端通过
+  Responses API 在服务端持久化响应；默认关闭，以保持 Scoot 无状态、本地优先（#110）。
 
 ### 变更
 
+- Scoot 现在只讲 OpenAI Responses API（`/v1/responses`）：起始 system 消息映射为
+  顶层 `instructions` 字段，其余进入 `input` 数组，且传输默认无状态（每轮重发完整
+  `input`），让本地上下文压缩始终掌控全局。需要支持 Responses 的后端，例如
+  Ollama >= 0.13.3、vLLM 或 OpenAI（#110）。
 - 上下文压缩现在通过 `Compressor` 策略接缝执行，`drop` 保留为最小兜底策略（#97）。
 - 新增内置 `extractive` 压缩器，并支持通过 `agent.compactor` /
   `SCOOT_AGENT_COMPACTOR` 选择（#97）。
+
+### 移除
+
+- 移除 OpenAI Chat Completions 传输、`backend.api` 选择器与 `SCOOT_BACKEND_API`
+  覆盖；Responses API 现在是唯一传输。仍设置 `api` 的旧配置会被忽略，并打印一行
+  弃用警告（#110）。
+- 移除 `backend.prompt_cache` 提示与 `SCOOT_BACKEND_PROMPT_CACHE` 覆盖（以及
+  Anthropic 风格的 `cache_control` 断点）；`instructions` 字段已被原生缓存，手动提示
+  已无意义。残留的旧键会被忽略并打印弃用警告（#110）。
 
 ### 修复
 
