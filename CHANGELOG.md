@@ -16,13 +16,26 @@ heading when cutting a release.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-19
+
 ### Added
 
+- `SCOOT_*` environment overrides for zero-config and CI runs (#67)
+- Windowed `file_read` support with offset/limit line ranges (#78)
+- Context compaction at the configured context budget instead of aborting the run (#81)
+- Optional grep context lines around matches (#82)
+- Config-gated prompt-cache breakpoint for stable model prompts (#84)
+- Zero-dependency `outline` action for low-token file skeletons (#85)
+- POSIX release installer that downloads, verifies, and installs the matching binary (#90)
 - Run summaries on stderr after CLI/REPL runs, including event counts, tool calls, policy denies, backend status, and transcript path (#59)
 - Minute-level 5-field UTC cron scheduling for `schedule.jobs` (#65)
 
 ### Changed
 
+- `~/.agents/skills` discovery is now opt-in while project-local and Scoot-local skills remain enabled (#87)
+- Repeated read-only observations are deduplicated within a run (#83)
+- Agent observations are token-optimized by stripping ANSI, using head/tail windows, and enforcing token caps (#80)
+- Per-turn thoughts are no longer persisted in run history (#79)
 - Runtime directories and JSONL audit/session files now use owner-only permissions, and JSONL files rotate to `.1` at a bounded size (#60, #61)
 - GitHub workflows now use Node 24-compatible actions and shell-based Zig setup (#63)
 - `build_options` is imported by the executable root module as well as the library module (#64)
@@ -30,8 +43,16 @@ heading when cutting a release.
 
 ### Fixed
 
+- Language switching now lives in the mdBook navigation icon bar (#86)
 - Invalid enum-like `SCOOT_*` overrides now warn and keep the previous value instead of silently changing policy/mode/level (#68)
 - `confine_writes` now rejects a pre-existing symlink at the final write path component (#69)
+
+### Documentation
+
+- Added maintained changelogs and made release notes derive from them (#66)
+- Improved README and user-guide structure, including installer docs, design philosophy, best-practice cases, and daemon/run-mode guidance (#90)
+- Added Scoot logo and favicon assets, plus an animated documentation landing mark (#91)
+- Folded the logo into the README/mdBook infographic and removed duplicate standalone logo blocks (#92)
 
 ## [0.1.0] - 2026-06-18
 
@@ -60,5 +81,6 @@ First feature release since `v0.0.2` (which only carried release-workflow plumbi
 
 - Polished homepage/license metadata, infographic, bilingual user guide (#6, #19, #36)
 
-[Unreleased]: https://github.com/jamiesun/scoot/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/jamiesun/scoot/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/jamiesun/scoot/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jamiesun/scoot/compare/v0.0.2...v0.1.0
