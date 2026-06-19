@@ -26,6 +26,7 @@ heading when cutting a release.
 - Runtime directories and JSONL audit/session files now use owner-only permissions, and JSONL files rotate to `.1` at a bounded size (#60, #61)
 - GitHub workflows now use Node 24-compatible actions and shell-based Zig setup (#63)
 - `build_options` is imported by the executable root module as well as the library module (#64)
+- `parseStep` now tolerates compatibility backends that wrap the step JSON in a Markdown code fence or emit multiple concatenated JSON objects, executing only the first step while keeping single-step ReACT semantics
 
 ### Fixed
 
