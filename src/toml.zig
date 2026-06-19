@@ -1,49 +1,53 @@
-//! 极简 TOML 子集解析器：把 config.toml 文本解析为 std.json.Value 树。
-//! 解析结果交给 std.json.parseFromValueLeaky 映射进类型化的 FileConfig，
-//! 从而复用全部默认值 / 按节合并 / extra_body 透传逻辑——本模块只管 TOML→Value 这一段。
+//! Minimal TOML subset parser: parses config.toml text into a std.json.Value tree.
+//! The result is fed to std.json.parseFromValueLeaky to map into typed FileConfig,
+//! reusing all defaults, section merging, and extra_body passthrough logic. This
+//! module only owns the TOML-to-Value step.
 //!
-//! 覆盖 Scoot 配置实际需要的 TOML 子集：
-//!   - `#` 行注释
-//!   - `[table]` / `[a.b]` 表头（含点分嵌套）
-//!   - `[[a.b]]` 表数组（schedule.jobs 用）
-//!   - `key = value`（key 可裸键或带引号；支持点分键 `a.b = v`）
-//!   - 值：基本串 `"..."`（带转义）、字面串 `'...'`、整数（可含 `_`）、浮点、布尔、
-//!     行内数组 `[..]`（可跨行）、行内表 `{..}`
+//! It covers the TOML subset Scoot config actually needs:
+//!   - `#` line comments
+//!   - `[table]` / `[a.b]` headers with dotted nesting
+//!   - `[[a.b]]` table arrays for schedule.jobs
+//!   - `key = value`, with bare or quoted keys and dotted keys like `a.b = v`
+//!   - values: basic strings `"..."` with escapes, literal strings `'...'`,
+//!     integers with `_`, floats, bools, inline arrays `[..]`, and inline tables
+//!     `{..}`
 //!
-//! 明确不支持（遇到即 `error.InvalidToml`，绝不静默 / panic——铁律 #4）：
-//!   日期时间、多行串 `"""` / `'''`、非十进制整数（0x/0o/0b）、inf/nan。
-//!   Scoot 配置无这些需求；需要时回落用 config.json。
+//! Explicitly unsupported and rejected with `error.InvalidToml`: date-times,
+//! multiline strings `"""` / `'''`, non-decimal integers (0x/0o/0b), inf, and
+//! nan. Scoot config does not need these; use config.json if needed.
 //!
-//! 内存：全部分配走调用方传入的 arena（与 Value 同寿命）；输入 `src` 须在 arena 存活期内有效。
-//! 指针稳定性：不缓存任何指向托管表内部的长寿命指针——每次插入都从 root 按 cursor 现导航现插，
-//!   规避 StringArrayHashMap / ArrayList 扩容搬迁导致的悬垂。
+//! Memory: all allocations use the caller-provided arena and live with the
+//! Value. Input `src` must remain valid for the arena lifetime. Pointer stability:
+//! no long-lived pointers into managed table internals are cached; every insert
+//! navigates from root by cursor, avoiding dangling pointers after map/list growth.
 
 const std = @import("std");
 const Value = std.json.Value;
 const ObjectMap = std.json.ObjectMap;
 const Array = std.json.Array;
 
-/// 行内数组/表的最大嵌套深度：超出返回 error.InvalidToml，杜绝病态深嵌套导致的栈溢出（issue #44）。
+/// Maximum inline array/table nesting; exceeding it returns error.InvalidToml
+/// instead of risking stack overflow (issue #44).
 const max_nesting_depth: usize = 64;
 
 pub const Error = error{InvalidToml} || std.mem.Allocator.Error;
 
-/// 解析失败位置：供上层把不可读的 `error.InvalidToml` 转成「文件:行:列」可定位信息（issue #46）。
+/// Parse failure position for upper layers to report file:line:column (issue #46).
 pub const Diagnostic = struct {
-    /// 1 起行号。
+    /// 1-based line number.
     line: usize,
-    /// 1 起列号（按字节）。
+    /// 1-based byte column.
     col: usize,
-    /// 出错处的字节偏移。
+    /// Byte offset at the error.
     byte: usize,
 };
 
-/// 解析 TOML 文本，返回根表（Value.object）。畸形输入返回 error.InvalidToml。
+/// Parses TOML text and returns the root table as Value.object.
 pub fn parse(arena: std.mem.Allocator, src: []const u8) Error!Value {
     return parseDiag(arena, src, null);
 }
 
-/// 同 `parse`，但解析失败（InvalidToml）时把出错位置写入 `diag`（若提供），便于上层定位（issue #46）。
+/// Like `parse`, but writes parse failure position into `diag` when provided.
 pub fn parseDiag(arena: std.mem.Allocator, src: []const u8, diag: ?*Diagnostic) Error!Value {
     var p: Parser = .{ .src = src, .arena = arena, .root = .empty };
     p.run() catch |err| {
@@ -55,7 +59,7 @@ pub fn parseDiag(arena: std.mem.Allocator, src: []const u8, diag: ?*Diagnostic) 
     return .{ .object = p.root };
 }
 
-/// 由字节偏移算出 1 起的行/列（用于解析失败定位）。
+/// Computes 1-based line/column from byte offset for diagnostics.
 fn lineColAt(src: []const u8, pos: usize) Diagnostic {
     const clamped = if (pos > src.len) src.len else pos;
     var line: usize = 1;
@@ -77,11 +81,13 @@ const Parser = struct {
     pos: usize = 0,
     arena: std.mem.Allocator,
     root: ObjectMap,
-    /// 当前表头的点分路径（空 = 根表）。
+    /// Dotted path of the current table header; empty means root table.
     cur_path: []const []const u8 = &.{},
-    /// cur_path 末段是否为「表数组」（[[..]]）——是则插入目标为该数组的最后一个元素。
+    /// Whether the last cur_path segment is an array table ([[..]]); if true,
+    /// insert into that array's last element.
     cur_is_array_elem: bool = false,
-    /// 当前值解析的嵌套深度（行内数组/表）。防无界互递归导致栈溢出（issue #44）。
+    /// Current value nesting depth for inline arrays/tables; prevents unbounded
+    /// mutual recursion stack overflow (issue #44).
     depth: usize = 0,
 
     fn run(self: *Parser) Error!void {
@@ -97,9 +103,9 @@ const Parser = struct {
         }
     }
 
-    // ---- 词法骨架 -------------------------------------------------------
+    // ---- Lexical skeleton ------------------------------------------------
 
-    /// 跳过空白、换行与行注释（语句之间）。
+    /// Skips whitespace, newlines, and line comments between statements.
     fn skipTrivia(self: *Parser) void {
         while (self.pos < self.src.len) {
             const c = self.src[self.pos];
@@ -111,7 +117,7 @@ const Parser = struct {
         }
     }
 
-    /// 仅跳过行内空白（空格 / 制表符）。
+    /// Skips inline spaces and tabs only.
     fn skipInline(self: *Parser) void {
         while (self.pos < self.src.len and (self.src[self.pos] == ' ' or self.src[self.pos] == '\t'))
             self.pos += 1;
@@ -121,7 +127,7 @@ const Parser = struct {
         while (self.pos < self.src.len and self.src[self.pos] != '\n') self.pos += 1;
     }
 
-    /// 语句尾：行内空白 + 可选注释后，必须是换行或 EOF。
+    /// Statement end: after inline whitespace and optional comment, require EOL or EOF.
     fn expectLineEnd(self: *Parser) Error!void {
         self.skipInline();
         if (self.pos >= self.src.len) return;
@@ -138,10 +144,10 @@ const Parser = struct {
         return if (self.pos < self.src.len) self.src[self.pos] else null;
     }
 
-    // ---- 表头 -----------------------------------------------------------
+    // ---- Headers ---------------------------------------------------------
 
     fn parseHeader(self: *Parser) Error!void {
-        // 已知 src[pos] == '['
+        // src[pos] is known to be '['.
         self.pos += 1;
         const is_array = self.pos < self.src.len and self.src[self.pos] == '[';
         if (is_array) self.pos += 1;
@@ -150,7 +156,7 @@ const Parser = struct {
         if (path.len == 0) return error.InvalidToml;
 
         self.skipInline();
-        // 关闭括号
+        // Closing bracket.
         if (self.pos >= self.src.len or self.src[self.pos] != ']') return error.InvalidToml;
         self.pos += 1;
         if (is_array) {
@@ -164,13 +170,13 @@ const Parser = struct {
             self.cur_path = path;
             self.cur_is_array_elem = true;
         } else {
-            // 普通表：路径登记到 cursor，懒创建（空表回落默认即可）。
+            // Normal table: record cursor path and create lazily.
             self.cur_path = path;
             self.cur_is_array_elem = false;
         }
     }
 
-    /// [[a.b]]：导航到 a，在其下确保 b 是数组并追加一个空表元素。
+    /// [[a.b]]: navigate to a, ensure b is an array, and append an empty table.
     fn openArrayTable(self: *Parser, path: []const []const u8) Error!void {
         var map: *ObjectMap = &self.root;
         for (path[0 .. path.len - 1]) |seg| map = try ensureObjectChild(self.arena, map, seg);
@@ -184,7 +190,7 @@ const Parser = struct {
         try arr.append(.{ .object = .empty });
     }
 
-    // ---- 键值对 ---------------------------------------------------------
+    // ---- Key/value pairs -------------------------------------------------
 
     fn parseKeyValue(self: *Parser) Error!void {
         const key_path = try self.parseDottedKey();
@@ -196,15 +202,15 @@ const Parser = struct {
         const val = try self.parseValue();
         try self.expectLineEnd();
 
-        // 导航到当前表，再按点分键下钻插入。
+        // Navigate to current table, then descend dotted key segments to insert.
         var map = try self.currentTable();
         for (key_path[0 .. key_path.len - 1]) |seg| map = try ensureObjectChild(self.arena, map, seg);
         const leaf = key_path[key_path.len - 1];
-        if (map.contains(leaf)) return error.InvalidToml; // 重复键
+        if (map.contains(leaf)) return error.InvalidToml; // Duplicate key.
         try map.put(self.arena, try self.dup(leaf), val);
     }
 
-    /// 按 cursor 现导航出当前插入目标表（不缓存指针）。
+    /// Navigates by cursor to the current insertion table without caching pointers.
     fn currentTable(self: *Parser) Error!*ObjectMap {
         var map: *ObjectMap = &self.root;
         const n = self.cur_path.len;
@@ -224,9 +230,9 @@ const Parser = struct {
         return map;
     }
 
-    // ---- 键解析 ---------------------------------------------------------
+    // ---- Key parsing -----------------------------------------------------
 
-    /// 解析点分键 `a.b.c`，返回各段（裸键或带引号串）。
+    /// Parses dotted key `a.b.c` and returns segments, bare or quoted.
     fn parseDottedKey(self: *Parser) Error![]const []const u8 {
         var segs: std.ArrayList([]const u8) = .empty;
         while (true) {
@@ -246,7 +252,7 @@ const Parser = struct {
     fn parseKeySegment(self: *Parser) Error![]const u8 {
         const c = self.peek() orelse return error.InvalidToml;
         if (c == '"' or c == '\'') return self.parseString();
-        // 裸键：A-Za-z0-9_-
+        // Bare key: A-Za-z0-9_-
         const start = self.pos;
         while (self.pos < self.src.len) {
             const ch = self.src[self.pos];
@@ -259,7 +265,7 @@ const Parser = struct {
         return self.dup(self.src[start..self.pos]);
     }
 
-    // ---- 值解析 ---------------------------------------------------------
+    // ---- Value parsing ---------------------------------------------------
 
     fn parseValue(self: *Parser) Error!Value {
         self.skipInline();
@@ -267,7 +273,7 @@ const Parser = struct {
         switch (c) {
             '"', '\'' => return .{ .string = try self.parseString() },
             '[' => {
-                // 行内数组/表的嵌套深度护栏：超限返回 InvalidToml 而非栈溢出（issue #44）。
+                // Inline array/table nesting guard: InvalidToml instead of stack overflow.
                 if (self.depth >= max_nesting_depth) return error.InvalidToml;
                 self.depth += 1;
                 defer self.depth -= 1;
@@ -294,7 +300,7 @@ const Parser = struct {
     fn matchWord(self: *Parser, word: []const u8) bool {
         if (self.pos + word.len > self.src.len) return false;
         if (!std.mem.eql(u8, self.src[self.pos .. self.pos + word.len], word)) return false;
-        // 词后须为边界（非字母数字下划线）
+        // Word must be followed by a boundary, not alnum or underscore.
         const after = self.pos + word.len;
         if (after < self.src.len) {
             const ch = self.src[after];
@@ -306,16 +312,16 @@ const Parser = struct {
         return true;
     }
 
-    /// 单行字符串：基本串 `"..."`（带转义）或字面串 `'...'`（无转义）。
-    /// 多行串 `"""` / `'''` 不支持。
+    /// Single-line string: basic `"..."` with escapes or literal `'...'`.
+    /// Multiline `"""` / `'''` strings are unsupported.
     fn parseString(self: *Parser) Error![]const u8 {
         const quote = self.src[self.pos];
-        // 拒绝多行串
+        // Reject multiline strings.
         if (self.pos + 2 < self.src.len and self.src[self.pos + 1] == quote and self.src[self.pos + 2] == quote)
             return error.InvalidToml;
         self.pos += 1;
         if (quote == '\'') {
-            // 字面串：原样到下一个 '，不处理转义，不跨行
+            // Literal string: raw until next ', with no escapes and no newlines.
             const start = self.pos;
             while (self.pos < self.src.len and self.src[self.pos] != '\'') {
                 if (self.src[self.pos] == '\n') return error.InvalidToml;
@@ -323,10 +329,10 @@ const Parser = struct {
             }
             if (self.pos >= self.src.len) return error.InvalidToml;
             const s = self.src[start..self.pos];
-            self.pos += 1; // 吃掉收尾 '
+            self.pos += 1; // Consume closing '.
             return self.dup(s);
         }
-        // 基本串：处理转义
+        // Basic string: process escapes.
         var out: std.ArrayList(u8) = .empty;
         while (self.pos < self.src.len) {
             const ch = self.src[self.pos];
@@ -358,14 +364,16 @@ const Parser = struct {
                 self.pos += 1;
             }
         }
-        return error.InvalidToml; // 未闭合
+        return error.InvalidToml; // Unclosed.
     }
 
-    /// 处理 \uXXXX / \UXXXXXXXX：读 n 个十六进制位，UTF-8 编码进 out。
-    /// 调用时 self.pos 指向 'u'/'U'；返回时 pos 指向最后一个十六进制位（外层再 +1）。
+    /// Handles \uXXXX / \UXXXXXXXX by reading n hex digits and UTF-8 encoding
+    /// them into out. On entry self.pos points at 'u'/'U'; on return it points at
+    /// the final hex digit so the outer loop can advance once more.
     fn parseUnicodeEscape(self: *Parser, out: *std.ArrayList(u8), n: usize) Error!void {
         if (self.pos + n >= self.src.len) return error.InvalidToml;
-        // 用 u32 容纳 \U 的 8 位十六进制：u21 在累加时会静默丢高位，把越界码点截成错字符（issue #47）。
+        // Use u32 for eight \U hex digits; u21 would drop high bits while
+        // accumulating and truncate out-of-range codepoints (issue #47).
         var cp: u32 = 0;
         var i: usize = 0;
         while (i < n) : (i += 1) {
@@ -373,19 +381,19 @@ const Parser = struct {
             const d = hexDigit(hc) orelse return error.InvalidToml;
             cp = (cp << 4) | d;
         }
-        // 越界（> U+10FFFF）或代理区（U+D800..U+DFFF）码点：明确拒绝，绝不静默产出错字符（issue #47）。
+        // Reject out-of-range (> U+10FFFF) and surrogate codepoints explicitly.
         if (cp > 0x10FFFF or (cp >= 0xD800 and cp <= 0xDFFF)) return error.InvalidToml;
         var buf: [4]u8 = undefined;
         const len = std.unicode.utf8Encode(@intCast(cp), &buf) catch return error.InvalidToml;
         try out.appendSlice(self.arena, buf[0..len]);
-        self.pos += n; // 外层循环结束再 +1 吃掉最后一位
+        self.pos += n; // Outer loop advances once more after the final digit.
     }
 
     fn parseArray(self: *Parser) Error!Value {
         self.pos += 1; // [
         var arr = Array.init(self.arena);
         while (true) {
-            self.skipTrivia(); // 数组可跨行 + 含注释
+            self.skipTrivia(); // Arrays may span lines and contain comments.
             const c = self.peek() orelse return error.InvalidToml;
             if (c == ']') {
                 self.pos += 1;
@@ -426,15 +434,15 @@ const Parser = struct {
             const leaf = key_path[key_path.len - 1];
             if (map.contains(leaf)) return error.InvalidToml;
             try map.put(self.arena, try self.dup(leaf), v);
-            // obj 可能因 ensureObjectChild 顶层插入而搬迁，故每轮用本地 obj 副本？
-            // 不会：obj 是栈上的 ObjectMap 值，map=&obj 始终有效；子表搬迁只动子表内部缓冲。
+            // obj itself is stack-owned, so map=&obj remains valid; child table
+            // growth may move child buffers, but not the root ObjectMap value.
 
             self.skipTrivia();
             const sep = self.peek() orelse return error.InvalidToml;
             if (sep == ',') {
                 self.pos += 1;
                 self.skipTrivia();
-                if (self.peek() == @as(u8, '}')) { // 容忍尾随逗号
+                if (self.peek() == @as(u8, '}')) { // Allow trailing comma.
                     self.pos += 1;
                     return .{ .object = obj };
                 }
@@ -445,7 +453,8 @@ const Parser = struct {
         }
     }
 
-    /// 数字：十进制整数（可含 `_`）或浮点。拒绝日期时间 / 非十进制 / inf / nan。
+    /// Number: decimal integer with optional `_`, or float. Rejects date-times,
+    /// non-decimal forms, inf, and nan.
     fn parseNumber(self: *Parser) Error!Value {
         const start = self.pos;
         while (self.pos < self.src.len) {
@@ -458,9 +467,9 @@ const Parser = struct {
         const raw = self.src[start..self.pos];
         if (raw.len == 0) return error.InvalidToml;
 
-        // 拒绝日期时间残留（含 ':' 已被上面的 token 集排除——':' 不在集合，故会断在那；
-        // 但形如 1979-05-27 会被读成 token，含中部 '-' → 视为日期，拒绝）。
-        // 去掉下划线分隔符后判定。
+        // Reject date-time residue. ':' is excluded from token chars, so those
+        // forms stop earlier, but forms like 1979-05-27 are tokenized and contain
+        // a middle '-' that marks a date. Remove `_` separators before checking.
         var buf: std.ArrayList(u8) = .empty;
         for (raw) |ch| {
             if (ch == '_') continue;
@@ -469,8 +478,8 @@ const Parser = struct {
         const s = buf.items;
         if (s.len == 0) return error.InvalidToml;
 
-        // 中部出现 '-'（非首位、且非紧跟指数符 e/E）→ 视为日期，拒绝。
-        // 指数负号如 `1e-5` / `2.5e-10` 的 '-' 紧跟 e/E，属合法浮点，不在此拒绝（issue #43）。
+        // A middle '-' not at the start and not immediately after e/E marks a
+        // date and is rejected. Exponent negatives like `1e-5` are valid floats.
         var k: usize = 1;
         while (k < s.len) : (k += 1) {
             if (s[k] == '-' and s[k - 1] != 'e' and s[k - 1] != 'E') return error.InvalidToml;
@@ -493,7 +502,8 @@ const Parser = struct {
     }
 };
 
-/// 在 parent 下确保 name 为对象表并返回其指针；name 已存在但非表 → InvalidToml。
+/// Ensures `name` under parent is an object table and returns its pointer.
+/// Existing non-table values return InvalidToml.
 fn ensureObjectChild(arena: std.mem.Allocator, parent: *ObjectMap, name: []const u8) Error!*ObjectMap {
     if (parent.getPtr(name)) |v| {
         if (v.* != .object) return error.InvalidToml;
@@ -516,13 +526,13 @@ test {
     std.testing.refAllDecls(@This());
 }
 
-test "toml: 基本表与标量" {
+test "toml: basic tables and scalars" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const src =
-        \\# 注释
+        \\# comment
         \\[backend]
-        \\base_url = "https://x/openai/v1"  # 行尾注释
+        \\base_url = "https://x/openai/v1"  # line endingcomment
         \\model = "gpt-5.5"
         \\max_turns = 32
         \\enabled = true
@@ -539,7 +549,7 @@ test "toml: 基本表与标量" {
     try std.testing.expectEqualStrings("guarded", v.object.get("tools").?.object.get("policy").?.string);
 }
 
-test "toml: 点分表头 [a.b] 映射为嵌套对象（extra_body 场景）" {
+test "toml: dotted table [a.b] maps to nested object for extra_body" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const src =
@@ -556,7 +566,7 @@ test "toml: 点分表头 [a.b] 映射为嵌套对象（extra_body 场景）" {
     try std.testing.expectEqualStrings("high", eb.get("reasoning_effort").?.string);
 }
 
-test "toml: 行内表与字符串数组" {
+test "toml: inline table and string array" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const src =
@@ -575,7 +585,7 @@ test "toml: 行内表与字符串数组" {
     try std.testing.expectEqualStrings("/c/d", paths.items[1].string);
 }
 
-test "toml: 表数组 [[schedule.jobs]]" {
+test "toml: array of tables [[schedule.jobs]]" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const src =
@@ -584,7 +594,7 @@ test "toml: 表数组 [[schedule.jobs]]" {
         \\
         \\[[schedule.jobs]]
         \\id = "disk"
-        \\goal = "巡检磁盘"
+        \\goal = "check disk"
         \\every_sec = 300
         \\
         \\[[schedule.jobs]]
@@ -602,7 +612,7 @@ test "toml: 表数组 [[schedule.jobs]]" {
     try std.testing.expectEqual(@as(i64, 1893456000), jobs.items[1].object.get("at_unix").?.integer);
 }
 
-test "toml: 转义与负数 / 浮点" {
+test "toml: escapingand negative numbers / floats" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const src =
@@ -618,35 +628,35 @@ test "toml: 转义与负数 / 浮点" {
     try std.testing.expectEqual(@as(i64, 1000), v.object.get("d").?.integer);
 }
 
-test "toml: 空内容 → 空对象" {
+test "toml: empty content returns empty object" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const v = try parse(arena.allocator(), "  \n # 只有注释\n\t\n");
+    const v = try parse(arena.allocator(), "  \n # only comments\n\t\n");
     try std.testing.expect(v == .object);
     try std.testing.expectEqual(@as(usize, 0), v.object.count());
 }
 
-test "toml: 畸形输入一律报错不 panic（防弹）" {
+test "toml: malformed input errors instead of panicking(defensive)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const bad = [_][]const u8{
-        "key =",                  // 缺值
-        "key = \"unterminated",  // 未闭合串
-        "= 5",                    // 缺键
-        "[unclosed",              // 表头未闭合
-        "a = 2020-05-27",        // 日期时间不支持
-        "a = \"\"\"x\"\"\"",     // 多行串不支持
-        "a = 0x1F",               // 非十进制
-        "a = nan",                // nan
-        "[a]\nx = 1\nx = 2",     // 重复键
-        "a = [1, 2",              // 数组未闭合
+        "key =", // Missing value.
+        "key = \"unterminated", // Unclosed string.
+        "= 5", // Missing key.
+        "[unclosed", // Unclosed header.
+        "a = 2020-05-27", // Date-time unsupported.
+        "a = \"\"\"x\"\"\"", // Multiline string unsupported.
+        "a = 0x1F", // Non-decimal.
+        "a = nan", // nan
+        "[a]\nx = 1\nx = 2", // Duplicate key.
+        "a = [1, 2", // Unclosed array.
     };
     for (bad) |s| {
         try std.testing.expectError(error.InvalidToml, parse(arena.allocator(), s));
     }
 }
 
-test "toml: 负指数浮点合法（issue #43）" {
+test "toml: negative exponent float is valid(issue #43)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const src =
@@ -662,38 +672,38 @@ test "toml: 负指数浮点合法（issue #43）" {
     try std.testing.expectApproxEqRel(@as(f64, -3e-2), v.object.get("c").?.float, 1e-12);
     try std.testing.expectApproxEqRel(@as(f64, 1e5), v.object.get("d").?.float, 1e-12);
     try std.testing.expectApproxEqRel(@as(f64, 6.022e23), v.object.get("e").?.float, 1e-12);
-    // 真正的日期仍被拒绝。
+    // Real dates are still rejected.
     try std.testing.expectError(error.InvalidToml, parse(arena.allocator(), "x = 1979-05-27"));
 }
 
-test "toml: 深嵌套不栈溢出，返回 InvalidToml（issue #44）" {
+test "toml: deep nesting returns InvalidToml without stack overflow(issue #44)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const open_arrays = "[" ** 5000;
     const src_arr = try std.fmt.allocPrint(arena.allocator(), "a = {s}", .{open_arrays});
     try std.testing.expectError(error.InvalidToml, parse(arena.allocator(), src_arr));
-    // 行内表同理。
+    // Inline tables behave the same.
     const tbl = "x={" ** 5000;
     const src_tbl = try std.fmt.allocPrint(arena.allocator(), "a = {s}", .{tbl});
     try std.testing.expectError(error.InvalidToml, parse(arena.allocator(), src_tbl));
-    // 合法的浅嵌套仍正常。
+    // Legal shallow nesting still works.
     const ok = try parse(arena.allocator(), "a = [[1, 2], [3, 4]]");
     try std.testing.expectEqual(@as(usize, 2), ok.object.get("a").?.array.items.len);
 }
 
-test "toml: 越界 unicode 转义被拒绝，不静默截断（issue #47）" {
+test "toml: out-of-range unicode escape is rejected and not truncated silently(issue #47)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    // \U00200000 > U+10FFFF：必须报错，而非截断成 NUL 等错字符。
+    // \U00200000 > U+10FFFF must error instead of truncating to a bad character.
     try std.testing.expectError(error.InvalidToml, parse(arena.allocator(), "s = \"\\U00200000\""));
-    // 代理区码点亦拒绝。
+    // Surrogate codepoints are also rejected.
     try std.testing.expectError(error.InvalidToml, parse(arena.allocator(), "s = \"\\uD800\""));
-    // 合法转义仍可用。
+    // Legal escapes still work.
     const v = try parse(arena.allocator(), "s = \"\\u00e9\\U0001F600\"");
     try std.testing.expectEqualStrings("é😀", v.object.get("s").?.string);
 }
 
-test "toml: 解析失败带行列诊断（issue #46）" {
+test "toml: reports parse failure diagnostics (issue #46)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const src = "a = 1\nb = 2\nc = @bad\n";

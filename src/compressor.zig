@@ -1,7 +1,7 @@
-//! 上下文压缩策略接缝。
+//! Context compaction strategies.
 //!
-//! Session 负责保存与落盘消息；Compressor 负责决定超预算时怎样把历史折叠。
-//! 内置策略保持有限：`drop` 是旧行为与兜底地板，`extractive` 是确定式滚动纪要。
+//! Session owns message storage and persistence. Compressor decides how to fold history when the budget is exceeded.
+//! Built-in strategies stay limited: `drop` is the old fallback floor, while `extractive` is a deterministic rolling summary.
 const std = @import("std");
 const llm = @import("llm.zig");
 const jsonio = @import("jsonio.zig");
@@ -30,13 +30,13 @@ pub fn fromString(s: []const u8) Compressor {
     return default;
 }
 
-/// 旧行为的命名实现：保留 system + 原始 user 任务 + 最近 K 条，
-/// 把中间整段较早消息替换为一条有损摘要标记。
+/// Named implementation of the old behavior: keep system, original user task,
+/// and the latest K messages, replacing the middle span with a lossy marker.
 fn dropCompact(gpa: std.mem.Allocator, sess: *session.Session, keep_recent: usize) !bool {
     return compactWithMarker(gpa, sess, keep_recent, buildDropMarker);
 }
 
-/// 确定式抽取纪要：只从已执行步骤与观察文本中提取稳定事实，不生成语义猜测。
+/// Deterministic extractive summary: records stable facts from executed steps and observations without semantic guesses.
 fn extractiveCompact(gpa: std.mem.Allocator, sess: *session.Session, keep_recent: usize) !bool {
     return compactWithMarker(gpa, sess, keep_recent, buildExtractiveMarker);
 }
@@ -90,7 +90,7 @@ fn buildDropMarker(
     _ = dropped;
     return std.fmt.allocPrint(
         gpa,
-        "[历史压缩] 为控制上下文预算，已省略较早的 {d} 条消息（约 {d} 字节，多为工具观察原文）。system 指令、原始任务与最近 {d} 条消息已保留；如需更早细节请用工具重新获取。",
+        "[history compaction] omitted {d} older messages ({d} bytes). Preserved system, original job, and {d} recent messages. Use recall if older details are needed.",
         .{ elided_count, elided_bytes, keep_recent },
     );
 }
@@ -142,22 +142,22 @@ const Extract = struct {
 
     fn collectObservation(self: *Extract, arena: std.mem.Allocator, content: []const u8, pending_command: ?[]const u8) !void {
         const first = firstLine(content);
-        if (std.mem.indexOf(u8, content, "动作被执行护栏拒绝") != null) {
+        if (std.mem.indexOf(u8, content, "action denied by execution policy") != null) {
             if (pending_command) |cmd| {
                 try self.denials.add(arena, try std.fmt.allocPrint(arena, "{s} -> {s}", .{ cmd, first }));
             } else {
                 try self.denials.add(arena, first);
             }
-        } else if (std.mem.startsWith(u8, content, "[观察] 工具执行失败")) {
+        } else if (std.mem.startsWith(u8, content, "[Observation] tool execution failed")) {
             try self.notes.add(arena, first);
         } else if (pending_command) |cmd| {
-            if (std.mem.startsWith(u8, content, "[观察] 退出码=")) {
+            if (std.mem.startsWith(u8, content, "[Observation] exit_code=")) {
                 try self.commands.add(arena, try std.fmt.allocPrint(arena, "{s} -> {s}", .{ cmd, first }));
             } else {
                 try self.commands.add(arena, cmd);
             }
-        } else if (std.mem.startsWith(u8, content, "[观察] 已写入") or
-            std.mem.startsWith(u8, content, "[观察] 已编辑"))
+        } else if (std.mem.startsWith(u8, content, "[Observation] wrote") or
+            std.mem.startsWith(u8, content, "[Observation] edited"))
         {
             try self.writes.add(arena, first);
         } else if (std.mem.indexOf(u8, content, "TODO") != null or
@@ -210,31 +210,31 @@ fn buildExtractiveMarker(
     try appendFmt(
         gpa,
         &out,
-        "[历史压缩:extractive] 已折叠较早的 {d} 条消息（约 {d} 字节）。system 指令、原始任务与最近 {d} 条消息已保留；以下是确定式抽取纪要，不替代 transcript 原文。\n",
+        "[history compaction:extractive] folded {d} older messages ({d} bytes). Preserved system, original job, and {d} recent messages. This is a deterministic extractive summary, not a replacement for the transcript.\n",
         .{ elided_count, elided_bytes, keep_recent },
     );
-    try appendSection(gpa, &out, "文件/检索", ex.reads);
-    try appendSection(gpa, &out, "文件变更", ex.writes);
-    try appendSection(gpa, &out, "命令", ex.commands);
-    try appendSection(gpa, &out, "拒绝/错误", ex.denials);
-    try appendSection(gpa, &out, "待办/观察", ex.notes);
+    try appendSection(gpa, &out, "file/search", ex.reads);
+    try appendSection(gpa, &out, "file changes", ex.writes);
+    try appendSection(gpa, &out, "Commands", ex.commands);
+    try appendSection(gpa, &out, "denials/errors", ex.denials);
+    try appendSection(gpa, &out, "todos/observations", ex.notes);
     if (ex.reads.total == 0 and ex.writes.total == 0 and ex.commands.total == 0 and
         ex.denials.total == 0 and ex.notes.total == 0)
     {
-        try out.appendSlice(gpa, "- 未抽取到稳定结构化事实；如需更早细节请从 transcript 取回。\n");
+        try out.appendSlice(gpa, "- No stable structured facts were extracted; retrieve earlier details from the transcript if needed.\n");
     }
     return out.toOwnedSlice(gpa);
 }
 
 fn appendSection(gpa: std.mem.Allocator, out: *std.ArrayList(u8), title: []const u8, category: Category) !void {
     if (category.total == 0) return;
-    try appendFmt(gpa, out, "- {s}：", .{title});
+    try appendFmt(gpa, out, "- {s}: ", .{title});
     const items = category.items.items;
     for (items, 0..) |item, i| {
-        if (i != 0) try out.appendSlice(gpa, "；");
+        if (i != 0) try out.appendSlice(gpa, ", ");
         try out.appendSlice(gpa, item);
     }
-    if (category.total > items.len) try appendFmt(gpa, out, "；另 {d} 项", .{category.total - items.len});
+    if (category.total > items.len) try appendFmt(gpa, out, "; {d} more items", .{category.total - items.len});
     try out.append(gpa, '\n');
 }
 
@@ -261,7 +261,7 @@ fn firstLine(text: []const u8) []const u8 {
 const max_extract_items = 6;
 const max_extract_item_bytes = 160;
 
-test "drop: 保留 system+原始任务+最近 K，中段替换为标记，归档保留原文" {
+test "drop: keeps system, original task, and recent K while archive keeps originals" {
     const gpa = std.testing.allocator;
     var s = session.Session.init("c1");
     defer s.deinit(gpa);
@@ -278,7 +278,7 @@ test "drop: 保留 system+原始任务+最近 K，中段替换为标记，归档
     try std.testing.expectEqual(@as(usize, 5), s.count());
     try std.testing.expectEqualStrings("SYS-PROMPT", s.items()[0].content);
     try std.testing.expectEqualStrings("ORIGINAL-GOAL", s.items()[1].content);
-    try std.testing.expect(std.mem.indexOf(u8, s.items()[2].content, "已省略较早的 2 条消息") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s.items()[2].content, "omitted 2 older messages") != null);
     try std.testing.expectEqualStrings("recent-a", s.items()[3].content);
     try std.testing.expectEqualStrings("recent-u", s.items()[4].content);
     try std.testing.expectEqual(@as(usize, 6), s.archiveItems().len);
@@ -286,7 +286,7 @@ test "drop: 保留 system+原始任务+最近 K，中段替换为标记，归档
     try std.testing.expectEqualStrings("old-u", s.archiveItems()[3].content);
 }
 
-test "drop: 无可压缩中段时返回 false" {
+test "drop: returns false when no middle span can be compacted" {
     const gpa = std.testing.allocator;
     var s = session.Session.init("c2");
     defer s.deinit(gpa);
@@ -299,21 +299,21 @@ test "drop: 无可压缩中段时返回 false" {
     try std.testing.expectEqual(@as(usize, 3), s.count());
 }
 
-test "extractive: 抽取文件、命令与拒绝信号并保留首尾" {
+test "extractive: summarizes file commands and denial signals" {
     const gpa = std.testing.allocator;
     var s = session.Session.init("c3");
     defer s.deinit(gpa);
 
     try s.append(gpa, .system, "SYS");
     try s.append(gpa, .user, "GOAL");
-    try s.append(gpa, .assistant, "{\"thought\":\"读\",\"action\":\"file_read\",\"action_input\":\"{\\\"path\\\":\\\"src/main.zig\\\"}\"}");
-    try s.append(gpa, .user, "[观察] 读取 src/main.zig（10 字节）：\nconst x=1;");
-    try s.append(gpa, .assistant, "{\"thought\":\"跑测试\",\"action\":\"bash\",\"action_input\":\"zig build test\"}");
-    try s.append(gpa, .user, "[观察] 退出码=0\n--- stdout ---\nok");
-    try s.append(gpa, .assistant, "{\"thought\":\"写\",\"action\":\"file_write\",\"action_input\":\"{\\\"path\\\":\\\"README.md\\\",\\\"content\\\":\\\"x\\\"}\"}");
-    try s.append(gpa, .user, "[观察] 已写入 README.md（1 字节）。");
-    try s.append(gpa, .assistant, "{\"thought\":\"危险\",\"action\":\"bash\",\"action_input\":\"rm -rf /\"}");
-    try s.append(gpa, .user, "[观察] 动作被执行护栏拒绝（guarded 模式）：危险命令。");
+    try s.append(gpa, .assistant, "{\"thought\":\"read\",\"action\":\"file_read\",\"action_input\":\"{\\\"path\\\":\\\"src/main.zig\\\"}\"}");
+    try s.append(gpa, .user, "[Observation] read src/main.zig (10 bytes):\nconst x=1;");
+    try s.append(gpa, .assistant, "{\"thought\":\"run tests\",\"action\":\"bash\",\"action_input\":\"zig build test\"}");
+    try s.append(gpa, .user, "[Observation] exit_code=0\n--- stdout ---\nok");
+    try s.append(gpa, .assistant, "{\"thought\":\"write\",\"action\":\"file_write\",\"action_input\":\"{\\\"path\\\":\\\"README.md\\\",\\\"content\\\":\\\"x\\\"}\"}");
+    try s.append(gpa, .user, "[Observation] wrote README.md (1 bytes).");
+    try s.append(gpa, .assistant, "{\"thought\":\"dangerous\",\"action\":\"bash\",\"action_input\":\"rm -rf /\"}");
+    try s.append(gpa, .user, "[Observation] action denied by execution policy (guarded mode): dangerous command.");
     try s.append(gpa, .assistant, "RECENT-A");
     try s.append(gpa, .user, "RECENT-U");
 
@@ -324,18 +324,18 @@ test "extractive: 抽取文件、命令与拒绝信号并保留首尾" {
     try std.testing.expectEqualStrings("SYS", s.items()[0].content);
     try std.testing.expectEqualStrings("GOAL", s.items()[1].content);
     const summary = s.items()[2].content;
-    try std.testing.expect(std.mem.indexOf(u8, summary, "历史压缩:extractive") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "history compaction:extractive") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "file_read") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "src/main.zig") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "zig build test") != null);
-    try std.testing.expect(std.mem.indexOf(u8, summary, "退出码=0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "exit_code=0") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "README.md") != null);
-    try std.testing.expect(std.mem.indexOf(u8, summary, "护栏拒绝") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "action denied") != null);
     try std.testing.expectEqualStrings("RECENT-A", s.items()[3].content);
     try std.testing.expectEqualStrings("RECENT-U", s.items()[4].content);
 }
 
-test "extractive: 溢出数量使用真实计数且 policy 普通输出不误判为拒绝" {
+test "extractive: overflow count uses true count and ordinary policy output is not denial" {
     const gpa = std.testing.allocator;
     var s = session.Session.init("c4");
     defer s.deinit(gpa);
@@ -344,13 +344,13 @@ test "extractive: 溢出数量使用真实计数且 policy 普通输出不误判
     try s.append(gpa, .user, "GOAL");
     var i: usize = 0;
     while (i < 10) : (i += 1) {
-        const step = try std.fmt.allocPrint(gpa, "{{\"thought\":\"读\",\"action\":\"file_read\",\"action_input\":\"{{\\\"path\\\":\\\"f{d}.zig\\\"}}\"}}", .{i});
+        const step = try std.fmt.allocPrint(gpa, "{{\"thought\":\"read\",\"action\":\"file_read\",\"action_input\":\"{{\\\"path\\\":\\\"f{d}.zig\\\"}}\"}}", .{i});
         defer gpa.free(step);
         try s.append(gpa, .assistant, step);
-        try s.append(gpa, .user, "[观察] 读取文件。");
+        try s.append(gpa, .user, "[Observation] read file.");
     }
-    try s.append(gpa, .assistant, "{\"thought\":\"查\",\"action\":\"bash\",\"action_input\":\"grep policy config.toml\"}");
-    try s.append(gpa, .user, "[观察] 退出码=0\n--- stdout ---\npolicy = \"guarded\"");
+    try s.append(gpa, .assistant, "{\"thought\":\"grep\",\"action\":\"bash\",\"action_input\":\"grep policy config.toml\"}");
+    try s.append(gpa, .user, "[Observation] exit_code=0\n--- stdout ---\npolicy = \"guarded\"");
     try s.append(gpa, .assistant, "RECENT-A");
     try s.append(gpa, .user, "RECENT-U");
 
@@ -358,13 +358,13 @@ test "extractive: 溢出数量使用真实计数且 policy 普通输出不误判
     try std.testing.expect(try c.compact(gpa, &s, .{ .keep_recent = 2 }));
 
     const summary = s.items()[2].content;
-    try std.testing.expect(std.mem.indexOf(u8, summary, "另 4 项") != null);
-    try std.testing.expect(std.mem.indexOf(u8, summary, "命令") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "4 more items") != null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "Commands") != null);
     try std.testing.expect(std.mem.indexOf(u8, summary, "grep policy config.toml") != null);
-    try std.testing.expect(std.mem.indexOf(u8, summary, "拒绝/错误") == null);
+    try std.testing.expect(std.mem.indexOf(u8, summary, "denials/errors") == null);
 }
 
-test "fromString: 未知策略回落 drop" {
+test "fromString: unknown policy uses drop" {
     try std.testing.expectEqual(Compressor.drop, std.meta.activeTag(fromString("drop")));
     try std.testing.expectEqual(Compressor.extractive, std.meta.activeTag(fromString("extractive")));
     try std.testing.expectEqual(Compressor.drop, std.meta.activeTag(fromString("semantic")));

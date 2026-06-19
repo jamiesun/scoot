@@ -131,8 +131,9 @@ fn validateJsonSchema(
 ) ?[]const u8 {
     const cwd = std.Io.Dir.cwd();
     const path = std.fs.path.join(arena, &.{ dir, rel_path }) catch return "cannot build schema path";
-    // symlink 逃逸防护（issue #54，与 #41 对齐）：isSafeRelativePath 只做词法过滤，后续
-    // readFileAlloc 会跟随 symlink。对已存在目标做 realpath，确认仍落在包目录内。
+    // Symlink escape guard (issue #54, aligned with #41): isSafeRelativePath
+    // only filters lexically, while readFileAlloc follows symlinks. For existing
+    // targets, realpath confirms they still live under the package directory.
     if (pathsafe.realPathEscapes(io, arena, dir, path))
         return std.fmt.allocPrint(arena, "{s} resolves outside the package directory (symlink escape)", .{label}) catch "schema resolves outside package directory";
     const bytes = cwd.readFileAlloc(io, path, arena, schema_read_limit) catch |err| switch (err) {
@@ -150,8 +151,9 @@ fn validateJsonSchema(
 
 fn validateComponent(arena: std.mem.Allocator, io: std.Io, dir: []const u8, path: []const u8) ?[]const u8 {
     const cwd = std.Io.Dir.cwd();
-    // symlink 逃逸防护（issue #54）：component 路径虽过 isSafeRelativePath 词法检查，但
-    // statFile/openFile 会跟随 symlink。对已存在目标做 realpath，确认仍落在包目录内。
+    // Symlink escape guard (issue #54): component paths may pass lexical
+    // isSafeRelativePath checks, but statFile/openFile follow symlinks. For
+    // existing targets, realpath confirms they still live under the package.
     if (pathsafe.realPathEscapes(io, arena, dir, path))
         return "component wasm file resolves outside the package directory (symlink escape)";
     const component_stat = cwd.statFile(io, path, .{}) catch |err| switch (err) {
@@ -320,7 +322,8 @@ test "validatePackage: rejects symlink that escapes the package directory (issue
 
     try cwd.createDirPath(io, root ++ "/pkg/schema");
     try cwd.createDirPath(io, root ++ "/outside");
-    // 包外的“机密” JSON：词法安全的相对路径 + 包内 symlink 即可逃逸读取。
+    // Secret JSON outside the package: a lexically safe relative path plus an
+    // in-package symlink is enough to escape reads.
     try cwd.writeFile(io, .{ .sub_path = root ++ "/outside/secret.json", .data = "{\"leak\":true}\n" });
     try cwd.writeFile(io, .{
         .sub_path = root ++ "/pkg/manifest.toml",
@@ -341,7 +344,7 @@ test "validatePackage: rejects symlink that escapes the package directory (issue
     });
     try cwd.writeFile(io, .{ .sub_path = root ++ "/pkg/component.wasm", .data = "\x00asm" });
     try cwd.writeFile(io, .{ .sub_path = root ++ "/pkg/schema/output.json", .data = "{\"type\":\"object\"}\n" });
-    // input.json 是指向包外机密文件的 symlink（词法上仍是安全相对路径）。
+    // input.json is a symlink to the outside secret file while staying lexically safe.
     cwd.symLink(io, root ++ "/outside/secret.json", root ++ "/pkg/schema/input.json", .{}) catch |e| {
         if (e == error.AccessDenied or e == error.PermissionDenied) return error.SkipZigTest;
         return e;

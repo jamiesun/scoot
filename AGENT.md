@@ -15,6 +15,8 @@ All project documentation updates must be synchronized in both English and Chine
 
 - Root documentation is English by default.
 - Chinese project documentation lives under `docs/` with `.zh.md` suffixes.
+- Code comments, code strings, and test descriptions default to English.
+- Future GitHub issues and pull requests default to English.
 - If you update `AGENT.md`, update [docs/AGENT.zh.md](docs/AGENT.zh.md).
 - If you update `README.md`, update [docs/README.zh.md](docs/README.zh.md).
 - If you update [docs/ROADMAP.md](docs/ROADMAP.md), update [docs/ROADMAP.zh.md](docs/ROADMAP.zh.md).
@@ -140,5 +142,5 @@ Changing these boundaries requires an explicit roadmap-level decision.
 
 - Keep changes scoped. Do not refactor unrelated files.
 - Prefer existing local abstractions over new architecture.
-- Comments should explain intent and boundary, not restate obvious code.
+- Comments, code strings, and test descriptions should default to English; comments explain intent and boundary, not obvious code.
 - If code and docs conflict, runnable code and tests are the immediate source of truth, then docs must be corrected in both languages.

@@ -1,39 +1,44 @@
-//! 会话（Session）：一次有边界的交互上下文 —— 一段 REPL 对话、一次 `-e` 调用，
-//! 或一个被调度唤起的 job 运行。它持有该次交互的消息流（system/user/assistant/tool）。
+//! Session: one bounded interaction context, such as a REPL conversation, one
+//! `-e` call, or a scheduled job run. It owns that interaction's message stream
+//! across system/user/assistant/tool roles.
 //!
-//! 为什么需要它（见 ROADMAP 方向二 /「可回溯审计链路」）：
-//!   认知回合 (agent.zig) 每轮派生一个 per-turn arena 并在回合末整体释放，
-//!   因此「跨回合存活的对话历史」必须落在一个**长寿命分配器**上，而不能放进
-//!   会被重置的回合 arena。Session 就是这份历史的载体：内容在追加时复制进
-//!   Session 自己的分配器，独立于来源 arena 的生命周期。
+//! Why it exists: each cognitive turn in agent.zig derives a per-turn arena and
+//! releases it at turn end. Conversation history that survives across turns must
+//! live in a longer-lived allocator, not the reset turn arena. Session is that
+//! history carrier: appended content is copied into Session-owned allocation and
+//! is independent of source arena lifetime.
 //!
-//! 职责边界（与「长期记忆」的区分，见审计结论）：
-//!   - Session 只管「短期、单会话」的消息记录与（可选）持久化；
-//!   - 跨会话的「长期记忆 / 语义召回」**不在此实现** —— 由 Skill 机制（知识注入）
-//!     或 state/ 下的纯文本摘要 + 文件工具承载，避免引入向量库等重依赖而撞穿铁律。
+//! Responsibility boundary:
+//!   - Session handles short-term, single-session message records and optional
+//!     persistence.
+//!   - Cross-session long-term memory or semantic recall is intentionally not
+//!     implemented here. Use skills for knowledge injection or plaintext
+//!     summaries under state/ plus file tools, avoiding heavyweight vector DBs.
 const std = @import("std");
 const llm = @import("llm.zig");
 const jsonio = @import("jsonio.zig");
 const audit = @import("audit.zig");
 
-/// 一次会话。`messages` 是当前要发给模型的活跃上下文；`archive` 是完整
-/// transcript 归档，用于召回与落盘。压缩只改 `messages`，不得丢失 `archive`。
+/// One session. `messages` is the active context sent to the model; `archive` is
+/// the complete transcript for recall and persistence. Compaction only changes
+/// `messages` and must not lose `archive`.
 pub const Session = struct {
-    /// 会话标识（建议用时间戳 / uuid）；用于持久化文件名与日志。
-    /// 内存由调用方持有，需保证其生命周期 >= Session。
+    /// Session id, preferably timestamp or UUID, used in persistence filenames
+    /// and logs. Memory is caller-owned and must outlive Session.
     id: []const u8,
-    /// 活跃消息流；内容由 `archive` 或 `active_only` 拥有。
+    /// Active message stream; content is owned by `archive` or `active_only`.
     messages: std.ArrayList(llm.Message) = .empty,
-    /// 完整消息归档；由 append/appendMessage 写入，拥有原始消息内容。
+    /// Complete message archive; append/appendMessage write and own originals.
     archive: std.ArrayList(llm.Message) = .empty,
-    /// 只存在于活跃上下文中的合成消息，例如压缩标记。它们不进入完整 transcript。
+    /// Synthetic messages present only in active context, such as compaction markers.
     active_only: std.ArrayList([]const u8) = .empty,
 
     pub fn init(id: []const u8) Session {
         return .{ .id = id };
     }
 
-    /// 追加一条消息。`content` 会被复制进 `gpa`，使其不受来源（如回合 arena）释放影响。
+    /// Appends one message, copying `content` into `gpa` so source arena release
+    /// cannot affect it.
     pub fn append(
         self: *Session,
         gpa: std.mem.Allocator,
@@ -48,17 +53,17 @@ pub const Session = struct {
         try self.archive.append(gpa, m);
     }
 
-    /// 便捷：追加一条已有的 llm.Message（内容同样会被复制）。
+    /// Convenience: appends an existing llm.Message, also copying content.
     pub fn appendMessage(self: *Session, gpa: std.mem.Allocator, m: llm.Message) !void {
         return self.append(gpa, m.role, m.content);
     }
 
-    /// 只读消息视图，可直接喂给 `llm.Client.chat`。
+    /// Read-only message view, ready for `llm.Client.chat`.
     pub fn items(self: *const Session) []const llm.Message {
         return self.messages.items;
     }
 
-    /// 完整 transcript 视图。压缩后仍包含被活跃上下文折叠掉的原文消息。
+    /// Complete transcript view, still including messages folded out of active context.
     pub fn archiveItems(self: *const Session) []const llm.Message {
         return if (self.archive.items.len != 0) self.archive.items else self.messages.items;
     }
@@ -72,12 +77,12 @@ pub const Session = struct {
         return if (n == 0) null else self.messages.items[n - 1];
     }
 
-    /// 记录一条只属于活跃上下文的合成消息内容，例如压缩标记。
+    /// Records synthetic content that only belongs to active context.
     pub fn adoptActiveOnly(self: *Session, gpa: std.mem.Allocator, content: []const u8) !void {
         try self.active_only.append(gpa, content);
     }
 
-    /// 释放消息流及其内容副本（必须用与 append 相同的 gpa）。
+    /// Frees message streams and content copies, using the same gpa as append.
     pub fn deinit(self: *Session, gpa: std.mem.Allocator) void {
         for (self.archive.items) |m| gpa.free(m.content);
         for (self.active_only.items) |content| gpa.free(content);
@@ -86,8 +91,8 @@ pub const Session = struct {
         self.active_only.deinit(gpa);
     }
 
-    /// 以 JSONL（每行一条消息）把整段会话写入 `w`。
-    /// 纯文本、可追加、可回溯，满足 ROADMAP「状态严格本地（SQLite 或纯文本）」与审计链路。
+    /// Writes the full session as JSONL, one message per line. Plaintext,
+    /// appendable, and replayable.
     pub fn writeJsonl(self: *const Session, w: *std.Io.Writer) !void {
         for (self.archiveItems()) |m| {
             try writeMessageJson(w, m);
@@ -95,9 +100,10 @@ pub const Session = struct {
         }
     }
 
-    /// 把会话追加持久化到 `<sessions_dir>/<id>.jsonl`（不存在则创建，存在则**追加**）。
-    /// 序列化逻辑见 `writeJsonl`；此处负责通过 Io 打开文件、定位到末尾后写入。
-    /// 追加语义让同一会话的多次运行快照在一个文件里按时间累积，服务可回溯审计链路。
+    /// Appends the session to `<sessions_dir>/<id>.jsonl`, creating the file if
+    /// needed. Serialization is handled by `writeJsonl`; this opens with Io,
+    /// seeks to EOF, and writes. Append semantics let multiple snapshots of the
+    /// same session accumulate over time for audit replay.
     pub fn persist(self: *const Session, io: std.Io, sessions_dir: []const u8) !void {
         var pathbuf: [std.fs.max_path_bytes]u8 = undefined;
         const path = try std.fmt.bufPrint(&pathbuf, "{s}/{s}.jsonl", .{ sessions_dir, self.id });
@@ -112,13 +118,13 @@ pub const Session = struct {
         const st = try file.stat(io);
         var buf: [4096]u8 = undefined;
         var fw = file.writer(io, &buf);
-        try fw.seekTo(st.size); // 定位到文件末尾以追加，不覆盖既有记录
+        try fw.seekTo(st.size); // Seek to EOF to append without overwriting.
         try self.writeJsonl(&fw.interface);
         try fw.interface.flush();
     }
 };
 
-/// 把单条消息写成一行 JSON 对象：{"role":"user","content":"..."}
+/// Writes one message as a single-line JSON object.
 fn writeMessageJson(w: *std.Io.Writer, m: llm.Message) !void {
     try w.writeAll("{\"role\":\"");
     try w.writeAll(@tagName(m.role));
@@ -127,14 +133,14 @@ fn writeMessageJson(w: *std.Io.Writer, m: llm.Message) !void {
     try w.writeByte('}');
 }
 
-test "append 复制内容，独立于来源缓冲" {
+test "append copies content independent of source buffer" {
     const gpa = std.testing.allocator;
     var s = Session.init("t1");
     defer s.deinit(gpa);
 
     var tmp = [_]u8{ 'h', 'i' };
     try s.append(gpa, .user, &tmp);
-    tmp[0] = 'X'; // 篡改来源缓冲，不应影响已存入会话的副本
+    tmp[0] = 'X'; // Mutating source buffer must not affect the stored copy.
 
     try std.testing.expectEqual(@as(usize, 1), s.count());
     try std.testing.expectEqualStrings("hi", s.items()[0].content);
@@ -142,7 +148,7 @@ test "append 复制内容，独立于来源缓冲" {
     try std.testing.expectEqual(llm.Role.user, s.last().?.role);
 }
 
-test "writeJsonl 产出可被 std.json 解析的合法行（含转义）" {
+test "writeJsonl output parses with std.json and escaping" {
     const gpa = std.testing.allocator;
     var s = Session.init("t2");
     defer s.deinit(gpa);
@@ -169,7 +175,7 @@ test "writeJsonl 产出可被 std.json 解析的合法行（含转义）" {
     try std.testing.expectEqual(@as(usize, 2), idx);
 }
 
-test "persist 追加写 JSONL 到 <dir>/<id>.jsonl 并可读回" {
+test "persist appends JSONL to <dir>/<id>.jsonl and can read back" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     const cwd = std.Io.Dir.cwd();
@@ -180,11 +186,11 @@ test "persist 追加写 JSONL 到 <dir>/<id>.jsonl 并可读回" {
 
     var s = Session.init("conv1");
     defer s.deinit(gpa);
-    try s.append(gpa, .user, "你好\"世界\"");
-    try s.append(gpa, .assistant, "在");
+    try s.append(gpa, .user, "hello\"world\"");
+    try s.append(gpa, .assistant, "there");
 
     try s.persist(io, dir);
-    try s.persist(io, dir); // 再次持久化必须追加（验证不是覆盖）
+    try s.persist(io, dir); // Persist again; this must append rather than overwrite.
 
     const bytes = try cwd.readFileAlloc(io, dir ++ "/conv1.jsonl", gpa, .limited(1 << 16));
     defer gpa.free(bytes);
@@ -193,10 +199,10 @@ test "persist 追加写 JSONL 到 <dir>/<id>.jsonl 并可读回" {
     var it = std.mem.tokenizeScalar(u8, bytes, '\n');
     while (it.next()) |line| : (lines += 1) {
         const v = try std.json.parseFromSlice(std.json.Value, gpa, line, .{});
-        v.deinit(); // 每行都应是合法 JSON
+        v.deinit(); // Every line should be valid JSON.
     }
-    try std.testing.expectEqual(@as(usize, 4), lines); // 2 条消息 × 2 次持久化
-    try std.testing.expect(std.mem.indexOf(u8, bytes, "你好") != null);
+    try std.testing.expectEqual(@as(usize, 4), lines); // 2 messages x 2 persists.
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "hello") != null);
 
     const st = try cwd.statFile(io, dir ++ "/conv1.jsonl", .{});
     try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), st.permissions.toMode() & 0o777);

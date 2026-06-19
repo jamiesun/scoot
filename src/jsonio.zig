@@ -1,11 +1,11 @@
-//! 手写紧凑 JSON 的小工具：正确转义的字符串字面量。
-//! 供需要生成紧凑 JSON（如 OpenAI 请求体、会话 JSONL）的模块复用，
-//! 把「字符串转义正确性」这件易错的事收敛到一处。
-//! 注意：解析（读取外部 / 模型数据）一律走 std.json，以满足「绝不信任模型输出」铁律。
+//! Small hand-written helpers for compact JSON string literals.
+//! Modules that emit compact JSON, such as OpenAI request bodies or session
+//! JSONL, reuse this so string escaping correctness is centralized.
+//! Parsing external or model data still always goes through `std.json`.
 const std = @import("std");
 
-/// 向 `w` 写入一个合法的 JSON 字符串字面量（含两端引号），
-/// 正确转义控制字符与特殊符号。
+/// Writes a valid JSON string literal to `w`, including quotes, with control
+/// characters and special symbols escaped.
 pub fn writeString(w: *std.Io.Writer, s: []const u8) !void {
     try w.writeByte('"');
     for (s) |c| switch (c) {
@@ -24,8 +24,9 @@ pub fn writeString(w: *std.Io.Writer, s: []const u8) !void {
     try w.writeByte('"');
 }
 
-/// 取文本中的第一个完整顶层 JSON 对象。
-/// 可容忍兼容后端把对象包在 ```json fence``` 中，或在对象后继续输出其它文本。
+/// Returns the first complete top-level JSON object in the text.
+/// Tolerates compatible backends wrapping it in a ```json fence``` or appending
+/// extra text after the object.
 pub fn firstJsonObject(content: []const u8) ?[]const u8 {
     const trimmed = std.mem.trim(u8, content, " \t\r\n");
     const body = unwrapJsonFence(trimmed);
@@ -69,17 +70,17 @@ pub fn unwrapJsonFence(content: []const u8) []const u8 {
     return std.mem.trim(u8, rest, " \t\r\n");
 }
 
-test "writeString 转义并产出可被 std.json 回解的合法字符串" {
+test "writeString escaping matches std.json parsing" {
     const gpa = std.testing.allocator;
     var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
-    try writeString(&aw.writer, "a\"b\\c\n\t\x01 末");
+    try writeString(&aw.writer, "a\"b\\c\n\t\x01 end");
     const parsed = try std.json.parseFromSlice([]const u8, gpa, aw.writer.buffered(), .{});
     defer parsed.deinit();
-    try std.testing.expectEqualStrings("a\"b\\c\n\t\x01 末", parsed.value);
+    try std.testing.expectEqualStrings("a\"b\\c\n\t\x01 end", parsed.value);
 }
 
-test "firstJsonObject: 支持 fenced JSON 与连续对象" {
+test "firstJsonObject: supports fenced JSON and consecutive objects" {
     try std.testing.expectEqualStrings("{\"a\":1}", firstJsonObject("```json\n{\"a\":1}\n```").?);
     try std.testing.expectEqualStrings("{\"a\":{\"b\":\"}\"}}", firstJsonObject("{\"a\":{\"b\":\"}\"}} trailing").?);
     try std.testing.expect(firstJsonObject("not json") == null);

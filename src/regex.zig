@@ -1,23 +1,29 @@
-//! 自研正则引擎：Thompson NFA（无回溯，线性时间 O(n·m)）。
+//! Local regex engine: Thompson NFA with no backtracking and linear O(n*m) time.
 //!
-//! 为什么自己写而不引第三方（见审计结论 / busybox 驱动）：
-//!   - 部署到裁剪 / 嵌入式 Linux，不能依赖系统 grep 的正则；纯 Zig 第三方
-//!     (mvzr) 只适配 0.15 且作者声明不抗敌意输入。
-//!   - **决定性理由：ReDoS 免疫**。模型（含本地小模型）在嵌入式设备上生成的
-//!     正则若交给回溯引擎，`(a+)+$` 这类会指数级回溯把 CPU 拖死。Thompson NFA
-//!     用「状态集合并行推进」取代回溯，对任意模式都是线性时间，结构性免疫。
+//! Why this is local instead of a dependency:
+//!   - Trimmed or embedded Linux deployments cannot rely on system grep regex;
+//!     the pure-Zig third-party option, mvzr, only targets 0.15 and documents no
+//!     hostile-input resistance.
+//!   - Decisive reason: ReDoS immunity. Model-generated regexes, including from
+//!     small local models on embedded devices, can pin a backtracking engine with
+//!     patterns such as `(a+)+$`. Thompson NFA advances state sets in parallel
+//!     instead of backtracking, making all patterns structurally linear.
 //!
-//! 刻意的降维边界（够用且可控，不做就是不做）：
-//!   支持：字面量、`. ^ $ * + ? | ()`、字符类 `[...]`（含 `a-z` 区间、`[^...]` 取反）、
-//!         转义 `\d \w \s \D \W \S \n \t \r \\ \.` 等。
-//!   不做：捕获组提取、反向引用、lookaround、惰性 / 占有量词、`{n,m}` 计数重复、`\p{}`。
-//!   （这些要么诱发回溯、要么远超 grep 需求；需要时再单独评审，不在此撑大爆炸半径。）
+//! Deliberate scope boundary:
+//!   Supported: literals, `. ^ $ * + ? | ()`, character classes `[...]`
+//!   including `a-z` ranges and `[^...]` negation, and escapes such as
+//!   `\d \w \s \D \W \S \n \t \r \\ \.`.
+//!   Not supported: capture extraction, backreferences, lookaround, lazy or
+//!   possessive quantifiers, `{n,m}` counted repetition, or `\p{}`. These either
+//!   invite backtracking or exceed grep needs and require separate review.
 //!
-//! 字节级匹配：模式与文本按字节处理。字面多字节（如中文）子串可正常匹配（字节序列相等）；
-//!   `.` 匹配单字节，对多字节字符是「半个 rune」——这是已知取舍，grep 极少这样用。
+//! Byte-level matching: patterns and text are processed as bytes. Literal
+//! multibyte substrings, such as Chinese text, match correctly because the byte
+//! sequences are equal. `.` matches one byte, not one Unicode scalar; this is an
+//! accepted tradeoff for grep-like use.
 const std = @import("std");
 
-/// 模式长度上限：界定编译产物与 addThread 递归深度，挡住病态超长模式。
+/// Pattern length cap: bounds compiled output and addThread recursion depth.
 pub const max_pattern_len: usize = 4096;
 
 pub const CompileError = error{
@@ -26,33 +32,35 @@ pub const CompileError = error{
     OutOfMemory,
 };
 
-/// 编译后的指令（Thompson NFA / 正则 VM）。epsilon 类（split/jmp/bol/eol）在
-/// addThread 的闭包里展开，消费字节的只有 char/any/class。
+/// Compiled instruction for the Thompson NFA / regex VM. Epsilon instructions
+/// such as split/jmp/bol/eol expand inside addThread closure; only char, any,
+/// and class consume bytes.
 const Inst = union(enum) {
     char: u8,
     any,
-    class: u32, // 索引进 classes
+    class: u32, // Index into classes.
     split: [2]u32,
     jmp: u32,
-    bol, // ^：行首（位置 0）
-    eol, // $：行尾（位置 == len）
+    bol, // ^: beginning of line, position 0.
+    eol, // $: end of line, position == len.
     match,
 };
 
 const Range = struct { lo: u8, hi: u8 };
 
-/// 字符类：若干字节区间 + 是否取反。
+/// Character class: byte ranges plus a negation flag.
 const Class = struct {
     ranges: []const Range,
     negated: bool,
 };
 
-/// 一个编译好的正则。`insts` / `classes` 由传入的 arena 拥有。
+/// A compiled regex. `insts` and `classes` are owned by the provided arena.
 pub const Regex = struct {
     insts: []const Inst,
     classes: []const Class,
 
-    /// 编译模式为 NFA 指令序列。非法模式 → InvalidPattern；超长 → PatternTooLong。
+    /// Compiles a pattern to NFA instructions. Invalid pattern -> InvalidPattern;
+    /// overlong pattern -> PatternTooLong.
     pub fn compile(arena: std.mem.Allocator, pattern: []const u8) CompileError!Regex {
         if (pattern.len > max_pattern_len) return error.PatternTooLong;
 
@@ -70,8 +78,9 @@ pub const Regex = struct {
     }
 };
 
-/// 匹配器：持有可复用的状态集合暂存（按 insts.len 一次性分配，跨多行复用）。
-/// `gen` 单调递增充当「本轮已访问」标记，免去每行清零（线性时间的关键工程化）。
+/// Matcher with reusable state-set scratch allocated once to insts.len and reused
+/// across lines. Monotonic `gen` acts as the visited marker for the current pass,
+/// avoiding per-line clearing and preserving linear-time behavior.
 pub const Matcher = struct {
     re: *const Regex,
     seen: []u64,
@@ -96,7 +105,8 @@ pub const Matcher = struct {
         gpa.free(self.nlist);
     }
 
-    /// 该行文本是否被模式匹配（非锚定子串语义：可在任意位置起匹，`^`/`$` 另行约束）。
+    /// Whether this line matches the pattern. Semantics are unanchored substring
+    /// matching, so matching may start at any offset; `^` and `$` constrain that.
     pub fn matches(self: *Matcher, text: []const u8) bool {
         self.gen += 1;
         self.clen = 0;
@@ -123,7 +133,7 @@ pub const Matcher = struct {
                     else => {},
                 }
             }
-            // 非锚定：在下一位置再播一颗起始线程，使匹配可从任意偏移开始。
+            // Unanchored matching: seed another start thread at the next offset.
             self.addThread(self.nlist, &self.nlen, 0, i + 1, text);
 
             std.mem.swap([]u32, &self.clist, &self.nlist);
@@ -134,7 +144,8 @@ pub const Matcher = struct {
         }
     }
 
-    /// 把 pc 加入线程集，沿 epsilon（split/jmp/bol/eol）做闭包；`gen` 去重防环、保线性。
+    /// Adds pc to the thread set and closes over epsilon instructions
+    /// (split/jmp/bol/eol). `gen` deduplicates and prevents cycles.
     fn addThread(self: *Matcher, list: []u32, len: *usize, pc: u32, pos: usize, text: []const u8) void {
         if (self.seen[pc] == self.gen) return;
         self.seen[pc] = self.gen;
@@ -166,14 +177,15 @@ pub const Matcher = struct {
     }
 };
 
-/// 便捷一次性匹配（编译 + 匹配；arena 拥有全部中间物）。多次匹配应复用 Matcher。
+/// Convenience one-shot match; compiles then matches with arena-owned scratch.
+/// Reuse Matcher for repeated matches.
 pub fn matchOnce(arena: std.mem.Allocator, pattern: []const u8, text: []const u8) !bool {
     var re = try Regex.compile(arena, pattern);
     var m = try Matcher.init(arena, &re);
     return m.matches(text);
 }
 
-// ---- 抽象语法树 ----
+// ---- AST ----
 
 const Ast = union(enum) {
     empty,
@@ -189,7 +201,7 @@ const Ast = union(enum) {
     quest: *const Ast,
 };
 
-// ---- 递归下降解析器 ----
+// ---- Recursive descent parser ----
 
 const Parser = struct {
     arena: std.mem.Allocator,
@@ -217,7 +229,7 @@ const Parser = struct {
 
     fn parse(self: *Parser) CompileError!*const Ast {
         const a = try self.parseAlt();
-        if (self.pos != self.src.len) return error.InvalidPattern; // 残留（如多余的 `)`）
+        if (self.pos != self.src.len) return error.InvalidPattern; // Trailing residue, e.g. extra `)`.
         return a;
     }
 
@@ -288,7 +300,7 @@ const Parser = struct {
                 return self.node(.eol);
             },
             '\\' => return self.parseEscape(),
-            '*', '+', '?' => return error.InvalidPattern, // 量词前无原子
+            '*', '+', '?' => return error.InvalidPattern, // Quantifier without atom.
             ')' => return error.InvalidPattern,
             else => {
                 self.pos += 1;
@@ -298,8 +310,8 @@ const Parser = struct {
     }
 
     fn parseEscape(self: *Parser) CompileError!*const Ast {
-        self.pos += 1; // 吃掉反斜杠
-        const c = self.peek() orelse return error.InvalidPattern; // 行尾孤立反斜杠
+        self.pos += 1; // Consume backslash.
+        const c = self.peek() orelse return error.InvalidPattern; // Lone trailing backslash.
         self.pos += 1;
         switch (c) {
             'd', 'D', 'w', 'W', 's', 'S' => {
@@ -309,12 +321,12 @@ const Parser = struct {
             'n' => return self.node(.{ .lit = '\n' }),
             't' => return self.node(.{ .lit = '\t' }),
             'r' => return self.node(.{ .lit = '\r' }),
-            else => return self.node(.{ .lit = c }), // 转义元字符 / 普通字符
+            else => return self.node(.{ .lit = c }), // Escaped metacharacter or normal char.
         }
     }
 
     fn parseClass(self: *Parser) CompileError!*const Ast {
-        self.pos += 1; // 吃掉 '['
+        self.pos += 1; // Consume '['.
         var negated = false;
         if (self.peek() == '^') {
             negated = true;
@@ -325,7 +337,7 @@ const Parser = struct {
 
         var first = true;
         while (true) {
-            const c = self.peek() orelse return error.InvalidPattern; // 未闭合 ']'
+            const c = self.peek() orelse return error.InvalidPattern; // Unclosed ']'.
             if (c == ']' and !first) {
                 self.pos += 1;
                 break;
@@ -341,18 +353,18 @@ const Parser = struct {
             }
 
             self.pos += 1;
-            // 区间 a-z：'-' 后还有非 ']' 字符才算区间，否则 '-' 当字面量。
+            // Range a-z only when '-' is followed by a non-']' char; otherwise literal '-'.
             if (self.peek() == '-' and self.pos + 1 < self.src.len and self.src[self.pos + 1] != ']') {
-                self.pos += 1; // 吃掉 '-'
+                self.pos += 1; // Consume '-'.
                 const hi = self.src[self.pos];
                 self.pos += 1;
-                if (hi < c) return error.InvalidPattern; // 逆序区间
+                if (hi < c) return error.InvalidPattern; // Reversed range.
                 try ranges.append(self.arena, .{ .lo = c, .hi = hi });
             } else {
                 try ranges.append(self.arena, .{ .lo = c, .hi = c });
             }
         }
-        if (ranges.items.len == 0) return error.InvalidPattern; // 空类 []
+        if (ranges.items.len == 0) return error.InvalidPattern; // Empty class [].
 
         const id: u32 = @intCast(self.classes.items.len);
         try self.classes.append(self.arena, .{
@@ -362,7 +374,8 @@ const Parser = struct {
         return self.node(.{ .class = id });
     }
 
-    /// 把类内转义（`\d \w \s` 或 `\n \t \r` 或转义字面量）展开成区间追加。
+    /// Expands class-internal escapes (`\d \w \s`, `\n \t \r`, or escaped
+    /// literals) into appended ranges.
     fn appendEscapeRanges(self: *Parser, ranges: *std.ArrayList(Range), e: u8) !void {
         switch (e) {
             'd' => try ranges.appendSlice(self.arena, &.{.{ .lo = '0', .hi = '9' }}),
@@ -375,7 +388,8 @@ const Parser = struct {
         }
     }
 
-    /// 注册一个预定义类（`\d \w \s` 及其取反大写形式），返回其 id。
+    /// Registers a predefined class (`\d \w \s` and uppercase negations) and
+    /// returns its id.
     fn addPredefClass(self: *Parser, kind: u8) !u32 {
         const negated = std.ascii.isUpper(kind);
         const ranges: []const Range = switch (std.ascii.toLower(kind)) {
@@ -404,10 +418,10 @@ const predef_space = [_]Range{
     .{ .lo = '\t', .hi = '\t' },
     .{ .lo = '\n', .hi = '\n' },
     .{ .lo = '\r', .hi = '\r' },
-    .{ .lo = 0x0b, .hi = 0x0c }, // 垂直制表 / 换页
+    .{ .lo = 0x0b, .hi = 0x0c }, // Vertical tab / form feed.
 };
 
-// ---- AST → 指令编译 ----
+// ---- AST -> Instruction compilation ----
 
 const Compiler = struct {
     arena: std.mem.Allocator,
@@ -472,7 +486,7 @@ const Compiler = struct {
     }
 };
 
-// ---- 测试 ----
+// ---- Tests ----
 
 fn expectMatch(pattern: []const u8, text: []const u8, want: bool) !void {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -481,14 +495,14 @@ fn expectMatch(pattern: []const u8, text: []const u8, want: bool) !void {
     try std.testing.expectEqual(want, got);
 }
 
-test "字面量与位置无关的子串匹配（非锚定）" {
+test "literal substring match independent of position (unanchored)" {
     try expectMatch("abc", "abc", true);
     try expectMatch("abc", "xxabcyy", true);
     try expectMatch("abc", "ab", false);
-    try expectMatch("", "anything", true); // 空模式匹配一切
+    try expectMatch("", "anything", true); // Empty pattern matches anything.
 }
 
-test "锚点 ^ 与 $" {
+test "anchors ^ and $" {
     try expectMatch("^abc", "abcdef", true);
     try expectMatch("^abc", "xabc", false);
     try expectMatch("abc$", "xxabc", true);
@@ -498,7 +512,7 @@ test "锚点 ^ 与 $" {
     try expectMatch("^$", "", true);
 }
 
-test "量词 * + ?" {
+test "quantifiers * + ?" {
     try expectMatch("ab*c", "ac", true);
     try expectMatch("ab*c", "abbbc", true);
     try expectMatch("ab+c", "ac", false);
@@ -508,14 +522,14 @@ test "量词 * + ?" {
     try expectMatch("ab?c", "abbc", false);
 }
 
-test "通配 . 与转义" {
+test "wildcard . and escaping" {
     try expectMatch("a.c", "axc", true);
     try expectMatch("a.c", "ac", false);
     try expectMatch("a\\.c", "a.c", true);
     try expectMatch("a\\.c", "axc", false);
 }
 
-test "分组与选择 () |" {
+test "groups and alternation () |" {
     try expectMatch("(ab|cd)+", "abcdab", true);
     try expectMatch("gr(a|e)y", "gray", true);
     try expectMatch("gr(a|e)y", "grey", true);
@@ -524,17 +538,17 @@ test "分组与选择 () |" {
     try expectMatch("^(foo|bar)$", "baz", false);
 }
 
-test "字符类 [] 含区间与取反" {
+test "character classes [] with ranges and negation" {
     try expectMatch("[a-z]+", "hello", true);
     try expectMatch("[a-z]+", "123", false);
     try expectMatch("[^0-9]", "a", true);
     try expectMatch("[^0-9]", "5", false);
     try expectMatch("[abc]x", "bx", true);
-    try expectMatch("[-a]", "-", true); // '-' 在末尾作字面量
+    try expectMatch("[-a]", "-", true); // Trailing '-' is literal.
     try expectMatch("a[0-9]+b", "a123b", true);
 }
 
-test "预定义类 \\d \\w \\s 及取反" {
+test "predefined classes \\d \\w \\s and negation" {
     try expectMatch("\\d+", "abc123", true);
     try expectMatch("^\\d+$", "123", true);
     try expectMatch("^\\d+$", "12a", false);
@@ -545,21 +559,21 @@ test "预定义类 \\d \\w \\s 及取反" {
     try expectMatch("\\D", "5", false);
 }
 
-test "多字节（中文）字面子串按字节匹配" {
-    try expectMatch("世界", "你好世界", true);
-    try expectMatch("世界", "你好世", false);
+test "bytes match expected ranges" {
+    try expectMatch("world", "helloworld", true);
+    try expectMatch("world", "hellowor", false);
 }
 
-test "ReDoS 病态模式仍线性返回（不回溯卡死）" {
-    // 回溯引擎会在此指数级爆炸；Thompson NFA 线性，瞬时返回 false。
+test "ReDoS pathological pattern remains linear and does not hang" {
+    // Backtracking engines explode here; Thompson NFA stays linear and returns false.
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
-    const text = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"; // 30 个 a + 不匹配尾
+    const text = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!"; // 30 a's plus a mismatching tail.
     const got = try matchOnce(arena_state.allocator(), "(a+)+$", text);
     try std.testing.expectEqual(false, got);
 }
 
-test "非法模式返回错误而非 panic" {
+test "invalid pattern returns error instead of panic" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();
@@ -571,7 +585,7 @@ test "非法模式返回错误而非 panic" {
     try std.testing.expectError(error.PatternTooLong, Regex.compile(a, "a" ** (max_pattern_len + 1)));
 }
 
-test "Matcher 复用跨多次匹配正确（gen 单调不清零）" {
+test "Matcher supports repeated matches" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
     const a = arena_state.allocator();

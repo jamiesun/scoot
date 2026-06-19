@@ -1,11 +1,14 @@
-//! LLM 后端适配：仅对接 OpenAI `/v1/chat/completions`（见 ROADMAP 非目标）。
+//! LLM backend adapter: only targets OpenAI `/v1/chat/completions`.
 //!
-//! 铁律落地：
-//!   #2 仅 OpenAI 协议；提供 schema 时强制 `response_format=json_schema` + `strict:true`。
-//!   #4 绝不信任模型输出：响应一律走 std.json 防弹解析，脏数据返回错误（由上层包装成
-//!      System Error 回灌重试），**绝不 panic**。
-//! 内存：所有临时分配走调用方传入的 per-call arena；返回的 `content` 指向 arena，
-//!       调用方需在 arena 释放前把它复制到长寿命存储（见 session.append）。
+//! Hard rules implemented here:
+//!   #2 Only OpenAI protocol; when a schema is provided, force
+//!      `response_format=json_schema` with `strict:true`.
+//!   #4 Never trust model output: all responses go through defensive std.json
+//!      parsing. Bad data returns errors for upper layers to wrap into System
+//!      Error feedback and retry, never panic.
+//! Memory: all temporary allocations use the per-call arena supplied by the
+//! caller. Returned `content` points into that arena and must be copied to
+//! long-lived storage before the arena is released.
 const std = @import("std");
 const jsonio = @import("jsonio.zig");
 
@@ -16,35 +19,37 @@ pub const Message = struct {
     content: []const u8,
 };
 
-/// 后端 prompt 缓存提示模式（issue #72）。
-/// - `off`（默认）：请求体不带任何缓存标记，逐字节同旧行为——OpenAI / vLLM / SGLang
-///   等对稳定前缀**自动**缓存的后端无需、也不应收到额外字段（零副作用，避免严格后端
-///   因未知字段报错）。
-/// - `anthropic`：对稳定指令前缀（开头连续的 system 段末条）在 content 块上打 Anthropic
-///   风格 `cache_control:{type:ephemeral}` 断点，使固定前缀按缓存价计费/免重算。仅在确为
-///   Anthropic 兼容网关时开启。
+/// Backend prompt-cache hint mode (issue #72).
+/// - `off` by default: sends no cache markers and preserves old byte-for-byte
+///   request bodies. Backends such as OpenAI, vLLM, and SGLang that auto-cache
+///   stable prefixes do not need extra fields, and strict backends avoid unknown
+///   field errors.
+/// - `anthropic`: adds an Anthropic-style `cache_control:{type:ephemeral}`
+///   breakpoint on the stable instruction prefix, the last leading system
+///   message, so the fixed prefix can be billed or computed as cached. Enable
+///   only on Anthropic-compatible gateways.
 pub const PromptCache = enum {
     off,
     anthropic,
 
-    /// 把配置字符串解析为模式；未知值回落 `off`（最安全：等于不动请求体）。
+    /// Parses a config string; unknown values fall back to `off`, leaving body unchanged.
     pub fn parse(s: []const u8) PromptCache {
         if (std.mem.eql(u8, s, "anthropic")) return .anthropic;
         return .off;
     }
 };
 
-/// 一次 chat/completions 的可选参数。
+/// Optional parameters for one chat/completions call.
 pub const ChatOptions = struct {
-    /// JSON Schema 对象（原始 JSON 文本）。非 null 时强制结构化输出（铁律 #2）。
+    /// JSON Schema object as raw JSON text. Non-null forces structured output.
     json_schema: ?[]const u8 = null,
-    /// json_schema 的名称（OpenAI 要求）。
+    /// json_schema name required by OpenAI.
     schema_name: []const u8 = "scoot_output",
-    /// 采样温度；null 表示用后端默认。
+    /// Sampling temperature; null uses backend default.
     temperature: ?f32 = null,
 };
 
-/// 一次 chat/completions 的结果（已通过防弹 JSON 解析）。
+/// Result of one chat/completions call after defensive JSON parsing.
 pub const Completion = struct {
     content: []const u8,
     finish_reason: []const u8 = "",
@@ -54,16 +59,18 @@ pub const Client = struct {
     io: std.Io,
     base_url: []const u8,
     model: []const u8,
-    /// API token；空串表示不带 Authorization（本地无鉴权后端）。明文仅在内存短暂存活。
+    /// API token. Empty means no Authorization header for local unauthenticated backends.
     api_key: []const u8 = "",
-    /// 自定义 CA bundle（PEM）绝对路径；null = 系统根证书自动扫描（嵌入式可指定）。
+    /// Absolute custom CA bundle path (PEM); null scans system roots.
     ca_file: ?[]const u8 = null,
-    /// 动态扩展请求体参数（透传）：原样合并进请求体顶层。见 config.Backend.extra_body。
-    /// 仅接受 JSON 对象；非对象忽略。每个成员经 std.json 序列化，故请求体始终合法。
+    /// Dynamic extra request-body fields, merged into the top-level body. See
+    /// config.Backend.extra_body. Only objects are accepted; non-objects are
+    /// ignored. Each value is serialized through std.json, so the body stays valid.
     extra_body: ?std.json.Value = null,
-    /// prompt 缓存提示模式（issue #72）。默认 `off`：请求体零变化。见 PromptCache。
+    /// Prompt-cache hint mode (issue #72). Default `off` leaves request bodies unchanged.
     prompt_cache: PromptCache = .off,
-    /// 最近一次后端失败响应摘要。存固定缓冲，避免错误上抛后 per-call arena 已释放。
+    /// Last backend failure response summary, stored in a fixed buffer because
+    /// the per-call arena may be gone after errors propagate.
     last_error_status: u16 = 0,
     last_error_body_buf: [2048]u8 = undefined,
     last_error_body_len: usize = 0,
@@ -77,8 +84,9 @@ pub const Client = struct {
         return self.last_error_body_buf[0..self.last_error_body_len];
     }
 
-    /// 发起一次 chat/completions 请求并返回防弹解析后的结果。
-    /// 失败（连接 / 非 2xx / 脏响应）返回错误而非 panic，交由上层决定重试或提示。
+    /// Performs one chat/completions request and returns defensively parsed output.
+    /// Connection failures, non-2xx statuses, and malformed responses return
+    /// errors instead of panicking; upper layers decide retry or user feedback.
     pub fn chat(
         self: *Client,
         arena: std.mem.Allocator,
@@ -92,7 +100,7 @@ pub const Client = struct {
         var http_client: std.http.Client = .{ .allocator = arena, .io = self.io };
         defer http_client.deinit();
 
-        // 自定义 CA：预填 bundle 并置 now 抑制系统扫描覆盖（嵌入式 HTTPS 后端）。
+        // Custom CA: preload bundle and set now to suppress system root scanning.
         if (self.ca_file) |path| {
             const ca_now = std.Io.Clock.real.now(self.io);
             http_client.ca_bundle.addCertsFromFilePathAbsolute(arena, self.io, ca_now, path) catch
@@ -145,10 +153,11 @@ pub const Client = struct {
     }
 };
 
-/// 组装 OpenAI 请求体（紧凑 JSON）。提供 schema 时强制 response_format=json_schema/strict。
-/// `extra_body` 非 null 时把其对象成员透传合并进顶层（动态扩展参数，如 service_tier）。
-/// `prompt_cache=anthropic` 时给稳定指令前缀打 Anthropic 风格缓存断点；`off` 时请求体
-/// 逐字节同旧行为（零副作用，见 PromptCache）。
+/// Builds a compact OpenAI request body. Providing schema forces
+/// response_format=json_schema/strict. Non-null `extra_body` merges its object
+/// members into the top level for dynamic fields such as service_tier.
+/// `prompt_cache=anthropic` adds Anthropic-style cache breakpoints to stable
+/// instruction prefixes; `off` preserves old byte-for-byte behavior.
 pub fn buildRequestBody(
     arena: std.mem.Allocator,
     model: []const u8,
@@ -160,7 +169,8 @@ pub fn buildRequestBody(
     var aw: std.Io.Writer.Allocating = .init(arena);
     const w = &aw.writer;
 
-    // 缓存断点位置（issue #72）：仅 anthropic 模式计算；off → null → 各消息照旧写纯字符串。
+    // Cache breakpoint index (issue #72): computed only for anthropic; off keeps
+    // content as plain strings.
     const cache_idx: ?usize = if (prompt_cache == .anthropic) cacheBreakpointIndex(messages) else null;
 
     try w.writeAll("{\"model\":");
@@ -174,8 +184,10 @@ pub fn buildRequestBody(
         try w.writeAll("{\"role\":\"");
         try w.writeAll(@tagName(m.role));
         if (cache_idx == i) {
-            // 缓存断点：content 用内容块数组承载 Anthropic 风格 cache_control（仍是合法
-            // OpenAI content-parts 形态；不支持该字段的后端会忽略，故仅在显式开启时发出）。
+            // Cache breakpoint: content uses content-parts carrying Anthropic
+            // cache_control. This is still a valid OpenAI content-parts shape;
+            // send only when explicitly enabled because unsupported backends may
+            // ignore or reject the extension.
             try w.writeAll("\",\"content\":[{\"type\":\"text\",\"text\":");
             try jsonio.writeString(w, m.content);
             try w.writeAll(",\"cache_control\":{\"type\":\"ephemeral\"}}]}");
@@ -191,7 +203,7 @@ pub fn buildRequestBody(
         try w.writeAll(",\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{\"name\":");
         try jsonio.writeString(w, opts.schema_name);
         try w.writeAll(",\"strict\":true,\"schema\":");
-        try w.writeAll(schema); // 调用方提供的合法 JSON Schema 对象，原样注入
+        try w.writeAll(schema); // Caller-provided valid JSON Schema object.
         try w.writeAll("}}");
     }
 
@@ -201,10 +213,11 @@ pub fn buildRequestBody(
     return aw.writer.buffered();
 }
 
-/// 把用户配置的 extra_body 对象成员注入请求体顶层（动态扩展参数）。
-/// **防弹**：仅接受 JSON 对象，非对象一律忽略（坏配置不致畸形请求体）；
-/// 每个成员值经 std.json 序列化为合法 JSON，故拼出的请求体始终合法。
-/// 注入位置在末尾，故同名键由 extra_body 覆盖——配置方不应重定义 model/messages 等核心字段。
+/// Injects user-configured extra_body object members into the top-level request
+/// body. Defensive behavior: only JSON objects are accepted; non-objects are
+/// ignored so bad config cannot create malformed request bodies. Values are
+/// serialized through std.json. Injection at the end means extra_body overwrites
+/// duplicate keys; config should not redefine core fields like model/messages.
 fn writeExtraBody(w: *std.Io.Writer, extra: std.json.Value) !void {
     if (extra != .object) return;
     var it = extra.object.iterator();
@@ -216,9 +229,11 @@ fn writeExtraBody(w: *std.Io.Writer, extra: std.json.Value) !void {
     }
 }
 
-/// 稳定指令前缀的缓存断点（issue #72）：取开头连续 system 段的**最后一条**——
-/// system_prompt + 工具说明 + 技能清单都在这一条里，循环中字节稳定。在它身上打一个
-/// cache_control 断点即缓存整段固定前缀。无 system 消息 → null（不打断点，退化为零副作用）。
+/// Cache breakpoint for the stable instruction prefix (issue #72): pick the last
+/// message in the leading consecutive system segment. system_prompt, tool
+/// descriptions, and skill manifest live there and stay byte-stable across the
+/// loop. Marking it with cache_control caches the fixed prefix. No system message
+/// returns null, making this a no-op.
 fn cacheBreakpointIndex(messages: []const Message) ?usize {
     var last: ?usize = null;
     for (messages, 0..) |m, i| {
@@ -228,8 +243,8 @@ fn cacheBreakpointIndex(messages: []const Message) ?usize {
     return last;
 }
 
-/// 防弹解析 chat/completions 响应，提取首个 choice 的 message.content。
-/// 任何结构不符（非 JSON、无 choices、无 content）都返回 MalformedResponse，绝不 panic。
+/// Defensively parses a chat/completions response and extracts first choice
+/// message.content. Any structural mismatch returns MalformedResponse, never panic.
 pub fn parseCompletion(arena: std.mem.Allocator, body: []const u8) error{MalformedResponse}!Completion {
     const Resp = struct {
         choices: []const struct {
@@ -251,7 +266,7 @@ pub fn parseCompletion(arena: std.mem.Allocator, body: []const u8) error{Malform
     };
 }
 
-test "buildRequestBody 产出合法 JSON 且强制 json_schema/strict" {
+test "buildRequestBody emits valid JSON and forces json_schema/strict" {
     const gpa = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
@@ -266,17 +281,17 @@ test "buildRequestBody 产出合法 JSON 且强制 json_schema/strict" {
         .schema_name = "scoot_reply",
     }, null, .off);
 
-    // 必须是合法 JSON
+    // Must be valid JSON.
     const v = try std.json.parseFromSlice(std.json.Value, gpa, body, .{});
     defer v.deinit();
     try std.testing.expect(v.value == .object);
-    // 强制结构化输出
+    // Forces structured output.
     try std.testing.expect(std.mem.indexOf(u8, body, "\"response_format\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"strict\":true") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"model\":\"qwen2.5\"") != null);
 }
 
-test "buildRequestBody 注入 extra_body 扩展参数（动态透传）" {
+test "buildRequestBody injects extra_body extra fields(dynamic passthrough)" {
     const gpa = std.testing.allocator;
     var parsed = try std.json.parseFromSlice(
         std.json.Value,
@@ -293,17 +308,17 @@ test "buildRequestBody 注入 extra_body 扩展参数（动态透传）" {
     const msgs = [_]Message{.{ .role = .user, .content = "hi" }};
     const body = try buildRequestBody(arena, "gpt-5.5", &msgs, .{}, parsed.value, .off);
 
-    // 扩展参数已透传进请求体
+    // Extra fields are passed through into the request body.
     try std.testing.expect(std.mem.indexOf(u8, body, "\"service_tier\":\"priority\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"reasoning_effort\":\"high\"") != null);
-    // 仍是合法 JSON，核心字段未被破坏
+    // Still valid JSON with core fields intact.
     const v = try std.json.parseFromSlice(std.json.Value, gpa, body, .{});
     defer v.deinit();
     try std.testing.expect(v.value == .object);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"model\":\"gpt-5.5\"") != null);
 }
 
-test "buildRequestBody 忽略非对象 extra_body（防弹）" {
+test "buildRequestBody ignores non-object extra_body(defensive)" {
     const gpa = std.testing.allocator;
     var parsed = try std.json.parseFromSlice(std.json.Value, gpa, "42", .{});
     defer parsed.deinit();
@@ -315,14 +330,14 @@ test "buildRequestBody 忽略非对象 extra_body（防弹）" {
     const msgs = [_]Message{.{ .role = .user, .content = "hi" }};
     const body = try buildRequestBody(arena, "m", &msgs, .{}, parsed.value, .off);
 
-    // 非对象被静默忽略：请求体仍合法，未把裸值 42 拼进去
+    // Non-objects are ignored; request remains valid and does not splice raw 42.
     const v = try std.json.parseFromSlice(std.json.Value, gpa, body, .{});
     defer v.deinit();
     try std.testing.expect(v.value == .object);
     try std.testing.expect(std.mem.indexOf(u8, body, ",42") == null);
 }
 
-test "buildRequestBody: prompt_cache=off 不写任何缓存标记（零副作用，issue #72）" {
+test "buildRequestBody: prompt_cache=off writes no cache markers(zero side effects,issue #72)" {
     const gpa = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
@@ -334,13 +349,13 @@ test "buildRequestBody: prompt_cache=off 不写任何缓存标记（零副作用
     };
     const body = try buildRequestBody(arena, "m", &msgs, .{}, null, .off);
 
-    // 默认模式：content 仍是纯字符串，绝无 cache_control / 内容块数组。
+    // Default mode: content remains plain strings with no cache_control or parts.
     try std.testing.expect(std.mem.indexOf(u8, body, "\"content\":\"sys\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"content\":\"hi\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "cache_control") == null);
 }
 
-test "buildRequestBody: prompt_cache=anthropic 给 system 前缀打 cache_control 断点（issue #72）" {
+test "buildRequestBody: prompt_cache=anthropic adds cache_control breakpoint to system prefix(issue #72)" {
     const gpa = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
@@ -353,18 +368,18 @@ test "buildRequestBody: prompt_cache=anthropic 给 system 前缀打 cache_contro
     };
     const body = try buildRequestBody(arena, "m", &msgs, .{}, null, .anthropic);
 
-    // system 前缀转为内容块数组并带 ephemeral 断点。
+    // System prefix becomes content-parts with an ephemeral breakpoint.
     try std.testing.expect(std.mem.indexOf(u8, body, "\"content\":[{\"type\":\"text\",\"text\":\"sys-PFX\",\"cache_control\":{\"type\":\"ephemeral\"}}]") != null);
-    // 非前缀消息保持纯字符串（不打断点、不增重）。
+    // Non-prefix messages remain plain strings without breakpoints or extra weight.
     try std.testing.expect(std.mem.indexOf(u8, body, "\"content\":\"u\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, body, "\"content\":\"a\"") != null);
-    // 仍是合法 JSON。
+    // Still valid JSON.
     const v = try std.json.parseFromSlice(std.json.Value, gpa, body, .{});
     defer v.deinit();
     try std.testing.expect(v.value == .object);
 }
 
-test "cacheBreakpointIndex: 取开头 system 段末条；无 system→null（issue #72）" {
+test "cacheBreakpointIndex chooses final initial system message and returns null without system (issue #72)" {
     const a = [_]Message{
         .{ .role = .system, .content = "s0" },
         .{ .role = .system, .content = "s1" },
@@ -379,14 +394,14 @@ test "cacheBreakpointIndex: 取开头 system 段末条；无 system→null（iss
     try std.testing.expectEqual(@as(?usize, null), cacheBreakpointIndex(&[_]Message{}));
 }
 
-test "PromptCache.parse: anthropic / off / 未知回落 off（issue #72）" {
+test "PromptCache.parse: anthropic / off / unknown falls back to off(issue #72)" {
     try std.testing.expectEqual(PromptCache.anthropic, PromptCache.parse("anthropic"));
     try std.testing.expectEqual(PromptCache.off, PromptCache.parse("off"));
     try std.testing.expectEqual(PromptCache.off, PromptCache.parse("bogus"));
     try std.testing.expectEqual(PromptCache.off, PromptCache.parse(""));
 }
 
-test "parseCompletion 提取 content（正常响应）" {
+test "parseCompletion extracts content(normal response)" {
     const gpa = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
@@ -400,7 +415,7 @@ test "parseCompletion 提取 content（正常响应）" {
     try std.testing.expectEqualStrings("stop", c.finish_reason);
 }
 
-test "parseCompletion 防弹：脏数据返回 MalformedResponse 而非 panic" {
+test "parseCompletion defensive failures return MalformedResponse without panic" {
     const gpa = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
@@ -412,7 +427,7 @@ test "parseCompletion 防弹：脏数据返回 MalformedResponse 而非 panic" {
     try std.testing.expectError(error.MalformedResponse, parseCompletion(arena, "{\"choices\":[{\"message\":{}}]}"));
 }
 
-test "Client 记录后端失败响应摘要并截断" {
+test "Client reports backend failure response" {
     var c = Client.init(std.testing.io, "http://example.invalid/v1", "m", "");
     const body = "backend rejected this request";
     c.rememberBackendResponse(400, body);

@@ -1,37 +1,42 @@
-//! 调度引擎（北极星方向三）：让 Scoot 在无人值守下到点唤起 Agent 执行 job.goal，
-//! 把"AI 能力 + 传统定时任务"融合成可审计的智能 Cronjob 中枢。
+//! Scheduling engine: lets unattended Scoot wake an agent at the right time to
+//! execute `job.goal`, combining AI capability with traditional scheduled tasks
+//! into an auditable cron-like hub.
 //!
-//! 安全前置（铁律 #1「安全可控」，不可妥协）：
-//!   被调度的 job 是**无人在场**的自主执行，因此默认强制 `readonly` 策略门
-//!   （fail-closed 只读白名单），而非交互用的 `guarded` 绊线。`guarded` 是"有人盯着"
-//!   时拦灾难命令的绊线，对无人值守毫无意义——故任何 job 的 `guarded` 一律被
-//!   `effectiveMode` 矫正为 `readonly`；用户可显式把某 job 设为 `unrestricted`
-//!   （自担风险，仍全程审计）。**绝不把无人值守执行架在 guarded 之上。**
+//! Safety premise: scheduled jobs are autonomous and unattended, so they default
+//! to the `readonly` policy gate, a fail-closed local-read allowlist, rather than
+//! the interactive `guarded` tripwire. `guarded` is useful only when someone is
+//! watching; for unattended jobs it is corrected to `readonly` by
+//! `effectiveMode`. Users may explicitly choose `unrestricted` for a job at
+//! their own risk, still fully audited. Unattended execution must never rest on
+//! `guarded`.
 //!
-//! 可测性设计（时间循环与判定分离）：
-//!   - `dueAt(now_unix)` 是**纯函数**（注入时间），便于防弹单测；
-//!   - `tick(now_unix, ctx, runFn)` 用注入时间触发到期 job，经回调跑 Agent——
-//!     调度器不依赖 agent.zig，避免依赖环，也让测试能注入计数桩；
-//!   - `runForever` 是薄壳：取真实时钟 now → tick → sleep，`max_ticks` 支持有界运行。
+//! Testability: time-looping is separated from due decisions.
+//!   - `dueAt(now_unix)` is a pure function with injected time.
+//!   - `tick(now_unix, ctx, runFn)` triggers due jobs through a callback, so the
+//!     scheduler does not depend on agent.zig and tests can inject counters.
+//!   - `runForever` is a thin shell: read real now, tick, sleep. `max_ticks`
+//!     enables bounded runs.
 //!
-//! 反过载边界：cron 支持标准 5 字段分钟级触发（分钟/小时/日/月/周），不引入复杂
-//!   runtime 状态；长期记忆 / plan-mode DAG 不在此实现。长效守护零泄漏由调用方的
-//!   per-job 可重置 arena 承载（见 main 的 runner），调度器自身不驻留每次运行的临时内存。
+//! Scope boundary: cron supports standard five-field, minute-level triggers
+//! (minute/hour/day/month/weekday) without complex runtime state. Long-term
+//! memory and plan-mode DAGs are not implemented here. Long-running zero-leak
+//! behavior is owned by the caller's per-job resettable arena, while the
+//! scheduler itself does not retain per-run scratch memory.
 const std = @import("std");
 const policy = @import("policy.zig");
 
-/// 触发器：三类调度。
+/// Trigger type: three scheduling modes.
 pub const Trigger = union(enum) {
-    /// 固定间隔（秒）。
+    /// Fixed interval in seconds.
     every_sec: u64,
-    /// 固定时间点（Unix 秒）。
+    /// Fixed Unix timestamp in seconds.
     at_unix: i64,
-    /// Cron 表达式：5 字段，UTC，支持 `*` / `*/n` / `a` / `a-b` / 逗号列表。
+    /// Five-field UTC cron expression supporting `*`, `*/n`, `a`, `a-b`, and lists.
     cron: []const u8,
 };
 
-/// 一个调度任务。`mode` 是该 job 的执行策略档，默认 `readonly`（无人值守安全档）。
-/// `last_run_unix` / `fired` 是运行时状态，不来自配置。
+/// One scheduled job. `mode` is the execution policy, defaulting to unattended
+/// safe `readonly`. `last_run_unix` and `fired` are runtime state, not config.
 pub const Job = struct {
     id: []const u8,
     trigger: Trigger,
@@ -40,8 +45,8 @@ pub const Job = struct {
     last_run_unix: i64 = 0,
     fired: bool = false,
 
-    /// 矫正后的有效策略：`guarded`（人在场绊线）对无人值守无意义 → 降为 `readonly`。
-    /// 这是铁律 #1 的结构性保证：被调度 job 永远不可能跑在 guarded 之上。
+    /// Corrected effective policy: unattended `guarded` is meaningless, so it is
+    /// lowered to `readonly`. Scheduled jobs can never run on guarded.
     pub fn effectiveMode(self: Job) policy.Mode {
         return switch (self.mode) {
             .guarded => .readonly,
@@ -49,10 +54,11 @@ pub const Job = struct {
         };
     }
 
-    /// 纯函数：在 `now_unix` 时该 job 是否到点。
-    ///   every_sec：距上次触发 >= 间隔（从未跑过则立即首跑）；间隔 0 视作不触发（防自旋）。
-    ///   at_unix：到点且未触发过（一次性）。
-    ///   cron：分钟级匹配，每个匹配分钟最多触发一次。
+    /// Pure function: whether this job is due at `now_unix`.
+    ///   every_sec: last run is at least interval ago, or first run immediately;
+    ///     interval 0 never triggers to prevent spinning.
+    ///   at_unix: one-shot after the timestamp.
+    ///   cron: minute-level match, at most once per matching minute.
     pub fn dueAt(self: Job, now_unix: i64) bool {
         return switch (self.trigger) {
             .every_sec => |sec| blk: {
@@ -208,12 +214,12 @@ fn parseCronNumber(s: []const u8, min: u8, max: u8, dow: bool) ?u8 {
     return n;
 }
 
-/// 调度器：持有一组 job，按注入时间扫描触发。
-/// `jobs` 由传入的 `gpa` 拥有（元素内容的生命周期由调用方保证 >= Scheduler）。
+/// Scheduler holding jobs and scanning them against injected time.
+/// `jobs` is owned by the provided `gpa`; element contents must outlive Scheduler.
 pub const Scheduler = struct {
     jobs: std.ArrayList(Job) = .empty,
 
-    /// 触发回调：调度器只判"到点"，怎么跑 job 由调用方注入（解耦 agent 依赖）。
+    /// Run callback: the scheduler only decides due-ness; callers inject execution.
     pub const RunFn = *const fn (ctx: *anyopaque, job: *Job) void;
 
     pub fn add(self: *Scheduler, gpa: std.mem.Allocator, job: Job) !void {
@@ -234,8 +240,9 @@ pub const Scheduler = struct {
         return self.jobs.items.len;
     }
 
-    /// 单次扫描：把所有在 `now_unix` 到点的 job 触发——先更新 last_run/fired，再调 runFn。
-    /// 返回本次触发的 job 数。时间注入使其逻辑可单测，不碰真实时钟。
+    /// Single scan: triggers all jobs due at `now_unix`, updating last_run/fired
+    /// before invoking runFn. Returns number of fired jobs. Injected time keeps
+    /// this testable without touching the real clock.
     pub fn tick(self: *Scheduler, now_unix: i64, ctx: *anyopaque, runFn: RunFn) usize {
         var fired: usize = 0;
         for (self.jobs.items) |*job| {
@@ -248,9 +255,9 @@ pub const Scheduler = struct {
         return fired;
     }
 
-    /// 守护循环：周期性「取真实 now → tick → sleep」。
-    /// `max_ticks == 0` 表示无限运行（真实守护）；> 0 跑够即返回（测试 / 有界运行）。
-    /// 返回累计触发的 job 次数。sleep 被取消（如收到中断）即优雅结束。
+    /// Daemon loop: read real now, tick, then sleep. `max_ticks == 0` means run
+    /// forever; values > 0 return after that many ticks for tests or bounded
+    /// runs. Returns total fired job count. Canceled sleep ends gracefully.
     pub fn runForever(
         self: *Scheduler,
         io: std.Io,
@@ -264,7 +271,7 @@ pub const Scheduler = struct {
         while (max_ticks == 0 or ticks < max_ticks) : (ticks += 1) {
             const now_unix = std.Io.Timestamp.now(io, .real).toSeconds();
             total += self.tick(now_unix, ctx, runFn);
-            if (max_ticks != 0 and ticks + 1 >= max_ticks) break; // 末次 tick 不再睡
+            if (max_ticks != 0 and ticks + 1 >= max_ticks) break; // Do not sleep after final tick.
             io.sleep(std.Io.Duration.fromMilliseconds(@intCast(poll_ms)), .awake) catch break;
         }
         return total;
@@ -275,7 +282,7 @@ pub const Scheduler = struct {
     }
 };
 
-test "effectiveMode: guarded 被矫正为 readonly，其余保持" {
+test "effectiveMode: guarded is corrected to readonly,others unchanged" {
     const j_guard = Job{ .id = "a", .trigger = .{ .every_sec = 60 }, .goal = "", .mode = .guarded };
     try std.testing.expectEqual(policy.Mode.readonly, j_guard.effectiveMode());
     const j_ro = Job{ .id = "b", .trigger = .{ .every_sec = 60 }, .goal = "", .mode = .readonly };
@@ -284,28 +291,28 @@ test "effectiveMode: guarded 被矫正为 readonly，其余保持" {
     try std.testing.expectEqual(policy.Mode.unrestricted, j_un.effectiveMode());
 }
 
-test "dueAt: every_sec 间隔判定" {
+test "dueAt: every_sec interval predicate" {
     var j = Job{ .id = "x", .trigger = .{ .every_sec = 300 }, .goal = "" };
-    try std.testing.expect(j.dueAt(1000)); // 从未跑过 → 立即首跑
+    try std.testing.expect(j.dueAt(1000)); // Never run -> immediate first run.
     j.last_run_unix = 1000;
-    try std.testing.expect(!j.dueAt(1299)); // 未到间隔
-    try std.testing.expect(j.dueAt(1300)); // 刚好到点
-    try std.testing.expect(j.dueAt(5000)); // 早已超过
+    try std.testing.expect(!j.dueAt(1299)); // Interval not reached.
+    try std.testing.expect(j.dueAt(1300)); // Exactly due.
+    try std.testing.expect(j.dueAt(5000)); // Long overdue.
 
     var zero = Job{ .id = "z", .trigger = .{ .every_sec = 0 }, .goal = "" };
-    try std.testing.expect(!zero.dueAt(1)); // 0 间隔不触发，防自旋
+    try std.testing.expect(!zero.dueAt(1)); // 0 interval does not trigger.
     zero.last_run_unix = 0;
 }
 
-test "dueAt: at_unix 一次性触发" {
+test "dueAt: at_unix one-shot trigger" {
     var j = Job{ .id = "y", .trigger = .{ .at_unix = 2000 }, .goal = "" };
-    try std.testing.expect(!j.dueAt(1999)); // 未到
-    try std.testing.expect(j.dueAt(2000)); // 到点
+    try std.testing.expect(!j.dueAt(1999)); // Not yet due.
+    try std.testing.expect(j.dueAt(2000)); // Due.
     j.fired = true;
-    try std.testing.expect(!j.dueAt(3000)); // 已触发，不再重复
+    try std.testing.expect(!j.dueAt(3000)); // Already fired; no repeat.
 }
 
-test "dueAt: cron 分钟级触发且同一分钟只触发一次" {
+test "dueAt: cron minute-level trigger fires only once per minute" {
     var j = Job{ .id = "c", .trigger = .{ .cron = "* * * * *" }, .goal = "" };
     try std.testing.expect(j.dueAt(60));
     j.last_run_unix = 60;
@@ -313,15 +320,15 @@ test "dueAt: cron 分钟级触发且同一分钟只触发一次" {
     try std.testing.expect(j.dueAt(120));
 }
 
-test "cronMatches: 支持固定值、范围、列表、步进与 Sunday=7" {
-    // 1970-01-01 00:01:00 UTC，周四。
+test "cronMatches: supports fixed values, ranges, lists, steps, and Sunday=7" {
+    // 1970-01-01 00:01:00 UTC, Thursday.
     const t = utcCronTime(60);
     try std.testing.expect(cronMatches("1 0 1 1 4", t));
     try std.testing.expect(cronMatches("*/1 0-2 1,15 1 1-7", t));
     try std.testing.expect(!cronMatches("2 0 1 1 4", t));
     try std.testing.expect(!cronMatches("* * *", t));
 
-    // 1970-01-04 是周日，0 与 7 都应可匹配。
+    // 1970-01-04 is Sunday; both 0 and 7 should match.
     const sunday = utcCronTime(3 * 24 * 60 * 60);
     try std.testing.expect(cronMatches("0 0 4 1 0", sunday));
     try std.testing.expect(cronMatches("0 0 4 1 7", sunday));
@@ -344,7 +351,7 @@ const TickCounter = struct {
     }
 };
 
-test "tick: 只触发到点 job，并推进其状态" {
+test "tick: fires only due jobs and advances state" {
     const gpa = std.testing.allocator;
     var sch: Scheduler = .{};
     defer sch.deinit(gpa);
@@ -355,13 +362,13 @@ test "tick: 只触发到点 job，并推进其状态" {
     defer counter.fired_ids.deinit(gpa);
 
     const n = sch.tick(100, &counter, TickCounter.cb);
-    try std.testing.expectEqual(@as(usize, 1), n); // 只有 due 到点
+    try std.testing.expectEqual(@as(usize, 1), n); // Only due fired.
     try std.testing.expectEqual(@as(usize, 1), counter.fired_ids.items.len);
     try std.testing.expectEqualStrings("due", counter.fired_ids.items[0]);
 
-    // due 的状态已推进：紧接着同一时刻不应再触发
+    // due state advanced: same timestamp should not trigger again.
     try std.testing.expectEqual(@as(usize, 0), sch.tick(100, &counter, TickCounter.cb));
-    // 过了间隔后再次触发
+    // Triggers again after the interval.
     try std.testing.expectEqual(@as(usize, 1), sch.tick(120, &counter, TickCounter.cb));
 }
 
