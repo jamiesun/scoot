@@ -779,7 +779,7 @@ fn clientComplete(
 }
 
 /// 模型未产出合法步骤时回灌的纠错观察。
-const malformed_hint = "[观察] 你上一条输出不是合法的步骤 JSON。请严格按 schema 只输出一个含 thought/action/action_input 的 JSON 对象。";
+const malformed_hint = "[观察] 你上一条输出不是合法的步骤 JSON。请严格按 schema 只输出一个含 thought/action/action_input 的 JSON 对象；不要输出 Markdown 代码块，也不要一次连续输出多个 JSON 对象。";
 
 /// 历史压缩（issue #71）触发时保留的「最近消息」条数。每回合约产出 2 条（assistant 动作 +
 /// user 观察），8 条 ≈ 最近 4 个回合，足以让模型续上当前进度，同时把更早的工具原文压成摘要。
@@ -833,13 +833,59 @@ pub fn parseStep(arena: std.mem.Allocator, content: []const u8) !Step {
         action: []const u8,
         action_input: []const u8 = "",
     };
-    const v = std.json.parseFromSliceLeaky(Raw, arena, content, .{
+    const step_json = firstStepJsonObject(content) orelse return error.MalformedStep;
+    const v = std.json.parseFromSliceLeaky(Raw, arena, step_json, .{
         .ignore_unknown_fields = true,
     }) catch return error.MalformedStep;
 
     // 按 enum tag 名映射动作；新增动作只需扩 Action enum，无需改这里（反过载）。
     const action = std.meta.stringToEnum(Action, v.action) orelse return error.UnknownAction;
     return .{ .thought = v.thought, .action = action, .action_input = v.action_input };
+}
+
+/// 取模型输出中的第一个完整顶层 JSON 对象。部分兼容后端会无视 strict schema，
+/// 偶发把多个步骤连续吐在一条消息里；Scoot 仍只执行第一步，保持单步 ReACT 语义。
+fn firstStepJsonObject(content: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, content, " \t\r\n");
+    const body = unwrapJsonFence(trimmed);
+    if (body.len == 0 or body[0] != '{') return null;
+
+    var depth: usize = 0;
+    var in_string = false;
+    var escaped = false;
+    for (body, 0..) |c, i| {
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                in_string = false;
+            }
+            continue;
+        }
+
+        switch (c) {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                if (depth == 0) return null;
+                depth -= 1;
+                if (depth == 0) return body[0 .. i + 1];
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+fn unwrapJsonFence(content: []const u8) []const u8 {
+    if (!std.mem.startsWith(u8, content, "```")) return content;
+    var rest = content[3..];
+    if (std.mem.startsWith(u8, rest, "json")) rest = rest[4..];
+    rest = std.mem.trim(u8, rest, " \t\r\n");
+    if (std.mem.endsWith(u8, rest, "```")) rest = rest[0 .. rest.len - 3];
+    return std.mem.trim(u8, rest, " \t\r\n");
 }
 
 /// 估算会话历史的提示体量（字节）：所有消息 content 长度之和。token 体量的粗略代理。
@@ -1136,6 +1182,35 @@ test "parseStep 防弹：非法 JSON 与未知动作" {
     try std.testing.expectError(error.MalformedStep, parseStep(arena, "not json"));
     try std.testing.expectError(error.MalformedStep, parseStep(arena, "{\"action\":}"));
     try std.testing.expectError(error.UnknownAction, parseStep(arena, "{\"action\":\"rmrf\",\"action_input\":\"x\"}"));
+}
+
+test "parseStep 容忍兼容后端连续输出多个 JSON 对象" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const s = try parseStep(
+        arena,
+        "{\"thought\":\"先读\",\"action\":\"file_read\",\"action_input\":\"{\\\"path\\\":\\\"README.md\\\"}\"}\n" ++
+            "{\"thought\":\"再答\",\"action\":\"final\",\"action_input\":\"done\"}",
+    );
+    try std.testing.expectEqual(Action.file_read, s.action);
+    try std.testing.expectEqualStrings("{\"path\":\"README.md\"}", s.action_input);
+}
+
+test "parseStep 容忍 JSON 代码块包裹" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const s = try parseStep(
+        arena,
+        "```json\n{\"thought\":\"完成\",\"action\":\"final\",\"action_input\":\"ok\"}\n```",
+    );
+    try std.testing.expectEqual(Action.final, s.action);
+    try std.testing.expectEqualStrings("ok", s.action_input);
 }
 
 test "动作集合唯一真相源：schema 与 system_prompt 覆盖每个 Action（防漂移，issue #27）" {
