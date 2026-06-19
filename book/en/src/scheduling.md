@@ -4,6 +4,29 @@ Scoot can run **unattended** scheduled jobs through a foreground daemon loop.
 Autonomy is **off by default** — you must explicitly enable it. The full
 lifecycle/recovery reference is [`docs/DAEMON.md`](https://github.com/jamiesun/scoot/blob/main/docs/DAEMON.md).
 
+## Which Mode Should I Use?
+
+Use this table before choosing between `-e`, `schedule run`, and `daemon run`:
+
+| Mode | Reads jobs from config? | Runs forever by default? | Typical owner of timing | Best fit |
+| --- | --- | --- | --- | --- |
+| `scoot -e "<goal>"` | no | no | caller | One immediate human/scripted task. |
+| `scoot schedule run --ticks 1` | yes | no | cron, systemd timer, CI | External scheduler triggers Scoot periodically. |
+| `scoot schedule run` | yes | yes | current terminal/process manager | Simple foreground scheduler loop without daemon state files. |
+| `scoot daemon run` | yes | yes | Scoot loop plus systemd/launchd/etc. supervision | Long-running unattended scheduler with pid/state/stop/status support. |
+
+`-e` and scheduled execution are different entry points. `-e` runs the prompt
+you pass on the command line immediately, using the normal configured tool
+policy. Scheduled jobs come from `[[schedule.jobs]]`, are triggered by
+`every_sec`, `at_unix`, or `cron`, and use the unattended safety rule: job mode
+defaults to `readonly`, and `guarded` is coerced to effective `readonly`.
+
+`systemd` is useful only when you want a process supervisor. With
+`scoot daemon run`, Scoot owns the schedule loop while systemd owns startup,
+restart, logs, environment, resource limits, and SIGTERM shutdown. If you want
+systemd to own the timing too, use a systemd timer that invokes
+`scoot schedule run --ticks 1`.
+
 ## Enable Scheduling
 
 ```toml
