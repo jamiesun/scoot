@@ -7,8 +7,13 @@ or vector database by design (see the [Roadmap](roadmap.md)).
 
 ## Sessions
 
-A session is the message transcript of a single interaction (one `-e` run, one
-REPL conversation, or one scheduled job). It is persisted to:
+A session is the message transcript of a single interaction. `-e` runs and REPL
+conversations get a fresh id for each process, such as `cli-<ms>-<pid>` or
+`repl-<ms>-<pid>`, so independent runs do not get appended into one shared
+`cli.jsonl` or `repl.jsonl` file. Scheduled jobs keep the stable id
+`job-<id>` because they represent a continuing unattended task.
+
+It is persisted to:
 
 ```text
 ~/.scoot/state/sessions/<id>.jsonl
@@ -24,6 +29,8 @@ Each line is one message:
 
 `role` is `system`, `user`, or `assistant`. Writes are **append-only**, so a file
 accumulates the full back-and-forth for that session and can be replayed in order.
+Resume/loading a previous transcript is intentionally separate from persistence
+and is not enabled by the session file naming alone.
 
 Sessions are short-term memory only. They are not indexed or summarized across
 runs; persistence is for auditability and inspection, not recall.

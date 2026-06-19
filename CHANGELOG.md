@@ -28,6 +28,11 @@ heading when cutting a release.
 - Context compaction now goes through a `Compressor` strategy seam while keeping
   the existing `drop` behavior as the default (#97).
 
+### Fixed
+
+- `-e` and REPL runs now get per-process session transcript ids instead of
+  appending every run to shared `cli.jsonl` and `repl.jsonl` files (#95).
+
 ## [0.2.0] - 2026-06-19
 
 ### Added

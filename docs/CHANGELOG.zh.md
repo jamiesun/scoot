@@ -27,6 +27,11 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 - 上下文压缩现在通过 `Compressor` 策略接缝执行，同时保持现有 `drop`
   行为作为默认策略（#97）。
 
+### 修复
+
+- `-e` 与 REPL 运行现在会获得每进程独立的 session transcript id，
+  不再把所有运行追加进共享的 `cli.jsonl` 与 `repl.jsonl` 文件（#95）。
+
 ## [0.2.0] - 2026-06-19
 
 ### 新增
