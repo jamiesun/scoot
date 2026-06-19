@@ -46,7 +46,7 @@ jobs:
       - name: Install Scoot
         run: |
           tar -xzf scoot-linux-amd64.tar.gz
-          install -m755 scoot /usr/local/bin/scoot
+          install -m755 scoot/scoot /usr/local/bin/scoot
       - name: Generate review brief
         run: |
           scoot -e "Review this checkout. Summarize behavior changes, risky files, and missing docs/tests. Do not modify files." \
