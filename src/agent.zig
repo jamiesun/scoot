@@ -322,9 +322,13 @@ pub const Agent = struct {
 
             // Defensive parse: malformed model steps do not panic; feed back a
             // correction and retry.
-            const step = parseStep(arena, completion.content) catch {
-                if (self.audit) |lg| lg.log(.system_error, "model output was not valid step JSON; fed back a correction and retried") catch {};
-                self.traceMalformed(turn + 1);
+            const step = parseStep(arena, completion.content) catch |parse_err| {
+                if (self.audit) |lg| {
+                    const msg = malformedAuditMessage(arena, parse_err, completion.content) catch
+                        "model output was not valid step JSON; fed back a correction and retried";
+                    lg.log(.system_error, msg) catch {};
+                }
+                self.traceMalformed(turn + 1, parse_err, completion.content);
                 // Keep malformed output in history so the model can see and fix it.
                 try sess.append(backing, .assistant, completion.content);
                 try sess.append(backing, .user, malformed_hint);
@@ -733,9 +737,11 @@ pub const Agent = struct {
         w.flush() catch {};
     }
 
-    fn traceMalformed(self: *Agent, turn: u32) void {
+    fn traceMalformed(self: *Agent, turn: u32, parse_err: anyerror, content: []const u8) void {
         const w = self.trace orelse return;
-        w.print("[trace {d}] malformed model step; retrying\n", .{turn}) catch return;
+        w.print("[trace {d}] malformed model step ({s}); retrying. raw: ", .{ turn, @errorName(parse_err) }) catch return;
+        traceClipped(w, content, trace_malformed_cap) catch return;
+        w.writeAll("\n") catch return;
         w.flush() catch {};
     }
 
@@ -858,6 +864,8 @@ const trace_reason_cap = 240;
 const trace_action_input_cap = 240;
 const trace_observation_cap = 600;
 const trace_final_cap = 240;
+const trace_malformed_cap = 800;
+const audit_malformed_tokens = 200;
 
 /// Compresses a parsed step into an arena-owned assistant history record without
 /// thought: `{"action":"<name>","action_input":"<raw input>"}`. thought is
@@ -872,6 +880,15 @@ fn compactStepJson(arena: std.mem.Allocator, action_name: []const u8, action_inp
     try jsonio.writeString(w, action_input);
     try w.writeByte('}');
     return aw.writer.buffered();
+}
+
+fn malformedAuditMessage(arena: std.mem.Allocator, parse_err: anyerror, content: []const u8) ![]const u8 {
+    const sample = try obs.truncateTokens(arena, content, audit_malformed_tokens);
+    return std.fmt.allocPrint(
+        arena,
+        "model output was not valid step JSON ({s}); fed back a correction and retried; raw sample: {s}",
+        .{ @errorName(parse_err), sample },
+    );
 }
 
 pub fn parseStep(arena: std.mem.Allocator, content: []const u8) !Step {
@@ -2057,6 +2074,31 @@ test "run: malformed backend step is corrected" {
         if (std.mem.indexOf(u8, m.content, "not valid step JSON") != null) saw_hint = true;
     }
     try std.testing.expect(saw_hint);
+}
+
+test "run: malformed backend step trace includes raw output sample" {
+    const gpa = std.testing.allocator;
+    var brain = ScriptedBrain{ .steps = &.{
+        "I will answer in prose instead of JSON.",
+        "{\"thought\":\"finish\",\"action\":\"final\",\"action_input\":\"ok\"}",
+    } };
+    var ag = testAgent(&brain, 16);
+
+    var trace_buf: [2048]u8 = undefined;
+    var trace_writer = std.Io.Writer.fixed(&trace_buf);
+    ag.trace = &trace_writer;
+
+    var sess = session.Session.init("test");
+    defer sess.deinit(gpa);
+    try sess.append(gpa, .user, "Start.");
+
+    const reply = try ag.run(gpa, &sess);
+    defer gpa.free(reply);
+
+    try std.testing.expectEqualStrings("ok", reply);
+    const trace = trace_writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, trace, "malformed model step (MalformedStep)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "I will answer in prose") != null);
 }
 
 test "run: max_turns returns MaxTurnsExceeded" {

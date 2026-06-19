@@ -82,6 +82,8 @@ pub const Client = struct {
     model: []const u8,
     /// API token. Empty means no Authorization header for local unauthenticated backends.
     api_key: []const u8 = "",
+    /// Hard timeout for one backend request. 0 disables the deadline.
+    timeout_ms: u64 = 120_000,
     /// Absolute custom CA bundle path (PEM); null scans system roots.
     ca_file: ?[]const u8 = null,
     /// Dynamic extra request-body fields, merged into the top-level body. See
@@ -144,19 +146,27 @@ pub const Client = struct {
         else
             "";
 
-        const result = try http_client.fetch(.{
-            .location = .{ .url = url },
-            .method = .POST,
-            .payload = body,
-            .headers = .{
-                .content_type = .{ .override = "application/json" },
-                .authorization = if (has_key) .{ .override = auth } else .default,
-            },
-            .response_writer = &resp.writer,
-        });
+        const fetched = fetchResponsesWithTimeout(
+            self.io,
+            &http_client,
+            url,
+            body,
+            has_key,
+            auth,
+            &resp,
+            self.timeout_ms,
+        );
+        if (fetched.timed_out) {
+            self.rememberBackendResponse(0, "backend request exceeded hard timeout");
+            return error.BackendError;
+        }
+        if (fetched.err) |e| {
+            self.rememberBackendResponse(0, e);
+            return error.BackendError;
+        }
 
-        const code = @intFromEnum(result.status);
-        const response_body = resp.writer.buffered();
+        const code = fetched.status;
+        const response_body = fetched.body;
         if (code < 200 or code >= 300) self.rememberBackendResponse(code, response_body);
         if (code == 401 or code == 403) return error.Unauthorized;
         if (code < 200 or code >= 300) return error.BackendError;
@@ -183,6 +193,83 @@ pub const Client = struct {
         self.last_error_body_truncated = body.len > n;
     }
 };
+
+const FetchResult = struct {
+    status: u16 = 0,
+    body: []const u8 = "",
+    timed_out: bool = false,
+    err: ?[]const u8 = null,
+};
+
+fn fetchResponsesWithTimeout(
+    io: std.Io,
+    http_client: *std.http.Client,
+    url: []const u8,
+    body: []const u8,
+    has_key: bool,
+    auth: []const u8,
+    resp: *std.Io.Writer.Allocating,
+    timeout_ms: u64,
+) FetchResult {
+    if (timeout_ms == 0)
+        return doFetchResponses(http_client, url, body, has_key, auth, resp);
+
+    const Outcome = union(enum) { done: FetchResult, timed_out: void };
+    var buf: [2]Outcome = undefined;
+    var sel = std.Io.Select(Outcome).init(io, &buf);
+
+    sel.concurrent(.done, doFetchResponses, .{ http_client, url, body, has_key, auth, resp }) catch {
+        return doFetchResponses(http_client, url, body, has_key, auth, resp);
+    };
+    sel.concurrent(.timed_out, sleepDeadline, .{ io, timeout_ms }) catch {
+        sel.cancelDiscard();
+        return doFetchResponses(http_client, url, body, has_key, auth, resp);
+    };
+
+    const winner = sel.await() catch |err| {
+        sel.cancelDiscard();
+        return .{ .err = @errorName(err) };
+    };
+    sel.cancelDiscard();
+
+    return switch (winner) {
+        .done => |r| r,
+        .timed_out => .{ .timed_out = true },
+    };
+}
+
+fn doFetchResponses(
+    http_client: *std.http.Client,
+    url: []const u8,
+    body: []const u8,
+    has_key: bool,
+    auth: []const u8,
+    resp: *std.Io.Writer.Allocating,
+) FetchResult {
+    const result = http_client.fetch(.{
+        .location = .{ .url = url },
+        .method = .POST,
+        .payload = body,
+        .headers = .{
+            .content_type = .{ .override = "application/json" },
+            .authorization = if (has_key) .{ .override = auth } else .default,
+        },
+        .response_writer = &resp.writer,
+    }) catch |e| return .{ .err = @errorName(e) };
+
+    return .{
+        .status = @intFromEnum(result.status),
+        .body = resp.writer.buffered(),
+    };
+}
+
+fn sleepDeadline(io: std.Io, timeout_ms: u64) void {
+    const d: std.Io.Clock.Duration = .{
+        .raw = std.Io.Duration.fromMilliseconds(@intCast(timeout_ms)),
+        .clock = .awake,
+    };
+    d.sleep(io) catch {};
+}
 
 /// Builds an OpenAI Responses request body. Leading consecutive `system` messages
 /// map to the top-level `instructions` field (the stable instruction prefix the
@@ -524,6 +611,26 @@ test "Client reports backend failure response" {
     try std.testing.expectEqual(@as(u16, 0), c.last_error_status);
     try std.testing.expectEqual(@as(usize, 0), c.lastErrorBody().len);
     try std.testing.expect(!c.last_error_body_truncated);
+}
+
+test "Client backend request timeout returns BackendError without hanging" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const io = std.testing.io;
+
+    var c = Client.init(io, "http://10.255.255.1/v1", "m", "");
+    c.timeout_ms = 300;
+    const msgs = [_]Message{.{ .role = .user, .content = "hi" }};
+
+    const t0 = std.Io.Clock.awake.now(io);
+    try std.testing.expectError(error.BackendError, c.chat(arena, &msgs, .{}));
+    const t1 = std.Io.Clock.awake.now(io);
+    const dt_ns = t0.durationTo(t1).nanoseconds;
+
+    try std.testing.expectEqual(@as(u16, 0), c.last_error_status);
+    try std.testing.expect(c.lastErrorBody().len > 0);
+    try std.testing.expect(dt_ns < 5 * std.time.ns_per_s);
 }
 
 test {

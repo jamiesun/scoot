@@ -49,6 +49,9 @@ pub fn request(
     body: ?[]const u8,
     opts: Options,
 ) !Response {
+    if (opts.timeout_ms == 0)
+        return doFetch(arena, io, method, url, body, opts);
+
     const Outcome = union(enum) { done: Response, timed_out: void };
     var buf: [2]Outcome = undefined;
     var sel = std.Io.Select(Outcome).init(io, &buf);
@@ -178,6 +181,16 @@ test "request hard timeout returns timed_out for blackhole address without hangi
     try std.testing.expect(resp.timed_out);
     // Should be far below the kernel connect timeout; 5s allows CI jitter.
     try std.testing.expect(dt_ns < 5 * std.time.ns_per_s);
+}
+
+test "request timeout_ms zero disables hard timeout instead of immediate timeout" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const io = std.testing.io;
+
+    const resp = try request(a, io, .GET, "http://127.0.0.1:1/", null, .{ .timeout_ms = 0 });
+    try std.testing.expect(!resp.timed_out);
 }
 
 test {
