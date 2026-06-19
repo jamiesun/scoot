@@ -16,6 +16,13 @@ heading when cutting a release.
 
 ## [Unreleased]
 
+### Added
+
+- Release workflow now publishes explicit `ReleaseSmall` assets with `-small`
+  suffixes for every supported target.
+- Installer supports `SCOOT_INSTALL_FLAVOR=small` to select the small release
+  artifact instead of the default `ReleaseSafe` artifact.
+
 ## [0.2.0] - 2026-06-19
 
 ### Added

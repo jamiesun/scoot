@@ -100,6 +100,16 @@ curl -fsSL https://raw.githubusercontent.com/jamiesun/scoot/main/install.sh | en
 The installer detects your OS/CPU, downloads the matching latest release asset
 and `.sha256` file, verifies the archive, and installs `scoot`.
 
+For resource-constrained hosts, install the explicit small build:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jamiesun/scoot/main/install.sh | env SCOOT_INSTALL_FLAVOR=small sh
+```
+
+The default release keeps Zig runtime safety checks. The small release minimizes
+binary size and disables those checks, so use it when footprint matters more
+than fail-fast diagnostics.
+
 To build from source instead, use **Zig 0.16.0 or newer**:
 
 ```sh
@@ -112,6 +122,7 @@ For an optimized binary:
 
 ```sh
 zig build -Doptimize=ReleaseSafe
+zig build -Doptimize=ReleaseSmall
 ```
 
 ### 2. Configure
@@ -326,9 +337,9 @@ Tagged releases publish:
 - `macos-amd64`
 - `macos-arm64`
 
-Each target artifact includes a `.tar.gz` archive and a `.sha256` checksum. The
-release also publishes `install.sh`, and each archive includes a copy of the
-same installer.
+Each target also publishes a `-small` variant built with `ReleaseSmall`. Every
+artifact includes a `.tar.gz` archive and a `.sha256` checksum. The release also
+publishes `install.sh`, and each archive includes a copy of the same installer.
 
 ## Documentation Policy
 

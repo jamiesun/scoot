@@ -15,6 +15,13 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 ## [未发布]
 
+### 新增
+
+- Release workflow 现在会为每个支持目标发布带 `-small` 后缀的
+  `ReleaseSmall` 产物。
+- 安装脚本支持 `SCOOT_INSTALL_FLAVOR=small`，可选择 small release 产物，
+  而不是默认的 `ReleaseSafe` 产物。
+
 ## [0.2.0] - 2026-06-19
 
 ### 新增

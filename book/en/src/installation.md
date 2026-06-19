@@ -33,7 +33,14 @@ curl -fsSL https://raw.githubusercontent.com/jamiesun/scoot/main/install.sh | en
 Pin a specific release when reproducibility matters:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/jamiesun/scoot/main/install.sh | env SCOOT_INSTALL_VERSION=v0.1.0 sh
+curl -fsSL https://raw.githubusercontent.com/jamiesun/scoot/main/install.sh | env SCOOT_INSTALL_VERSION=v0.2.0 sh
+```
+
+Install the smaller `ReleaseSmall` build when footprint matters more than
+runtime safety checks:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jamiesun/scoot/main/install.sh | env SCOOT_INSTALL_FLAVOR=small sh
 ```
 
 Supported installer environment variables:
@@ -42,8 +49,18 @@ Supported installer environment variables:
 | --- | --- | --- |
 | `SCOOT_INSTALL_DIR` | `/usr/local/bin` | Destination directory for the binary. |
 | `SCOOT_INSTALL_VERSION` | `latest` | Release tag to install, with or without leading `v`. |
+| `SCOOT_INSTALL_FLAVOR` | `safe` | `safe` installs the default `ReleaseSafe` artifact; `small` installs the `ReleaseSmall` artifact. |
 | `SCOOT_INSTALL_BINARY` | `scoot` | Installed binary name. |
 | `SCOOT_INSTALL_REPO` | `jamiesun/scoot` | GitHub repository to download from. |
+
+## Safe Vs Small Release Builds
+
+Tagged releases publish two binary flavors for every supported target:
+
+| Flavor | Zig optimize mode | Use when |
+| --- | --- | --- |
+| default | `ReleaseSafe` | You want the normal release with runtime safety checks and clearer fail-fast diagnostics. |
+| `small` | `ReleaseSmall` | You need a tiny binary for probes, edge devices, or minimal containers and accept fewer runtime safety checks. |
 
 ## Build From Source
 
@@ -60,7 +77,8 @@ For a production / embedded build, prefer a release optimization mode:
 
 ```sh
 zig build -Doptimize=ReleaseSafe   # recommended: keeps safety checks
-zig build -Doptimize=ReleaseFast   # smallest/fastest, fewer safety checks
+zig build -Doptimize=ReleaseFast   # fastest, fewer safety checks
+zig build -Doptimize=ReleaseSmall  # smallest, fewer safety checks
 ```
 
 Put the binary on your `PATH` if you like:
@@ -71,7 +89,8 @@ install -m 0755 zig-out/bin/scoot /usr/local/bin/scoot
 
 ## Install A Release Artifact
 
-Each tagged release publishes a `.tar.gz` per target plus a `.sha256` checksum.
+Each tagged release publishes a default `.tar.gz` per target plus a `-small`
+variant and `.sha256` checksums.
 
 ```sh
 # Pick the archive for your platform from the Releases page, then:
