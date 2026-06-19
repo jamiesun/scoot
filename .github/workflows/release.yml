@@ -20,18 +20,43 @@ jobs:
           - asset: linux-amd64
             target: x86_64-linux-musl
             cpu: ""
+            optimize: ReleaseSafe
           - asset: linux-arm64
             target: aarch64-linux-musl
             cpu: ""
+            optimize: ReleaseSafe
           - asset: linux-armv7
             target: arm-linux-musleabihf
             cpu: cortex_a7
+            optimize: ReleaseSafe
           - asset: macos-amd64
             target: x86_64-macos
             cpu: ""
+            optimize: ReleaseSafe
           - asset: macos-arm64
             target: aarch64-macos
             cpu: ""
+            optimize: ReleaseSafe
+          - asset: linux-amd64-small
+            target: x86_64-linux-musl
+            cpu: ""
+            optimize: ReleaseSmall
+          - asset: linux-arm64-small
+            target: aarch64-linux-musl
+            cpu: ""
+            optimize: ReleaseSmall
+          - asset: linux-armv7-small
+            target: arm-linux-musleabihf
+            cpu: cortex_a7
+            optimize: ReleaseSmall
+          - asset: macos-amd64-small
+            target: x86_64-macos
+            cpu: ""
+            optimize: ReleaseSmall
+          - asset: macos-arm64-small
+            target: aarch64-macos
+            cpu: ""
+            optimize: ReleaseSmall
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -44,7 +69,7 @@ jobs:
           echo "$PWD/zig-x86_64-linux-${version}" >> "$GITHUB_PATH"
           "$PWD/zig-x86_64-linux-${version}/zig" version
 
-      - name: Build ReleaseSafe
+      - name: Build ${{ matrix.optimize }}
         run: |
           # Embed the exact tag as the binary version (single source of truth at release time).
           # On a tag push GITHUB_REF_NAME is like "v0.0.3" → strip the leading "v".
@@ -54,9 +79,9 @@ jobs:
             *)  version_arg="" ;;
           esac
           if [ -n "${{ matrix.cpu }}" ]; then
-            zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} -Dcpu=${{ matrix.cpu }} $version_arg
+            zig build -Doptimize=${{ matrix.optimize }} -Dtarget=${{ matrix.target }} -Dcpu=${{ matrix.cpu }} $version_arg
           else
-            zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} $version_arg
+            zig build -Doptimize=${{ matrix.optimize }} -Dtarget=${{ matrix.target }} $version_arg
           fi
 
       - name: Create archive

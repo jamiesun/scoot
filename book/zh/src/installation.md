@@ -31,7 +31,13 @@ curl -fsSL https://raw.githubusercontent.com/jamiesun/scoot/main/install.sh | en
 需要可复现安装时，可以固定版本：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/jamiesun/scoot/main/install.sh | env SCOOT_INSTALL_VERSION=v0.1.0 sh
+curl -fsSL https://raw.githubusercontent.com/jamiesun/scoot/main/install.sh | env SCOOT_INSTALL_VERSION=v0.2.0 sh
+```
+
+当体积比运行时安全检查更重要时，可以安装更小的 `ReleaseSmall` 构建：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jamiesun/scoot/main/install.sh | env SCOOT_INSTALL_FLAVOR=small sh
 ```
 
 安装脚本支持的环境变量：
@@ -40,8 +46,18 @@ curl -fsSL https://raw.githubusercontent.com/jamiesun/scoot/main/install.sh | en
 | --- | --- | --- |
 | `SCOOT_INSTALL_DIR` | `/usr/local/bin` | 二进制安装目录。 |
 | `SCOOT_INSTALL_VERSION` | `latest` | 要安装的 release tag，可带或不带开头的 `v`。 |
+| `SCOOT_INSTALL_FLAVOR` | `safe` | `safe` 安装默认的 `ReleaseSafe` 产物；`small` 安装 `ReleaseSmall` 产物。 |
 | `SCOOT_INSTALL_BINARY` | `scoot` | 安装后的二进制名称。 |
 | `SCOOT_INSTALL_REPO` | `jamiesun/scoot` | 下载 release 的 GitHub 仓库。 |
+
+## Safe 与 Small 发布构建
+
+每个 tag 版本会为每个支持目标发布两种二进制：
+
+| 变体 | Zig optimize 模式 | 什么时候用 |
+| --- | --- | --- |
+| 默认 | `ReleaseSafe` | 需要常规 release，保留运行时安全检查和更清晰的 fail-fast 诊断。 |
+| `small` | `ReleaseSmall` | 需要极小二进制用于探针、边缘设备或极简容器，并接受更少运行时安全检查。 |
 
 ## 从源码构建
 
@@ -58,7 +74,8 @@ zig build run -- --version
 
 ```sh
 zig build -Doptimize=ReleaseSafe   # recommended: keeps safety checks
-zig build -Doptimize=ReleaseFast   # smallest/fastest, fewer safety checks
+zig build -Doptimize=ReleaseFast   # fastest, fewer safety checks
+zig build -Doptimize=ReleaseSmall  # smallest, fewer safety checks
 ```
 
 如果愿意，可以把二进制放到 `PATH` 上：
@@ -69,7 +86,8 @@ install -m 0755 zig-out/bin/scoot /usr/local/bin/scoot
 
 ## 安装发布产物
 
-每个 tag 版本会为每个目标发布一个 `.tar.gz` 以及一个 `.sha256` 校验和。
+每个 tag 版本会为每个目标发布默认 `.tar.gz`、一个 `-small` 变体，以及对应的
+`.sha256` 校验和。
 
 ```sh
 # Pick the archive for your platform from the Releases page, then:

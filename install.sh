@@ -5,6 +5,7 @@ REPO="${SCOOT_INSTALL_REPO:-jamiesun/scoot}"
 VERSION="${SCOOT_INSTALL_VERSION:-latest}"
 INSTALL_DIR="${SCOOT_INSTALL_DIR:-/usr/local/bin}"
 BINARY_NAME="${SCOOT_INSTALL_BINARY:-scoot}"
+FLAVOR="${SCOOT_INSTALL_FLAVOR:-safe}"
 
 log() {
   printf '%s\n' "$*" >&2
@@ -105,6 +106,20 @@ main() {
   need mktemp
 
   target="$(detect_target)"
+  case "$FLAVOR" in
+    safe|"")
+      artifact_target="$target"
+      flavor_label="safe"
+      ;;
+    small)
+      artifact_target="$target-small"
+      flavor_label="small"
+      ;;
+    *)
+      die "unsupported install flavor: $FLAVOR (expected: safe or small)"
+      ;;
+  esac
+
   if [ "$VERSION" = "latest" ]; then
     VERSION="$(latest_version)"
   fi
@@ -113,16 +128,18 @@ main() {
     *) VERSION="v$VERSION" ;;
   esac
 
-  artifact="scoot-$VERSION-$target.tar.gz"
+  artifact="scoot-$VERSION-$artifact_target.tar.gz"
   base_url="https://github.com/$REPO/releases/download/$VERSION"
 
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp" >/dev/null 2>&1 || true' EXIT INT TERM
 
-  log "Installing Scoot $VERSION for $target"
+  log "Installing Scoot $VERSION for $target ($flavor_label)"
   log "Downloading $artifact"
-  curl -fsSL "$base_url/$artifact" -o "$tmp/$artifact"
-  curl -fsSL "$base_url/$artifact.sha256" -o "$tmp/$artifact.sha256"
+  curl -fsSL "$base_url/$artifact" -o "$tmp/$artifact" ||
+    die "failed to download $artifact; choose SCOOT_INSTALL_FLAVOR=safe or pin a release that publishes this flavor"
+  curl -fsSL "$base_url/$artifact.sha256" -o "$tmp/$artifact.sha256" ||
+    die "failed to download $artifact.sha256"
 
   log "Verifying checksum"
   verify_checksum "$tmp/$artifact" "$tmp/$artifact.sha256"

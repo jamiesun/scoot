@@ -87,6 +87,15 @@ curl -fsSL https://raw.githubusercontent.com/jamiesun/scoot/main/install.sh | en
 安装脚本会识别 OS/CPU，下载匹配的 latest release 产物和 `.sha256` 文件，完成
 校验后安装 `scoot`。
 
+资源受限主机可以显式安装 small 构建：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jamiesun/scoot/main/install.sh | env SCOOT_INSTALL_FLAVOR=small sh
+```
+
+默认 release 保留 Zig 运行时安全检查。small release 优先压缩二进制体积，并会
+关闭这些检查；适合体积比 fail-fast 诊断更重要的场景。
+
 如果要从源码构建，需要 **Zig 0.16.0 或更新版本**：
 
 ```sh
@@ -99,6 +108,7 @@ zig build test
 
 ```sh
 zig build -Doptimize=ReleaseSafe
+zig build -Doptimize=ReleaseSmall
 ```
 
 ### 2. 配置
@@ -306,8 +316,9 @@ book/zh/             中文 mdBook 站点
 - `macos-amd64`
 - `macos-arm64`
 
-每个目标产物包含 `.tar.gz` 压缩包和 `.sha256` 校验文件。release 也会单独
-发布 `install.sh`，并且每个压缩包中也包含同一份安装脚本。
+每个目标还会发布一个用 `ReleaseSmall` 构建的 `-small` 变体。每个产物包含
+`.tar.gz` 压缩包和 `.sha256` 校验文件。release 也会单独发布 `install.sh`，
+并且每个压缩包中也包含同一份安装脚本。
 
 ## 文档同步规则
 
