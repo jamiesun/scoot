@@ -24,6 +24,8 @@ heading when cutting a release.
   artifact instead of the default `ReleaseSafe` artifact.
 - Native `recall` action can retrieve exact earlier messages from the current
   session transcript archive after active context compaction (#99).
+- Stable embedding API surface now separates the public package root from the
+  CLI/internal module and includes a compiled minimal embed example (#106).
 
 ### Changed
 

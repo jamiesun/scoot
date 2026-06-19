@@ -4,9 +4,14 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // `scoot` 库模块：汇总各子系统命名空间，供 CLI 与外部嵌入者复用。
+    // `scoot` 库模块：面向外部嵌入者的稳定公共 API。
     const mod = b.addModule("scoot", .{
         .root_source_file = b.path("src/root.zig"),
+        .target = target,
+    });
+    // 内部模块：CLI 可使用完整子系统命名空间，但不把它们承诺给外部嵌入者。
+    const internal_mod = b.addModule("scoot-internal", .{
+        .root_source_file = b.path("src/internal.zig"),
         .target = target,
     });
 
@@ -18,6 +23,7 @@ pub fn build(b: *std.Build) void {
     build_options.addOption([]const u8, "version", version);
     const build_options_mod = build_options.createModule();
     mod.addImport("build_options", build_options_mod);
+    internal_mod.addImport("build_options", build_options_mod);
 
     // `scoot` 可执行文件：CLI / REPL / Daemon 入口。
     const exe = b.addExecutable(.{
@@ -27,7 +33,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "scoot", .module = mod },
+                .{ .name = "scoot", .module = internal_mod },
                 .{ .name = "build_options", .module = build_options_mod },
             },
         }),
@@ -41,12 +47,28 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "构建并运行 scoot");
     run_step.dependOn(&run_cmd.step);
 
+    const embed_example = b.addExecutable(.{
+        .name = "scoot-embed-minimal",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/embed/minimal.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "scoot", .module = mod },
+            },
+        }),
+    });
+
     // zig build test
     const mod_tests = b.addTest(.{ .root_module = mod });
     const run_mod_tests = b.addRunArtifact(mod_tests);
+    const internal_tests = b.addTest(.{ .root_module = internal_mod });
+    const run_internal_tests = b.addRunArtifact(internal_tests);
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
     const run_exe_tests = b.addRunArtifact(exe_tests);
     const test_step = b.step("test", "运行全部测试");
     test_step.dependOn(&run_mod_tests.step);
+    test_step.dependOn(&run_internal_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+    test_step.dependOn(&embed_example.step);
 }

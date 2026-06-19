@@ -389,6 +389,17 @@ pub const Config = struct {
         return .{ .dirs = dirs, .active_config_file = dirs.config_toml_file };
     }
 
+    /// 从显式配置文件加载，同时使用给定运行目录承载 token/skills/logs/state。
+    /// 文件格式按扩展名判断：`.toml` 走 TOML，其余走 JSON。
+    pub fn loadFromFile(arena: std.mem.Allocator, io: std.Io, dirs: paths.Paths, file: []const u8, report: ?*LoadReport) !Config {
+        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, file, arena, config_read_limit);
+        const fc = if (std.mem.endsWith(u8, file, ".toml"))
+            try parseTomlConfig(arena, bytes, report)
+        else
+            try parseFileConfig(arena, bytes, report);
+        return fromFile(fc, dirs, file);
+    }
+
     fn fromFile(fc: FileConfig, dirs: paths.Paths, active: []const u8) Config {
         return .{
             .backend = fc.backend,

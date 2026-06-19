@@ -1,30 +1,38 @@
-//! Scoot — 轻量级 AI Agent 守护进程 (Daemon / CLI)。
-//! 本文件是 `scoot` 库模块的根：汇总并再导出各子系统命名空间，
-//! 既供 CLI (src/main.zig) 使用，也便于未来被其他可执行文件嵌入。
+//! Scoot stable library API.
+//!
+//! The package root is intentionally tiny: an opaque runtime lifecycle facade.
+//! CLI-only and implementation modules live behind `internal.zig` and are not
+//! part of the semver contract.
 const std = @import("std");
+const api = @import("api.zig");
 
-/// 语义化版本号。单一事实源为 build.zig.zon 的 `.version`，经 build.zig 通过 build_options
-/// 注入；发布时由 release 工作流用 `-Dversion=<tag>` 覆盖，确保二进制版本与 git tag 一致。
-pub const version = @import("build_options").version;
+pub const version = api.version;
+pub const Runtime = api.Runtime;
+pub const Options = api.Options;
+pub const start = api.start;
+pub const run = api.run;
+pub const stop = api.stop;
 
-pub const paths = @import("paths.zig");
-pub const config = @import("config.zig");
-pub const toml = @import("toml.zig");
-pub const secret = @import("secret.zig");
-pub const jsonio = @import("jsonio.zig");
-pub const llm = @import("llm.zig");
-pub const tools = @import("tools/tools.zig");
-pub const skill = @import("skill.zig");
-pub const wasm_tool = @import("wasm_tool.zig");
-pub const session = @import("session.zig");
-pub const compressor = @import("compressor.zig");
-pub const agent = @import("agent.zig");
-pub const obs = @import("obs.zig");
-pub const schedule = @import("schedule.zig");
-pub const daemon = @import("daemon.zig");
-pub const audit = @import("audit.zig");
-pub const policy = @import("policy.zig");
-pub const regex = @import("regex.zig");
+fn publicApiAllowed(name: []const u8) bool {
+    const allowed = [_][]const u8{
+        "version",
+        "Runtime",
+        "Options",
+        "start",
+        "run",
+        "stop",
+    };
+    for (allowed) |item| {
+        if (std.mem.eql(u8, item, name)) return true;
+    }
+    return false;
+}
+
+test "public API decls stay whitelisted (issue #106)" {
+    inline for (@typeInfo(@This()).@"struct".decls) |decl| {
+        try std.testing.expect(publicApiAllowed(decl.name));
+    }
+}
 
 test {
     std.testing.refAllDecls(@This());
