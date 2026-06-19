@@ -23,6 +23,11 @@ heading when cutting a release.
 - Installer supports `SCOOT_INSTALL_FLAVOR=small` to select the small release
   artifact instead of the default `ReleaseSafe` artifact.
 
+### Changed
+
+- Context compaction now goes through a `Compressor` strategy seam while keeping
+  the existing `drop` behavior as the default (#97).
+
 ## [0.2.0] - 2026-06-19
 
 ### Added
