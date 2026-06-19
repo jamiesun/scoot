@@ -39,6 +39,8 @@ pub const Agent = struct {
     max_turns: u32 = 32,
     /// 默认认知模式：goal / plan。
     default_mode: []const u8 = "goal",
+    /// 上下文压缩策略：drop（旧的有损计数标记，默认）/ extractive（确定式抽取纪要）。
+    compactor: []const u8 = "drop",
     /// 上下文预算（字节）：跨回合累计的提示历史超过此值时，先压缩历史（保留 system +
     /// 原始任务 + 最近若干回合，更早的工具原文替换为摘要标记，见 compressor.drop /
     /// issue #71）让 run 继续推进；仅当压缩后仍超限才在下次后端调用前 fail-fast（issue #28）。
@@ -433,6 +435,7 @@ pub const Config = struct {
 
         // agent
         try overrideEnvEnumString(env, "SCOOT_AGENT_DEFAULT_MODE", &self.agent.default_mode, &.{ "goal", "plan" }, &warnings, arena);
+        try overrideEnvEnumString(env, "SCOOT_AGENT_COMPACTOR", &self.agent.compactor, &.{ "drop", "extractive" }, &warnings, arena);
         try overrideEnvInt(u32, env, "SCOOT_AGENT_MAX_TURNS", &self.agent.max_turns, &warnings, arena);
         try overrideEnvInt(usize, env, "SCOOT_AGENT_CONTEXT_BUDGET_BYTES", &self.agent.context_budget_bytes, &warnings, arena);
 
@@ -687,7 +690,18 @@ test "parseFileConfig: 按节按字段合并，未指定字段保留默认" {
     try std.testing.expectEqualStrings("OPENAI_API_KEY", fc.backend.api_key_env);
     try std.testing.expectEqual(@as(u32, 8), fc.agent.max_turns);
     try std.testing.expectEqualStrings("goal", fc.agent.default_mode);
+    try std.testing.expectEqualStrings("drop", fc.agent.compactor);
     try std.testing.expectEqual(@as(u64, 5000), fc.tools.timeout_ms);
+}
+
+test "parseFileConfig: agent compactor 可配置" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const fc = try parseFileConfig(arena.allocator(),
+        \\{ "agent": { "compactor": "extractive", "context_budget_bytes": 120000 } }
+    , null);
+    try std.testing.expectEqualStrings("extractive", fc.agent.compactor);
+    try std.testing.expectEqual(@as(usize, 120000), fc.agent.context_budget_bytes);
 }
 
 test "parseFileConfig: 可选 token 来源与额外 skill 路径" {
@@ -809,6 +823,7 @@ test "applyEnvOverrides: 枚举字符串非法时告警且保留原值" {
     var map: std.process.Environ.Map = .init(std.testing.allocator);
     defer map.deinit();
     try map.put("SCOOT_AGENT_DEFAULT_MODE", "pla");
+    try map.put("SCOOT_AGENT_COMPACTOR", "semantic");
     try map.put("SCOOT_TOOLS_POLICY", "readonyl");
     try map.put("SCOOT_AUDIT_LEVEL", "verbose");
 
@@ -817,10 +832,12 @@ test "applyEnvOverrides: 枚举字符串非法时告警且保留原值" {
     try cfg.applyEnvOverrides(arena.allocator(), &map, &report);
 
     try std.testing.expectEqualStrings("goal", cfg.agent.default_mode);
+    try std.testing.expectEqualStrings("drop", cfg.agent.compactor);
     try std.testing.expectEqualStrings("guarded", cfg.tools.policy);
     try std.testing.expectEqualStrings("info", cfg.audit.level);
-    try std.testing.expectEqual(@as(usize, 3), report.env_warnings.len);
-    try std.testing.expect(std.mem.indexOf(u8, report.env_warnings[1], "SCOOT_TOOLS_POLICY") != null);
+    try std.testing.expectEqual(@as(usize, 4), report.env_warnings.len);
+    try std.testing.expect(std.mem.indexOf(u8, report.env_warnings[1], "SCOOT_AGENT_COMPACTOR") != null);
+    try std.testing.expect(std.mem.indexOf(u8, report.env_warnings[2], "SCOOT_TOOLS_POLICY") != null);
 }
 
 test "applyEnvOverrides: 整数/布尔项解析" {
@@ -829,6 +846,7 @@ test "applyEnvOverrides: 整数/布尔项解析" {
     var map: std.process.Environ.Map = .init(std.testing.allocator);
     defer map.deinit();
     try map.put("SCOOT_AGENT_MAX_TURNS", "7");
+    try map.put("SCOOT_AGENT_COMPACTOR", "extractive");
     try map.put("SCOOT_TOOLS_TIMEOUT_MS", "1234");
     try map.put("SCOOT_TOOLS_CONFINE_WRITES", "true");
     try map.put("SCOOT_TOOLS_BLOCK_INTERNAL_HTTP", "0");
@@ -839,6 +857,7 @@ test "applyEnvOverrides: 整数/布尔项解析" {
     try cfg.applyEnvOverrides(arena.allocator(), &map, null);
 
     try std.testing.expectEqual(@as(u32, 7), cfg.agent.max_turns);
+    try std.testing.expectEqualStrings("extractive", cfg.agent.compactor);
     try std.testing.expectEqual(@as(u64, 1234), cfg.tools.timeout_ms);
     try std.testing.expectEqual(true, cfg.tools.confine_writes);
     try std.testing.expectEqual(false, cfg.tools.block_internal_http);

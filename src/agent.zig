@@ -833,7 +833,7 @@ pub fn parseStep(arena: std.mem.Allocator, content: []const u8) !Step {
         action: []const u8,
         action_input: []const u8 = "",
     };
-    const step_json = firstStepJsonObject(content) orelse return error.MalformedStep;
+    const step_json = jsonio.firstJsonObject(content) orelse return error.MalformedStep;
     const v = std.json.parseFromSliceLeaky(Raw, arena, step_json, .{
         .ignore_unknown_fields = true,
     }) catch return error.MalformedStep;
@@ -841,51 +841,6 @@ pub fn parseStep(arena: std.mem.Allocator, content: []const u8) !Step {
     // 按 enum tag 名映射动作；新增动作只需扩 Action enum，无需改这里（反过载）。
     const action = std.meta.stringToEnum(Action, v.action) orelse return error.UnknownAction;
     return .{ .thought = v.thought, .action = action, .action_input = v.action_input };
-}
-
-/// 取模型输出中的第一个完整顶层 JSON 对象。部分兼容后端会无视 strict schema，
-/// 偶发把多个步骤连续吐在一条消息里；Scoot 仍只执行第一步，保持单步 ReACT 语义。
-fn firstStepJsonObject(content: []const u8) ?[]const u8 {
-    const trimmed = std.mem.trim(u8, content, " \t\r\n");
-    const body = unwrapJsonFence(trimmed);
-    if (body.len == 0 or body[0] != '{') return null;
-
-    var depth: usize = 0;
-    var in_string = false;
-    var escaped = false;
-    for (body, 0..) |c, i| {
-        if (in_string) {
-            if (escaped) {
-                escaped = false;
-            } else if (c == '\\') {
-                escaped = true;
-            } else if (c == '"') {
-                in_string = false;
-            }
-            continue;
-        }
-
-        switch (c) {
-            '"' => in_string = true,
-            '{' => depth += 1,
-            '}' => {
-                if (depth == 0) return null;
-                depth -= 1;
-                if (depth == 0) return body[0 .. i + 1];
-            },
-            else => {},
-        }
-    }
-    return null;
-}
-
-fn unwrapJsonFence(content: []const u8) []const u8 {
-    if (!std.mem.startsWith(u8, content, "```")) return content;
-    var rest = content[3..];
-    if (std.mem.startsWith(u8, rest, "json")) rest = rest[4..];
-    rest = std.mem.trim(u8, rest, " \t\r\n");
-    if (std.mem.endsWith(u8, rest, "```")) rest = rest[0 .. rest.len - 3];
-    return std.mem.trim(u8, rest, " \t\r\n");
 }
 
 /// 估算会话历史的提示体量（字节）：所有消息 content 长度之和。token 体量的粗略代理。

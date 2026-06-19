@@ -55,14 +55,19 @@ max_turns = 32
 # Default cognition mode. Supported today: "goal"; "plan" is reserved.
 default_mode = "goal"
 
+# Context compaction strategy:
+# - drop: default; replace older history with a compact count marker.
+# - extractive: keep a deterministic navigation summary of files, commands,
+#   policy denials, and notable observations.
+compactor = "drop"
+
 # Context budget in bytes for the cumulative prompt history across turns.
 # When the running transcript would exceed this, the agent first *compacts*
-# history — keeping the system prompt, the original task, and the most recent
-# turns while replacing older tool transcripts with a short summary marker — so
-# a long run can continue instead of aborting. It only fails fast (with a clear
-# error) if the history is still over budget after compaction (i.e. the budget
-# is too small for even the minimal retained context). Bytes are a coarse proxy
-# for tokens; pick a conservative value below your backend's context window.
+# history using the configured compactor, so a long run can continue instead of
+# aborting. It only fails fast (with a clear error) if the history is still over
+# budget after compaction (i.e. the budget is too small for even the minimal
+# retained context). Bytes are a coarse proxy for tokens; pick a conservative
+# value below your backend's context window.
 # 0 disables the check (turn-count bound by max_turns only); this is the default.
 context_budget_bytes = 0
 
