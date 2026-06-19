@@ -175,28 +175,29 @@ The cognition engine.
 | --- | --- | --- | --- |
 | `max_turns` | u32 | `32` | Maximum ReACT turns before the agent stops, to bound runaway loops. |
 | `default_mode` | string | `goal` | Cognition mode. `goal` is implemented today; `plan` is reserved (see Roadmap) and does not yet change execution. |
-| `compactor` | string | `drop` | Context compaction strategy: `drop` keeps the old count marker; `extractive` writes a deterministic summary of files, commands, denials, and notable observations. |
-| `context_budget_bytes` | usize | `0` | Cumulative prompt-history budget in **bytes**. `0` disables it. |
+| `compactor` | string | `extractive` | Context compaction strategy: `extractive` writes a deterministic summary of files, commands, denials, and notable observations; `drop` keeps the old count marker. |
+| `context_budget_bytes` | usize | `80000` | Cumulative prompt-history budget in **bytes**. `0` disables it. |
 
 **`context_budget_bytes`** guards small-context backends. When the running
 transcript would exceed this size, the agent first **compacts history** —
 keeping the system prompt, the original task, and the most recent turns while
-using `agent.compactor`. `drop` is the smallest and most conservative behavior:
-it replaces older tool transcripts with a short count marker. `extractive`
-keeps a deterministic navigation summary, such as files read or changed,
-commands and exit codes, policy denials, and obvious TODO-like observations.
+using `agent.compactor`. The default `extractive` strategy keeps a deterministic
+navigation summary, such as files read or changed, commands and exit codes,
+policy denials, and obvious TODO-like observations. `drop` is the smallest
+fallback behavior: it replaces older tool transcripts with a short count marker.
 It only fails fast (with a clear error) *before* the next backend call if the
 transcript is still over budget after compaction (the budget is too small for
-even the minimal retained context). Bytes are a coarse proxy for tokens — pick a
-conservative value below your backend's context window (turn count is still
-bounded by `max_turns`).
+even the minimal retained context). Bytes are a coarse proxy for tokens. The
+default is a conservative guardrail, not an exact model-window guarantee; set it
+below your backend's context window, or set it to `0` to disable this check
+(turn count is still bounded by `max_turns`).
 
 ```toml
 [agent]
 max_turns = 32
 default_mode = "goal"
-compactor = "drop"               # or "extractive"
-context_budget_bytes = 0          # e.g. 120000 for a ~32k-token backend
+compactor = "extractive"          # or "drop"
+context_budget_bytes = 80000      # 0 disables; tune below your backend window
 ```
 
 ---

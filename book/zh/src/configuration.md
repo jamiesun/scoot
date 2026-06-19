@@ -161,22 +161,23 @@ reasoning_effort = "high"
 | --- | --- | --- | --- |
 | `max_turns` | u32 | `32` | agent 停止前的最大 ReACT 回合数，用于约束失控循环。 |
 | `default_mode` | string | `goal` | 认知模式。`goal` 现已实现；`plan` 是保留项（见路线图），目前尚不改变执行。 |
-| `compactor` | string | `drop` | 上下文压缩策略：`drop` 保持旧的计数标记；`extractive` 写入确定式纪要，记录文件、命令、拒绝与关键观察。 |
-| `context_budget_bytes` | usize | `0` | 累积的提示历史预算，单位 **字节**。`0` 表示禁用。 |
+| `compactor` | string | `extractive` | 上下文压缩策略：`extractive` 写入确定式纪要，记录文件、命令、拒绝与关键观察；`drop` 保持旧的计数标记。 |
+| `context_budget_bytes` | usize | `80000` | 累积的提示历史预算，单位 **字节**。`0` 表示禁用。 |
 
 **`context_budget_bytes`** 用于保护小上下文后端。当运行中的对话记录将超过该大小时，
-agent 会先按 `agent.compactor` **压缩历史**。`drop` 是最小、最保守的旧行为：
-把更早的工具记录替换为计数标记。`extractive` 会写入确定式导航纪要，例如读过/改过的文件、
-命令与退出码、策略拒绝和明显的 TODO 观察。仅当压缩后对话记录仍超预算
+agent 会先按 `agent.compactor` **压缩历史**。默认 `extractive` 会写入确定式导航纪要，
+例如读过/改过的文件、命令与退出码、策略拒绝和明显的 TODO 观察。`drop` 是最小兜底行为：
+把更早的工具记录替换为计数标记。仅当压缩后对话记录仍超预算
 （预算过小、连最小保留集都放不下）时，才在下一次后端调用 *之前* 以清晰的错误 fail-fast。
-字节是 token 的粗略代理——选一个低于后端上下文窗口的保守值（回合数仍由 `max_turns` 约束）。
+字节是 token 的粗略代理；默认值只是可靠性护栏，不是精确模型窗口保证。应把它设为低于后端
+上下文窗口的保守值，或设为 `0` 显式关闭（回合数仍由 `max_turns` 约束）。
 
 ```toml
 [agent]
 max_turns = 32
 default_mode = "goal"
-compactor = "drop"               # 或 "extractive"
-context_budget_bytes = 0          # e.g. 120000 for a ~32k-token backend
+compactor = "extractive"          # 或 "drop"
+context_budget_bytes = 80000      # 0 表示关闭；按后端窗口调小
 ```
 
 ---

@@ -24,15 +24,16 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 ### 变更
 
-- 上下文压缩现在通过 `Compressor` 策略接缝执行，同时保持现有 `drop`
-  行为作为默认策略（#97）。
+- 上下文压缩现在通过 `Compressor` 策略接缝执行，`drop` 保留为最小兜底策略（#97）。
 - 新增内置 `extractive` 压缩器，并支持通过 `agent.compactor` /
-  `SCOOT_AGENT_COMPACTOR` 选择；默认仍为 `drop`（#97）。
+  `SCOOT_AGENT_COMPACTOR` 选择（#97）。
 
 ### 修复
 
 - `-e` 与 REPL 运行现在会获得每进程独立的 session transcript id，
   不再把所有运行追加进共享的 `cli.jsonl` 与 `repl.jsonl` 文件（#95）。
+- 默认 agent 配置现在会开启保守的上下文预算，并使用 `extractive`
+  压缩；`context_budget_bytes = 0` 仍可显式关闭该护栏（#96）。
 
 ## [0.2.0] - 2026-06-19
 

@@ -56,10 +56,10 @@ max_turns = 32
 default_mode = "goal"
 
 # Context compaction strategy:
-# - drop: default; replace older history with a compact count marker.
-# - extractive: keep a deterministic navigation summary of files, commands,
-#   policy denials, and notable observations.
-compactor = "drop"
+# - extractive: default; keep a deterministic navigation summary of files,
+#   commands, policy denials, and notable observations.
+# - drop: replace older history with a compact count marker.
+compactor = "extractive"
 
 # Context budget in bytes for the cumulative prompt history across turns.
 # When the running transcript would exceed this, the agent first *compacts*
@@ -68,8 +68,8 @@ compactor = "drop"
 # budget after compaction (i.e. the budget is too small for even the minimal
 # retained context). Bytes are a coarse proxy for tokens; pick a conservative
 # value below your backend's context window.
-# 0 disables the check (turn-count bound by max_turns only); this is the default.
-context_budget_bytes = 0
+# Set to 0 to disable the check (turn-count remains bounded by max_turns).
+context_budget_bytes = 80000
 
 [tools]
 # Hard timeout for each tool call, in milliseconds.
