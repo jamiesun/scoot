@@ -197,7 +197,6 @@ const StdioTransport = struct {
         }
 
         try multi_reader.checkAnyError();
-        _ = try child.wait(io);
 
         const stdout = try multi_reader.toOwnedSlice(0);
         const stderr = try multi_reader.toOwnedSlice(1);

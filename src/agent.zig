@@ -1342,7 +1342,6 @@ fn execReadTool(
             });
             break :blk try formatHttpResponse(arena, args.url, resp);
         },
-        .mcp_call => error.UnsupportedParallelAction,
         else => error.UnsupportedParallelAction,
     };
 }
