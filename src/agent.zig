@@ -61,7 +61,7 @@ pub const system_prompt =
     \\Each step must output exactly one JSON object matching the given schema, with three fields:
     \\  - "thought": one sentence explaining your reasoning.
     \\  - "action": one of the actions below.
-    \\  - "action_input": input for that action, formatted as described below.
+    \\  - "action_input": input for that action. It must be a JSON string. For tools whose input is JSON, put the escaped JSON object text inside this string, not a nested JSON object.
     \\
     \\Available actions:
     \\  - "bash": run one shell command; action_input is the command string. The command runs under POSIX sh (/bin/sh) in a hard-timeout sandbox, and its output is returned as the next observation. Use only portable POSIX syntax; avoid bash-specific forms such as [[ ]], arrays, {1..10} brace expansion, and $'...'.
@@ -924,19 +924,32 @@ fn malformedAuditMessage(arena: std.mem.Allocator, parse_err: anyerror, content:
 }
 
 pub fn parseStep(arena: std.mem.Allocator, content: []const u8) !Step {
-    const Raw = struct {
-        thought: []const u8 = "",
-        action: []const u8,
-        action_input: []const u8 = "",
-    };
     const step_json = jsonio.firstJsonObject(content) orelse return error.MalformedStep;
-    const v = std.json.parseFromSliceLeaky(Raw, arena, step_json, .{
-        .ignore_unknown_fields = true,
-    }) catch return error.MalformedStep;
+    const v = std.json.parseFromSliceLeaky(std.json.Value, arena, step_json, .{}) catch return error.MalformedStep;
+    if (v != .object) return error.MalformedStep;
+    const obj = v.object;
+
+    const thought = if (obj.get("thought")) |raw| blk: {
+        if (raw != .string) return error.MalformedStep;
+        break :blk raw.string;
+    } else "";
+    const action_raw = obj.get("action") orelse return error.MalformedStep;
+    if (action_raw != .string) return error.MalformedStep;
+    const action_input = if (obj.get("action_input")) |raw|
+        try actionInputString(arena, raw)
+    else
+        "";
 
     // Map action by enum tag; adding actions only extends Action enum.
-    const action = std.meta.stringToEnum(Action, v.action) orelse return error.UnknownAction;
-    return .{ .thought = v.thought, .action = action, .action_input = v.action_input };
+    const action = std.meta.stringToEnum(Action, action_raw.string) orelse return error.UnknownAction;
+    return .{ .thought = thought, .action = action, .action_input = action_input };
+}
+
+fn actionInputString(arena: std.mem.Allocator, value: std.json.Value) ![]const u8 {
+    if (value == .string) return value.string;
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    try aw.writer.print("{f}", .{std.json.fmt(value, .{})});
+    return aw.writer.buffered();
 }
 
 /// Estimates prompt size in bytes as the sum of message content lengths, a rough
@@ -1304,6 +1317,25 @@ test "parseStep parses actions" {
 
     const p = try parseStep(arena, "{\"thought\":\"sample\",\"action\":\"parallel\",\"action_input\":\"{\\\"calls\\\":[]}\"}");
     try std.testing.expectEqual(Action.parallel, p.action);
+}
+
+test "parseStep accepts nested JSON action_input from loose backends" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const http = try parseStep(arena,
+        \\{"thought":"weather","action":"http_request","action_input":{"method":"GET","url":"https://example.com/weather","body":null}}
+    );
+    try std.testing.expectEqual(Action.http_request, http.action);
+    try std.testing.expectEqualStrings("{\"method\":\"GET\",\"url\":\"https://example.com/weather\",\"body\":null}", http.action_input);
+
+    const parallel = try parseStep(arena,
+        \\{"thought":"fan out","action":"parallel","action_input":{"calls":[{"action":"file_read","input":"{\"path\":\"README.md\"}"}]}}
+    );
+    try std.testing.expectEqual(Action.parallel, parallel.action);
+    try std.testing.expectEqualStrings("{\"calls\":[{\"action\":\"file_read\",\"input\":\"{\\\"path\\\":\\\"README.md\\\"}\"}]}", parallel.action_input);
 }
 
 test "parseStep defensive malformed JSON and unknown action" {
