@@ -1858,7 +1858,7 @@ fn setupRun(
     ag.policy_mode = policy_mode;
     ag.ca_file = cfg.backend.ca_file;
     ag.context_budget_bytes = cfg.agent.context_budget_bytes;
-    ag.compactor = scoot.compressor.fromString(cfg.agent.compactor);
+    ag.compactor = try cfg.resolveCompressor(arena);
     ag.confine_writes = cfg.tools.confine_writes;
     ag.block_internal_http = cfg.tools.block_internal_http;
     ag.skills = skills;

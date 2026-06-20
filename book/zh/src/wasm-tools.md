@@ -29,6 +29,7 @@ scoot wasm-tools check path/to/tool
 `manifest.toml` 声明身份、入口、schema 和**请求的**能力：
 
 ```toml
+kind = "tool"
 name = "calculator"
 description = "Evaluate simple math expressions"
 entry = "call"
@@ -37,6 +38,9 @@ input_schema = "schema/input.json"
 output_schema = "schema/output.json"
 capabilities = ["compute"]
 ```
+
+为兼容旧包，`kind` 默认是 `tool`。外部上下文压缩器复用同一个静态包边界，但需要设置
+`kind = "compressor"`；Scoot 核心仍不会加载或执行 Wasm。
 
 `policy.toml` 声明实际**授予**的能力，且必须是 manifest 的**子集** —— 包不能悄悄获得它未声明的权限：
 

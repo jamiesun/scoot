@@ -9,6 +9,7 @@ const schedule = @import("schedule.zig");
 const policy = @import("policy.zig");
 const tomlmod = @import("toml.zig");
 const mcp_tool = @import("tools/mcp.zig");
+const compressor = @import("compressor.zig");
 
 pub const default_context_budget_bytes: usize = 80_000;
 
@@ -54,6 +55,26 @@ pub const Agent = struct {
     /// fail-fast (issue #28). 0 explicitly disables the budget, leaving only
     /// max_turns. Bytes are a rough token-size proxy with conservative headroom.
     context_budget_bytes: usize = default_context_budget_bytes,
+    /// Dynamic plugin configs keyed by name for compactor = "plugin:<name>".
+    /// TOML shape: [agent.compactor_plugin.<name>].
+    compactor_plugin: ?std.json.Value = null,
+
+    pub const CompactorPlugin = struct {
+        package: []const u8,
+        host: []const []const u8 = &.{},
+        timeout_ms: ?u64 = null,
+        stdout_limit: ?usize = null,
+        stderr_limit: ?usize = null,
+    };
+
+    pub fn findCompactorPlugin(self: Agent, arena: std.mem.Allocator, name: []const u8) !?CompactorPlugin {
+        const root = self.compactor_plugin orelse return null;
+        if (root != .object) return null;
+        const value = root.object.get(name) orelse return null;
+        return std.json.parseFromValueLeaky(CompactorPlugin, arena, value, .{
+            .ignore_unknown_fields = true,
+        }) catch error.InvalidConfig;
+    }
 };
 
 /// Tool sandbox configuration.
@@ -353,6 +374,22 @@ fn overrideEnvEnumString(
     try warnEnv(warnings, arena, name, "is not a supported value; ignored");
 }
 
+fn overrideEnvCompactor(
+    env: *const Environ.Map,
+    out: *[]const u8,
+    warnings: *std.ArrayList([]const u8),
+    arena: std.mem.Allocator,
+) std.mem.Allocator.Error!void {
+    const v = envVal(env, "SCOOT_AGENT_COMPACTOR") orelse return;
+    if (oneOf(v, &.{ "drop", "extractive" }) or
+        (std.mem.startsWith(u8, v, "plugin:") and v["plugin:".len..].len != 0))
+    {
+        out.* = try arena.dupe(u8, v);
+        return;
+    }
+    try warnEnv(warnings, arena, "SCOOT_AGENT_COMPACTOR", "must be drop, extractive, or plugin:<name>; ignored");
+}
+
 /// Parses config.json text into FileConfig. Blank content falls back to defaults;
 /// unknown fields are ignored for forward compatibility; malformed JSON returns
 /// error.InvalidConfig. Strings and arrays are allocated in arena.
@@ -510,7 +547,7 @@ pub const Config = struct {
 
         // Agent.
         try overrideEnvEnumString(env, "SCOOT_AGENT_DEFAULT_MODE", &self.agent.default_mode, &.{ "goal", "plan" }, &warnings, arena);
-        try overrideEnvEnumString(env, "SCOOT_AGENT_COMPACTOR", &self.agent.compactor, &.{ "drop", "extractive" }, &warnings, arena);
+        try overrideEnvCompactor(env, &self.agent.compactor, &warnings, arena);
         try overrideEnvInt(u32, env, "SCOOT_AGENT_MAX_TURNS", &self.agent.max_turns, &warnings, arena);
         try overrideEnvInt(usize, env, "SCOOT_AGENT_CONTEXT_BUDGET_BYTES", &self.agent.context_budget_bytes, &warnings, arena);
 
@@ -564,6 +601,24 @@ pub const Config = struct {
         try list.append(arena, self.dirs.skills_dir);
         for (self.skills.extra_paths) |p| try list.append(arena, p);
         return list.items;
+    }
+
+    pub fn resolveCompressor(self: Config, arena: std.mem.Allocator) !compressor.Compressor {
+        const base = compressor.fromString(self.agent.compactor);
+        return switch (base) {
+            .plugin => |p| blk: {
+                const plugin = try self.agent.findCompactorPlugin(arena, p.name) orelse break :blk base;
+                break :blk compressor.withPluginConfig(base, .{
+                    .name = p.name,
+                    .package = plugin.package,
+                    .host = plugin.host,
+                    .timeout_ms = plugin.timeout_ms orelse self.tools.timeout_ms,
+                    .stdout_limit = plugin.stdout_limit orelse (1 << 20),
+                    .stderr_limit = plugin.stderr_limit orelse (256 * 1024),
+                });
+            },
+            else => base,
+        };
     }
 };
 
@@ -645,6 +700,41 @@ test "parseTomlConfig: TOML to FileConfig with extra_body passthrough and per-se
     const eb = fc.backend.extra_body.?.object;
     try std.testing.expectEqualStrings("priority", eb.get("service_tier").?.string);
     try std.testing.expectEqualStrings("high", eb.get("reasoning_effort").?.string);
+}
+
+test "parseTomlConfig: agent compactor plugin tables are dynamic by name" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const src =
+        \\[agent]
+        \\compactor = "plugin:tiny"
+        \\
+        \\[agent.compactor_plugin.tiny]
+        \\package = "/opt/scoot/compressors/tiny"
+        \\host = ["/usr/bin/env", "tiny-host", "{package}", "{component}", "{entry}"]
+        \\timeout_ms = 2500
+        \\stdout_limit = 4096
+        \\stderr_limit = 1024
+    ;
+    const fc = try parseTomlConfig(arena.allocator(), src, null);
+    try std.testing.expectEqualStrings("plugin:tiny", fc.agent.compactor);
+    const plugin = (try fc.agent.findCompactorPlugin(arena.allocator(), "tiny")).?;
+    try std.testing.expectEqualStrings("/opt/scoot/compressors/tiny", plugin.package);
+    try std.testing.expectEqualStrings("tiny-host", plugin.host[1]);
+    try std.testing.expectEqual(@as(?u64, 2500), plugin.timeout_ms);
+    try std.testing.expectEqual(@as(?usize, 4096), plugin.stdout_limit);
+    try std.testing.expectEqual(@as(?usize, 1024), plugin.stderr_limit);
+
+    const cfg: Config = .{ .dirs = undefined, .agent = fc.agent };
+    const comp = try cfg.resolveCompressor(arena.allocator());
+    switch (comp) {
+        .plugin => |p| {
+            try std.testing.expectEqualStrings("tiny", p.name);
+            try std.testing.expectEqualStrings("/opt/scoot/compressors/tiny", p.package);
+            try std.testing.expectEqual(@as(u64, 2500), p.timeout_ms);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "parseTomlConfig: array of tables schedule.jobs maps correctly" {
@@ -1013,7 +1103,7 @@ test "applyEnvOverrides: integer/bool fields parse" {
     var map: std.process.Environ.Map = .init(std.testing.allocator);
     defer map.deinit();
     try map.put("SCOOT_AGENT_MAX_TURNS", "7");
-    try map.put("SCOOT_AGENT_COMPACTOR", "extractive");
+    try map.put("SCOOT_AGENT_COMPACTOR", "plugin:tiny");
     try map.put("SCOOT_BACKEND_TIMEOUT_MS", "9876");
     try map.put("SCOOT_TOOLS_TIMEOUT_MS", "1234");
     try map.put("SCOOT_TOOLS_CONFINE_WRITES", "true");
@@ -1026,7 +1116,7 @@ test "applyEnvOverrides: integer/bool fields parse" {
     try cfg.applyEnvOverrides(arena.allocator(), &map, null);
 
     try std.testing.expectEqual(@as(u32, 7), cfg.agent.max_turns);
-    try std.testing.expectEqualStrings("extractive", cfg.agent.compactor);
+    try std.testing.expectEqualStrings("plugin:tiny", cfg.agent.compactor);
     try std.testing.expectEqual(@as(u64, 9876), cfg.backend.timeout_ms);
     try std.testing.expectEqual(@as(u64, 1234), cfg.tools.timeout_ms);
     try std.testing.expectEqual(true, cfg.tools.confine_writes);

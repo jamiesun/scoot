@@ -66,6 +66,9 @@ default_mode = "goal"
 # - extractive: default; keep a deterministic navigation summary of files,
 #   commands, policy denials, and notable observations.
 # - drop: replace older history with a compact count marker.
+# - plugin:<name>: run an external compressor package declared below, then
+#   fall back to extractive/drop on timeout, bad output, policy denial, or
+#   over-budget output.
 compactor = "extractive"
 
 # Context budget in bytes for the cumulative prompt history across turns.
@@ -77,6 +80,19 @@ compactor = "extractive"
 # value below your backend's context window.
 # Set to 0 to disable the check (turn-count remains bounded by max_turns).
 context_budget_bytes = 80000
+
+# Optional external compressor plugin. The package uses the same static
+# descriptor boundary as wasm tool packages, but manifest.toml must set
+# kind = "compressor". The host is an argv template; supported placeholders:
+# {package}, {component}, {entry}. If omitted, Scoot tries {package}/{entry}.
+#
+# compactor = "plugin:tiny"
+# [agent.compactor_plugin.tiny]
+# package = "/opt/scoot/compressors/tiny"
+# host = ["/usr/bin/env", "tiny-compressor-host", "{package}", "{component}"]
+# timeout_ms = 30000
+# stdout_limit = 1048576
+# stderr_limit = 262144
 
 [tools]
 # Hard timeout for each tool call, in milliseconds.
