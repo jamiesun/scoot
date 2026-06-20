@@ -56,6 +56,7 @@ ephemeral, run-once-then-discard execution.
 | `SCOOT_TOOLS_CONFINE_WRITES` | `tools.confine_writes` | bool (`true`/`false`/`1`/`0`) |
 | `SCOOT_TOOLS_BLOCK_INTERNAL_HTTP` | `tools.block_internal_http` | bool |
 | `SCOOT_SKILLS_ENABLED` | `skills.enabled` | bool |
+| `SCOOT_SKILLS_INCLUDE_PROJECT_SKILLS` | `skills.include_project_skills` | bool |
 | `SCOOT_SKILLS_INCLUDE_AGENTS_SKILLS` | `skills.include_agents_skills` | bool |
 | `SCOOT_AUDIT_LEVEL` | `audit.level` | string |
 | `SCOOT_AUDIT_TO_FILE` | `audit.to_file` | bool |
@@ -109,7 +110,7 @@ Either way no secret is ever written to disk.
 | --- | --- |
 | `[backend]` | LLM endpoint, model, API-key source, TLS, extra request fields |
 | `[agent]` | ReACT turn limit, cognition mode, context budget |
-| `[tools]` | Tool timeout, execution policy, opt-in hardening |
+| `[tools]` | Tool timeout, execution policy, guarded hardening |
 | `[skills]` | Skill discovery toggle and extra search paths |
 | `[audit]` | Audit log level and file output |
 | `[schedule]` | Unattended scheduled jobs and the poll interval |
@@ -129,7 +130,7 @@ stays effective and token use stays bounded.
 | `model` | string | `qwen2.5` | Model name sent to the backend. |
 | `api_key_env` | string | `OPENAI_API_KEY` | Environment variable used as the **first** token source. |
 | `api_key_file` | string? | unset → `~/.scoot/token` | Path to a `0600` token file. Used after the env source. |
-| `api_key_cmd` | string? | unset | Command that prints a token (e.g. `pass show openai`). Used last. |
+| `api_key_cmd` | string? | unset | Command that prints a token (e.g. `pass show openai`). Used last. Treat as trusted config because it is executed by Scoot. |
 | `ca_file` | string? | unset → system roots | PEM CA bundle for HTTPS. Set this on systems lacking root certs. |
 | `store` | bool | `false` | Ask the backend to persist the response server-side via the Responses API `store` flag. Off by default to keep scoot stateless and local-first. |
 | `extra_body` | table? | unset | Extra top-level JSON fields merged into every request. |
@@ -200,8 +201,8 @@ for the full model.
 | --- | --- | --- | --- |
 | `timeout_ms` | u64 | `30000` | Hard timeout for **every** tool call, in milliseconds. |
 | `policy` | string | `guarded` | Execution policy: `guarded`, `readonly`, or `unrestricted` (alias `yolo`). Unknown values fall back to `guarded`. |
-| `confine_writes` | bool | `false` | Opt-in: keep `file_write`/`file_edit` inside the project root. **`guarded` only.** |
-| `block_internal_http` | bool | `false` | Opt-in: block `http_request` to internal/metadata hosts (SSRF guard). **`guarded` only.** |
+| `confine_writes` | bool | `true` | Keep `file_write`/`file_edit` inside the project root. **`guarded` only.** |
+| `block_internal_http` | bool | `true` | Block `http_request` to internal/metadata hosts (SSRF guard). **`guarded` only.** |
 
 Both hardening flags apply **only in `guarded` mode** — `readonly` already
 fail-closes writes and network. `confine_writes` rejects absolute paths, `..`
@@ -214,8 +215,8 @@ sandbox for real isolation.
 [tools]
 timeout_ms = 30000
 policy = "guarded"
-confine_writes = false
-block_internal_http = false
+confine_writes = true
+block_internal_http = true
 ```
 
 ---
@@ -227,15 +228,19 @@ Local skill discovery. See [Skills](skills.md).
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `enabled` | bool | `true` | Enable skill discovery and injection. |
+| `include_project_skills` | bool | `false` | Include `<cwd>/.agents/skills`, the repository-carried skill directory. Enable only for repositories you trust. |
 | `include_agents_skills` | bool | `false` | Include `~/.agents/skills`, the cross-agent user-level skill directory. |
 | `extra_paths` | list of string | `[]` | Additional skill search paths, appended after the built-in ones. |
 
 Skills are discovered in **priority order** (earlier wins on name collision):
 
-1. `<cwd>/.agents/skills` — project-local, travels with the repository.
+1. `<cwd>/.agents/skills` — project-local, only when `include_project_skills=true`.
 2. `~/.agents/skills` — cross-agent user-level skills, only when `include_agents_skills=true`.
 3. `~/.scoot/skills` — Scoot's own user-level directory.
 4. the `extra_paths` listed here.
+
+Project-local skills are disabled by default because repositories can carry
+untrusted instructions. Opt in per trusted workspace.
 
 Reading a skill's instructions is a native, read-only capability that works even
 in `readonly` mode; what a skill then tells the model to run is still
@@ -244,6 +249,7 @@ policy-gated.
 ```toml
 [skills]
 enabled = true
+include_project_skills = false
 include_agents_skills = false
 extra_paths = ["/opt/scoot/skills", "./skills"]
 ```

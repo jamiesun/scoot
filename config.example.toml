@@ -85,12 +85,12 @@ timeout_ms = 30000
 # Alias: "yolo" is parsed as unrestricted. Unknown values fall back to guarded.
 policy = "guarded"
 
-# Hardening (effective only in guarded mode; issues #32 / #50).
+# Hardening (effective only in guarded mode; issues #32 / #50 / #113).
 # readonly already fail-closes writes and network, so these matter for guarded only.
 # confine_writes: keep file_write/file_edit inside the project root; reject absolute
-#   paths, ".." escapes, and shell-style expansion (~ / $VAR). Opt-in (default false)
-#   to avoid breaking legitimate out-of-cwd writes.
-confine_writes = false
+#   paths, ".." escapes, and shell-style expansion (~ / $VAR). Defaults to true;
+#   set false only if you intentionally allow out-of-cwd writes.
+confine_writes = true
 # block_internal_http: reject http_request to loopback / private / link-local / cloud
 #   metadata hosts (SSRF guard). Defaults to true (issue #50): legitimate agent HTTP
 #   almost never targets these, so the friction is low and the SSRF win is high. Set
@@ -103,13 +103,17 @@ block_internal_http = true
 # Enable local Skill discovery.
 enabled = true
 
+# Include the project-local directory <cwd>/.agents/skills.
+# Default is false because repository-carried skills are untrusted until you opt in.
+include_project_skills = false
+
 # Include the cross-agent user-level directory ~/.agents/skills.
 # Default is false to avoid global skills polluting this agent's skill space.
 include_agents_skills = false
 
 # Extra Skill search paths, appended after the built-in ones. Skills are
 # discovered in priority order (earlier wins on name collision):
-#   1. <cwd>/.agents/skills  (project-local)
+#   1. <cwd>/.agents/skills  (only when include_project_skills=true)
 #   2. ~/.agents/skills      (only when include_agents_skills=true)
 #   3. ~/.scoot/skills       (Scoot's own user-level dir)
 #   4. these extra_paths

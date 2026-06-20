@@ -779,9 +779,9 @@ fn checkPolicyConfig(d: *Doctor, arena: std.mem.Allocator, cfg: scoot.config.Con
         try d.ok("tools.timeout_ms", try std.fmt.allocPrint(arena, "{d}ms", .{cfg.tools.timeout_ms}));
     }
 
-    // issue #50: make effective hardening explicit in doctor so guarded does not
-    // appear hardened when guardrails are disabled. block_internal_http defaults
-    // on, while confine_writes remains opt-in.
+    // issue #50/#113: make effective hardening explicit in doctor so guarded does
+    // not appear hardened when guardrails are disabled. block_internal_http and
+    // confine_writes both default on.
     const guarded = if (parsePolicyModeStrict(cfg.tools.policy)) |m| m == .guarded else false;
     if (cfg.tools.block_internal_http) {
         try d.ok("tools.block_internal_http", "enabled(rejects loopback/private/link-local/cloud metadata targets to narrow SSRF)");
@@ -793,7 +793,7 @@ fn checkPolicyConfig(d: *Doctor, arena: std.mem.Allocator, cfg: scoot.config.Con
     if (cfg.tools.confine_writes) {
         try d.ok("tools.confine_writes", "enabled(file_write/file_edit confined to the project root)");
     } else if (guarded) {
-        try d.info("tools.confine_writes", "disabled(opt-in;set true to confine writes to the project root)");
+        try d.warn("tools.confine_writes", "disabled: file_write/file_edit can target paths outside the project root; set true unless intentional");
     } else {
         try d.info("tools.confine_writes", "disabled (current policy mode does not force write confinement)");
     }
@@ -2177,8 +2177,8 @@ test "checkPolicyConfig: reports effective hardening guardrail state(issue #50)"
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    // Default mode (guarded + block_internal_http=true + confine_writes=false):
-    // SSRF guard should be OK, write confinement INFO because opt-in, no WARN.
+    // Default mode (guarded + block_internal_http=true + confine_writes=true):
+    // both hardening checks should be OK with no WARN.
     {
         var buf: [4096]u8 = undefined;
         var ow = Io.Writer.fixed(&buf);
@@ -2187,7 +2187,7 @@ test "checkPolicyConfig: reports effective hardening guardrail state(issue #50)"
         try checkPolicyConfig(&d, arena, cfg);
         const o = ow.buffered();
         try std.testing.expect(std.mem.indexOf(u8, o, "OK\ttools.block_internal_http") != null);
-        try std.testing.expect(std.mem.indexOf(u8, o, "INFO\ttools.confine_writes") != null);
+        try std.testing.expect(std.mem.indexOf(u8, o, "OK\ttools.confine_writes") != null);
         try std.testing.expectEqual(@as(usize, 0), d.warnings);
     }
 
@@ -2201,6 +2201,19 @@ test "checkPolicyConfig: reports effective hardening guardrail state(issue #50)"
         try checkPolicyConfig(&d, arena, cfg);
         const o = ow.buffered();
         try std.testing.expect(std.mem.indexOf(u8, o, "WARN\ttools.block_internal_http") != null);
+        try std.testing.expect(d.warnings >= 1);
+    }
+
+    // Explicitly disabling write confinement under guarded should WARN.
+    {
+        var buf: [4096]u8 = undefined;
+        var ow = Io.Writer.fixed(&buf);
+        var d = Doctor{ .out = &ow };
+        var cfg: scoot.config.Config = .{ .dirs = undefined };
+        cfg.tools.confine_writes = false;
+        try checkPolicyConfig(&d, arena, cfg);
+        const o = ow.buffered();
+        try std.testing.expect(std.mem.indexOf(u8, o, "WARN\ttools.confine_writes") != null);
         try std.testing.expect(d.warnings >= 1);
     }
 }

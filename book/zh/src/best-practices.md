@@ -211,6 +211,7 @@ mode = "readonly"
 
 ```sh
 scoot skills check .agents/skills/incident-triage
+SCOOT_SKILLS_INCLUDE_PROJECT_SKILLS=1 \
 scoot -e "Use the incident-triage skill to inspect this checkout and prepare a triage brief."
 ```
 
@@ -218,6 +219,7 @@ scoot -e "Use the incident-triage skill to inspect this checkout and prepare a t
 
 - skill 指令要具体、可审查；
 - 不要把密钥写进 skill 文件；
+- 只在可信仓库中开启项目本地 skills；
 - 生产工作优先使用项目本地 skills，而不是宽泛的用户全局 skills；
 - 读取 skill 文件即使在 `readonly` 下也可用，但 skill 要求 Scoot 执行的任何动作
   仍然会经过正常 policy gate。

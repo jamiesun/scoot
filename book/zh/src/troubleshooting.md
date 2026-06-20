@@ -64,8 +64,9 @@ scoot policy check bash "the command" --mode readonly
 
 - 看 `scoot skills`，确认解析出的搜索路径与发现结果。
 - 确保 `[skills] enabled = true`。
+- 对随仓库携带的项目技能，只在可信工作区设置 `[skills] include_project_skills = true`。
 - 校验该目录有合法 `SKILL.md`，且 `name` 与 `description` 非空：`scoot skills check path/to/skill`。
-- 记住优先级 —— 同名时靠前者胜（`<cwd>/.agents/skills` > 可选的 `~/.agents/skills` > `~/.scoot/skills` > `extra_paths`）。
+- 记住优先级 —— 同名时靠前者胜（可选的 `<cwd>/.agents/skills` > 可选的 `~/.agents/skills` > `~/.scoot/skills` > `extra_paths`）。
 
 ### 技能在 `readonly` 下用不了
 

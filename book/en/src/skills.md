@@ -46,10 +46,13 @@ rejected until Scoot defines version gates.
 
 Skills are discovered in **priority order** (earlier wins on a name collision):
 
-1. `<cwd>/.agents/skills` — project-local, travels with the repository.
+1. `<cwd>/.agents/skills` — project-local, only when `[skills] include_project_skills = true`.
 2. `~/.agents/skills` — cross-agent user-level skills, only when `[skills] include_agents_skills = true`.
 3. `~/.scoot/skills` — Scoot's own user-level directory.
 4. any `extra_paths` from `[skills]` in your config.
+
+Project-local skills are disabled by default because repositories can carry
+untrusted instructions. Enable them only for workspaces you trust.
 
 `scoot skills` prints the resolved paths and everything discovered. Configure
 extra locations via [`[skills]`](configuration.md#skills).

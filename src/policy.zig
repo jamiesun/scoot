@@ -94,9 +94,12 @@ pub fn evaluate(arena: std.mem.Allocator, command: []const u8, mode: Mode) Decis
     // Normalize by collapsing whitespace to one space and lowercasing, defeating
     // spacing/case evasions such as `rm  -RF   /`.
     const norm = normalize(arena, raw) catch return .{ .deny = "command is too long to validate safely" };
+    const compact = removeWhitespace(arena, norm) catch return .{ .deny = "command is too long to validate safely" };
 
     for (catastrophic_patterns) |pat| {
         if (std.mem.indexOf(u8, norm, pat) != null)
+            return .{ .deny = "matched catastrophic command tripwire (irreversible or destructive operation)" };
+        if (std.mem.indexOf(u8, compact, pat) != null)
             return .{ .deny = "matched catastrophic command tripwire (irreversible or destructive operation)" };
     }
     if (mode == .guarded) return .allow;
@@ -414,6 +417,18 @@ fn normalize(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
     return out[0..n];
 }
 
+fn removeWhitespace(arena: std.mem.Allocator, s: []const u8) ![]const u8 {
+    if (s.len > 1 << 16) return error.TooLong;
+    var out = try arena.alloc(u8, s.len);
+    var n: usize = 0;
+    for (s) |c| {
+        if (c == ' ' or c == '\t' or c == '\r' or c == '\n') continue;
+        out[n] = c;
+        n += 1;
+    }
+    return out[0..n];
+}
+
 const testing = std.testing;
 
 test "fromString: unknown value falls back to guarded for config safety" {
@@ -441,6 +456,8 @@ test "guarded:catastrophic commands are blocked including whitespace/case evasio
         "dd if=/dev/zero of=/dev/sda",
         "shutdown -h now",
         "rm --no-preserve-root -rf /",
+        ":(){ :|:& };:",
+        ":(){\n:|:&\n};:",
     };
     for (cases) |c| {
         switch (evaluate(a, c, .guarded)) {

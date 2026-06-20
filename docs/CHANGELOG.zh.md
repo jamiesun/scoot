@@ -34,6 +34,8 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
   顶层 `instructions` 字段，其余进入 `input` 数组，且传输默认无状态（每轮重发完整
   `input`），让本地上下文压缩始终掌控全局。需要支持 Responses 的后端，例如
   Ollama >= 0.13.3、vLLM 或 OpenAI（#110）。
+- `guarded` 模式现在默认把文件写入限制在项目根目录内，工具观察结果会用明确的
+  不可信数据边界包裹，并且随仓库携带的 `<cwd>/.agents/skills` 需要显式开启（#113）。
 - 上下文压缩现在通过 `Compressor` 策略接缝执行，`drop` 保留为最小兜底策略（#97）。
 - 新增内置 `extractive` 压缩器，并支持通过 `agent.compactor` /
   `SCOOT_AGENT_COMPACTOR` 选择（#97）。
@@ -53,6 +55,9 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
   不再把所有运行追加进共享的 `cli.jsonl` 与 `repl.jsonl` 文件（#95）。
 - 默认 agent 配置现在会开启保守的上下文预算，并使用 `extractive`
   压缩；`context_budget_bytes = 0` 仍可显式关闭该护栏（#96）。
+- 灾难性 shell 命令检测现在也能拦截用空白字符混淆的 fork bomb 模式（#113）。
+- GitHub workflows 现在把 action 引用固定到 commit SHA，并在解压前校验下载的
+  Zig 工具链 tarball checksum（#113）。
 
 ## [0.2.0] - 2026-06-19
 

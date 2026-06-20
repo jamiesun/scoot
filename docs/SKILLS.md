@@ -20,10 +20,13 @@ still subject to the normal tool policy gates when used.
 Skills are discovered from these locations, in priority order (earlier wins on
 name collision):
 
-1. `<cwd>/.agents/skills` — project-local, travels with the repository.
+1. `<cwd>/.agents/skills` — project-local, only when `[skills] include_project_skills = true`.
 2. `~/.agents/skills` — cross-agent user-level skills, only when `[skills] include_agents_skills = true`.
 3. `~/.scoot/skills` — Scoot's own user-level skill directory.
 4. Any `extra_paths` declared in `[skills]` of the config.
+
+Project-local skills are disabled by default because repositories can carry
+untrusted instructions. Enable them only for workspaces you trust.
 
 `scoot skills` prints the resolved search paths and everything discovered.
 
@@ -116,7 +119,7 @@ policy-exempt, it can read **any file under a registered skill directory**, in
 addition to the `evaluateReadPath`-gated project reads. The registered skill
 directories are the same four search roots listed above:
 
-1. `<cwd>/.agents/skills`
+1. `<cwd>/.agents/skills` when `[skills] include_project_skills = true`
 2. `~/.agents/skills` when `[skills] include_agents_skills = true`
 3. `~/.scoot/skills`
 4. any `extra_paths` declared in `[skills]`
