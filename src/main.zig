@@ -359,7 +359,7 @@ pub fn main(init: std.process.Init) !void {
         // no trace rather than blocking the run.
         var sink: AuditSink = .{};
         const session_id = try interactiveSessionId(arena, io, "cli");
-        const setup = try setupRun(&client, &sink, err_out, arena, io, cfg, session_id, scoot.policy.Mode.fromString(cfg.tools.policy));
+        const setup = try setupRun(&client, &sink, err_out, arena, io, env, cfg, session_id, scoot.policy.Mode.fromString(cfg.tools.policy));
         var sess = setup.sess;
         var ag = setup.agent;
         try sess.append(arena, .user, prompt);
@@ -1393,6 +1393,7 @@ fn printSchedule(out: *Io.Writer, cfg: scoot.config.Config) !void {
 const RunCtx = struct {
     out: *Io.Writer,
     io: std.Io,
+    env: *const std.process.Environ.Map,
     cfg: scoot.config.Config,
     client: *scoot.llm.Client,
     /// Each job allocates scratch here, then resets with retain_capacity.
@@ -1412,7 +1413,7 @@ const RunCtx = struct {
         const sid = std.fmt.allocPrint(a, "job-{s}", .{job.id}) catch return;
         // schedule/daemon stdout is the run log, so degradation warnings go to self.out.
         var sink: AuditSink = .{};
-        const setup = setupRun(self.client, &sink, self.out, a, self.io, self.cfg, sid, eff) catch return;
+        const setup = setupRun(self.client, &sink, self.out, a, self.io, self.env, self.cfg, sid, eff) catch return;
         var sess = setup.sess;
         var ag = setup.agent;
         sess.append(a, .user, job.goal) catch {};
@@ -1518,6 +1519,7 @@ fn runSchedule(
     var rctx = RunCtx{
         .out = out,
         .io = io,
+        .env = env,
         .cfg = cfg,
         .client = &client,
         .job_arena = &job_arena,
@@ -1589,6 +1591,7 @@ fn runDaemon(
     var rctx = RunCtx{
         .out = out,
         .io = io,
+        .env = env,
         .cfg = cfg,
         .client = &client,
         .job_arena = &job_arena,
@@ -1844,6 +1847,7 @@ fn setupRun(
     warn: *Io.Writer,
     arena: std.mem.Allocator,
     io: std.Io,
+    env: *const std.process.Environ.Map,
     cfg: scoot.config.Config,
     session_id: []const u8,
     policy_mode: scoot.policy.Mode,
@@ -1857,6 +1861,7 @@ fn setupRun(
     ag.tool_timeout_ms = cfg.tools.timeout_ms;
     ag.policy_mode = policy_mode;
     ag.ca_file = cfg.backend.ca_file;
+    ag.env = env;
     ag.context_budget_bytes = cfg.agent.context_budget_bytes;
     ag.compactor = try cfg.resolveCompressor(arena);
     ag.confine_writes = cfg.tools.confine_writes;
@@ -1897,7 +1902,7 @@ fn runRepl(
     var client = try initBackendClient(out, cfg, arena, io, env);
     var sink: AuditSink = .{};
     const session_id = try interactiveSessionId(arena, io, "repl");
-    const setup = try setupRun(&client, &sink, out, arena, io, cfg, session_id, scoot.policy.Mode.fromString(cfg.tools.policy));
+    const setup = try setupRun(&client, &sink, out, arena, io, env, cfg, session_id, scoot.policy.Mode.fromString(cfg.tools.policy));
     var sess = setup.sess;
     var ag = setup.agent;
     // Match -e/--eval: trace goes to stderr so stdout conversation can redirect cleanly.

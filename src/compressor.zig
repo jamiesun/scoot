@@ -719,7 +719,7 @@ test "plugin: external compressor marker replaces folded span" {
     const root = "/tmp/scoot_compressor_plugin_good";
     cwd.deleteTree(io, root) catch {};
     defer cwd.deleteTree(io, root) catch {};
-    try writeCompressorPackage(io, root, "compressor", &.{"compute"}, &.{"compute"}, "printf '%s\\n' '{\"marker\":\"PLUGIN-MARKER\"}'\n");
+    try writeCompressorPackage(io, root, "compressor", &.{"compute"}, &.{"compute"}, "cat >/dev/null\nprintf '%s\\n' '{\"marker\":\"PLUGIN-MARKER\"}'\n");
 
     var s = session.Session.init("plugin-good");
     defer s.deinit(gpa);

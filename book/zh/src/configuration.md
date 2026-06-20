@@ -288,13 +288,18 @@ extra_paths = ["/opt/scoot/skills", "./skills"]
 | 键 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `name` | string | `""` | `mcp_call.server` 使用的名称。 |
-| `transport` | string | `stdio` | 当前支持 `stdio`。`http` / `streamable_http` 与 `sse` 可写入配置，但执行时会返回暂未支持。 |
+| `transport` | string | `stdio` | 支持 `stdio`、Streamable HTTP（`http` / `streamable_http`）和 legacy `sse`。 |
 | `command` | string | `""` | stdio transport 要启动的命令。 |
 | `args` | list of string | `[]` | 传给 `command` 的参数。 |
 | `env` | list of `{ name, value }` | `[]` | 子进程环境覆盖块。若设置，请包含子进程需要的一切变量，例如 `PATH`。 |
 | `allowed_tools` | list of string | `[]` | 显式工具 allowlist。为空即拒绝全部。 |
 | `policy` | string | `readonly` | 用于审计和未来策略扩展的 server 姿态声明。 |
-| `url` | string? | 未设置 | 为 HTTP/SSE transport 预留。 |
+| `url` | string? | 未设置 | HTTP/SSE transport 的远程端点 URL。 |
+| `headers` | header object 列表 | `[]` | 远程 transport 的额外 HTTP header。密钥请用 `value_env`。 |
+
+Header object 支持 `name`、`value`/`value_env` 二选一，以及可选 `prefix`。
+`Accept`、`Content-Type`、`MCP-Protocol-Version`、`Mcp-Session-Id` 等协议头由
+Scoot 管理，不能覆盖。`value_env` 缺失或为空时，调用会 fail-closed。
 
 ```toml
 [[mcp.servers]]
@@ -308,9 +313,21 @@ policy = "readonly"
 
 [[mcp.servers]]
 name = "remote-demo"
-transport = "http"                # 预留；暂未实现
+transport = "http"
 url = "https://example.com/mcp"
 allowed_tools = ["lookup"]
+headers = [
+  { name = "Authorization", value_env = "REMOTE_MCP_TOKEN", prefix = "Bearer " },
+]
+
+[[mcp.servers]]
+name = "legacy-sse-demo"
+transport = "sse"
+url = "https://example.com/sse"
+allowed_tools = ["lookup"]
+headers = [
+  { name = "X-API-Key", value_env = "REMOTE_MCP_API_KEY" },
+]
 ```
 
 ---

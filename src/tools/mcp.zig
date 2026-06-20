@@ -25,6 +25,16 @@ pub const EnvVar = struct {
     value: []const u8,
 };
 
+pub const Header = struct {
+    name: []const u8,
+    /// Literal non-secret value. Prefer value_env for credentials.
+    value: ?[]const u8 = null,
+    /// Environment variable containing the value. Missing or empty env fails closed.
+    value_env: ?[]const u8 = null,
+    /// Optional prefix prepended to either value source, e.g. "Bearer ".
+    prefix: []const u8 = "",
+};
+
 pub const Server = struct {
     name: []const u8 = "",
     transport: []const u8 = "stdio",
@@ -37,6 +47,8 @@ pub const Server = struct {
     policy: []const u8 = "readonly",
     /// Reserved for Streamable HTTP / legacy SSE transports.
     url: ?[]const u8 = null,
+    /// Extra HTTP headers for remote transports. Use value_env for secrets.
+    headers: []const Header = &.{},
 };
 
 pub const CallArgs = struct {
@@ -49,6 +61,8 @@ pub const Options = struct {
     timeout_ms: u64 = 30_000,
     stdout_limit: usize = 1 << 20,
     stderr_limit: usize = 1 << 20,
+    ca_file: ?[]const u8 = null,
+    env: ?*const std.process.Environ.Map = null,
 };
 
 pub fn findServer(servers: []const Server, name: []const u8) ?Server {
@@ -112,28 +126,91 @@ const Transport = union(TransportKind) {
 const HttpTransport = struct {
     fn call(
         _: HttpTransport,
-        _: std.mem.Allocator,
-        _: std.Io,
-        _: Server,
-        _: []const u8,
-        _: ?std.json.Value,
-        _: Options,
+        arena: std.mem.Allocator,
+        io: std.Io,
+        server: Server,
+        tool: []const u8,
+        args: ?std.json.Value,
+        opts: Options,
     ) ![]const u8 {
-        return error.UnsupportedMcpTransport;
+        const url = server.url orelse return error.McpMissingUrl;
+        var session_id: ?[]const u8 = null;
+
+        const init = try initializeRequest(arena);
+        const init_resp = try postJson(arena, io, server, url, init, session_id, opts);
+        if (!statusOk(init_resp.status)) return error.McpHttpStatus;
+        session_id = init_resp.session_id orelse session_id;
+        _ = try responseValue(arena, init_resp.body, 1);
+
+        const initialized = try initializedNotification(arena);
+        const initialized_resp = try postJson(arena, io, server, url, initialized, session_id, opts);
+        if (!statusOkOrAccepted(initialized_resp.status)) return error.McpHttpStatus;
+
+        const list = try toolsListRequest(arena);
+        const list_resp = try postJson(arena, io, server, url, list, session_id, opts);
+        if (!statusOk(list_resp.status)) return error.McpHttpStatus;
+        _ = try responseValue(arena, list_resp.body, 2);
+
+        const call_req = try toolsCallRequest(arena, tool, args);
+        const call_resp = try postJson(arena, io, server, url, call_req, session_id, opts);
+        if (!statusOk(call_resp.status)) return error.McpHttpStatus;
+        return try formatResponse(arena, server.name, tool, call_resp.body, "");
     }
 };
 
 const SseTransport = struct {
     fn call(
         _: SseTransport,
-        _: std.mem.Allocator,
-        _: std.Io,
-        _: Server,
-        _: []const u8,
-        _: ?std.json.Value,
-        _: Options,
+        arena: std.mem.Allocator,
+        io: std.Io,
+        server: Server,
+        tool: []const u8,
+        args: ?std.json.Value,
+        opts: Options,
     ) ![]const u8 {
-        return error.UnsupportedMcpTransport;
+        const sse_url = server.url orelse return error.McpMissingUrl;
+
+        var client: std.http.Client = .{ .allocator = arena, .io = io };
+        defer client.deinit();
+        try configureCa(arena, io, &client, opts.ca_file);
+
+        const uri = try std.Uri.parse(sse_url);
+        var req = try client.request(.GET, uri, .{
+            .headers = .{
+                .accept_encoding = .{ .override = "identity" },
+            },
+            .extra_headers = try extraHeaders(arena, server, null, "text/event-stream", opts),
+            .keep_alive = false,
+        });
+        defer req.deinit();
+        try req.sendBodiless();
+
+        var redirect_buffer: [8 * 1024]u8 = undefined;
+        var response = try req.receiveHead(&redirect_buffer);
+        if (!statusOk(@intFromEnum(response.head.status))) return error.McpHttpStatus;
+
+        var transfer_buffer: [64]u8 = undefined;
+        const reader = response.reader(&transfer_buffer);
+
+        const endpoint_event = try readSseEvent(arena, io, reader, opts);
+        if (!std.mem.eql(u8, endpoint_event.event, "endpoint")) return error.McpProtocolError;
+        const endpoint = try resolveEndpoint(arena, sse_url, endpoint_event.data);
+
+        const init = try initializeRequest(arena);
+        try postSseMessage(arena, io, server, endpoint, init, opts);
+        _ = try readSseResponse(arena, io, reader, 1, opts);
+
+        const initialized = try initializedNotification(arena);
+        try postSseMessage(arena, io, server, endpoint, initialized, opts);
+
+        const list = try toolsListRequest(arena);
+        try postSseMessage(arena, io, server, endpoint, list, opts);
+        _ = try readSseResponse(arena, io, reader, 2, opts);
+
+        const call_req = try toolsCallRequest(arena, tool, args);
+        try postSseMessage(arena, io, server, endpoint, call_req, opts);
+        const body = try readSseResponse(arena, io, reader, 3, opts);
+        return try formatResponse(arena, server.name, tool, body, "");
     }
 };
 
@@ -217,11 +294,38 @@ fn requestStream(arena: std.mem.Allocator, tool: []const u8, args: ?std.json.Val
     var aw: std.Io.Writer.Allocating = .init(arena);
     const w = &aw.writer;
 
+    try w.writeAll(try initializeRequest(arena));
+    try w.writeByte('\n');
+    try w.writeAll(try initializedNotification(arena));
+    try w.writeByte('\n');
+    try w.writeAll(try toolsListRequest(arena));
+    try w.writeByte('\n');
+    try w.writeAll(try toolsCallRequest(arena, tool, args));
+    try w.writeByte('\n');
+
+    return aw.written();
+}
+
+fn initializeRequest(arena: std.mem.Allocator) ![]const u8 {
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    const w = &aw.writer;
     try w.writeAll("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":");
     try jsonio.writeString(w, protocol_version);
-    try w.writeAll(",\"capabilities\":{},\"clientInfo\":{\"name\":\"scoot\",\"version\":\"0\"}}}\n");
-    try w.writeAll("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}\n");
-    try w.writeAll("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n");
+    try w.writeAll(",\"capabilities\":{},\"clientInfo\":{\"name\":\"scoot\",\"version\":\"0\"}}}");
+    return aw.written();
+}
+
+fn initializedNotification(arena: std.mem.Allocator) ![]const u8 {
+    return std.fmt.allocPrint(arena, "{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{{}}}}", .{});
+}
+
+fn toolsListRequest(arena: std.mem.Allocator) ![]const u8 {
+    return std.fmt.allocPrint(arena, "{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{{}}}}", .{});
+}
+
+fn toolsCallRequest(arena: std.mem.Allocator, tool: []const u8, args: ?std.json.Value) ![]const u8 {
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    const w = &aw.writer;
     try w.writeAll("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":");
     try jsonio.writeString(w, tool);
     try w.writeAll(",\"arguments\":");
@@ -230,9 +334,223 @@ fn requestStream(arena: std.mem.Allocator, tool: []const u8, args: ?std.json.Val
     } else {
         try w.writeAll("{}");
     }
-    try w.writeAll("}}\n");
-
+    try w.writeAll("}}");
     return aw.written();
+}
+
+const HttpExchange = struct {
+    status: u16,
+    body: []const u8,
+    session_id: ?[]const u8 = null,
+};
+
+fn postJson(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    server: Server,
+    url: []const u8,
+    payload: []const u8,
+    session_id: ?[]const u8,
+    opts: Options,
+) !HttpExchange {
+    if (opts.timeout_ms == 0) return doPostJson(arena, io, server, url, payload, session_id, opts);
+
+    const Outcome = union(enum) { done: PostAttempt, timed_out: void };
+    var buf: [2]Outcome = undefined;
+    var sel = std.Io.Select(Outcome).init(io, &buf);
+    sel.concurrent(.done, doPostJsonAttempt, .{ arena, io, server, url, payload, session_id, opts }) catch {
+        return doPostJson(arena, io, server, url, payload, session_id, opts);
+    };
+    sel.concurrent(.timed_out, sleepDeadline, .{ io, opts.timeout_ms }) catch {
+        sel.cancelDiscard();
+        return doPostJson(arena, io, server, url, payload, session_id, opts);
+    };
+
+    const winner = sel.await() catch {
+        sel.cancelDiscard();
+        return error.Canceled;
+    };
+    sel.cancelDiscard();
+    return switch (winner) {
+        .done => |r| switch (r) {
+            .ok => |exchange| exchange,
+            .err => |err| err,
+        },
+        .timed_out => error.Timeout,
+    };
+}
+
+const PostAttempt = union(enum) {
+    ok: HttpExchange,
+    err: anyerror,
+};
+
+fn doPostJsonAttempt(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    server: Server,
+    url: []const u8,
+    payload: []const u8,
+    session_id: ?[]const u8,
+    opts: Options,
+) PostAttempt {
+    return .{ .ok = doPostJson(arena, io, server, url, payload, session_id, opts) catch |err| return .{ .err = err } };
+}
+
+fn doPostJson(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    server: Server,
+    url: []const u8,
+    payload: []const u8,
+    session_id: ?[]const u8,
+    opts: Options,
+) !HttpExchange {
+    var client: std.http.Client = .{ .allocator = arena, .io = io };
+    defer client.deinit();
+    try configureCa(arena, io, &client, opts.ca_file);
+
+    const uri = try std.Uri.parse(url);
+    var req = try client.request(.POST, uri, .{
+        .headers = .{
+            .content_type = .{ .override = "application/json" },
+            .accept_encoding = .{ .override = "identity" },
+        },
+        .extra_headers = try extraHeaders(arena, server, session_id, "application/json, text/event-stream", opts),
+        .keep_alive = false,
+    });
+    defer req.deinit();
+
+    req.transfer_encoding = .{ .content_length = payload.len };
+    var body = try req.sendBodyUnflushed(&.{});
+    try body.writer.writeAll(payload);
+    try body.end();
+    try req.connection.?.flush();
+
+    var redirect_buffer: [8 * 1024]u8 = undefined;
+    var response = try req.receiveHead(&redirect_buffer);
+    const status: u16 = @intFromEnum(response.head.status);
+    const sid = try responseSessionId(arena, response.head);
+
+    var transfer_buffer: [64]u8 = undefined;
+    const reader = response.reader(&transfer_buffer);
+    var out: std.Io.Writer.Allocating = .init(arena);
+    _ = reader.streamRemaining(&out.writer) catch |err| switch (err) {
+        error.ReadFailed => return response.bodyErr().?,
+        else => |e| return e,
+    };
+    if (opts.stdout_limit != 0 and out.written().len > opts.stdout_limit) return error.McpOutputTooLarge;
+    return .{ .status = status, .body = out.written(), .session_id = sid };
+}
+
+fn postSseMessage(arena: std.mem.Allocator, io: std.Io, server: Server, url: []const u8, payload: []const u8, opts: Options) !void {
+    const resp = try postJson(arena, io, server, url, payload, null, opts);
+    if (!statusOkOrAccepted(resp.status)) return error.McpHttpStatus;
+}
+
+fn responseSessionId(arena: std.mem.Allocator, head: std.http.Client.Response.Head) !?[]const u8 {
+    var it = head.iterateHeaders();
+    while (it.next()) |h| {
+        if (std.ascii.eqlIgnoreCase(h.name, "mcp-session-id"))
+            return @as(?[]const u8, try arena.dupe(u8, h.value));
+    }
+    return null;
+}
+
+fn extraHeaders(
+    arena: std.mem.Allocator,
+    server: Server,
+    session_id: ?[]const u8,
+    accept: []const u8,
+    opts: Options,
+) ![]const std.http.Header {
+    var headers: std.ArrayList(std.http.Header) = .empty;
+    try headers.append(arena, .{ .name = "Accept", .value = accept });
+    try headers.append(arena, .{ .name = "MCP-Protocol-Version", .value = protocol_version });
+    if (session_id) |sid| try headers.append(arena, .{ .name = "Mcp-Session-Id", .value = sid });
+
+    for (server.headers) |h| {
+        try validateUserHeader(h);
+        try headers.append(arena, .{
+            .name = h.name,
+            .value = try resolveHeaderValue(arena, h, opts.env),
+        });
+    }
+    return headers.items;
+}
+
+fn validateUserHeader(h: Header) !void {
+    if (!validHeaderName(h.name)) return error.McpInvalidHeader;
+    if (isReservedHeaderName(h.name)) return error.McpInvalidHeader;
+    const has_value = h.value != null;
+    const has_env = h.value_env != null;
+    if (has_value == has_env) return error.McpInvalidHeader;
+    if (h.value_env) |name| if (name.len == 0) return error.McpInvalidHeader;
+    if (headerValueHasNewline(h.prefix)) return error.McpInvalidHeader;
+    if (h.value) |value| if (headerValueHasNewline(value)) return error.McpInvalidHeader;
+}
+
+fn resolveHeaderValue(arena: std.mem.Allocator, h: Header, env: ?*const std.process.Environ.Map) ![]const u8 {
+    const raw = if (h.value) |value|
+        value
+    else blk: {
+        const map = env orelse return error.McpMissingHeaderEnv;
+        const name = h.value_env orelse return error.McpInvalidHeader;
+        const value = map.get(name) orelse return error.McpMissingHeaderEnv;
+        if (value.len == 0) return error.McpMissingHeaderEnv;
+        break :blk value;
+    };
+    if (h.prefix.len == 0) return raw;
+    return std.fmt.allocPrint(arena, "{s}{s}", .{ h.prefix, raw });
+}
+
+fn validHeaderName(name: []const u8) bool {
+    if (name.len == 0) return false;
+    for (name) |c| {
+        if (c <= 0x20 or c >= 0x7f or c == ':') return false;
+    }
+    return true;
+}
+
+fn headerValueHasNewline(value: []const u8) bool {
+    return std.mem.indexOfScalar(u8, value, '\r') != null or
+        std.mem.indexOfScalar(u8, value, '\n') != null;
+}
+
+fn isReservedHeaderName(name: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(name, "accept") or
+        std.ascii.eqlIgnoreCase(name, "content-type") or
+        std.ascii.eqlIgnoreCase(name, "content-length") or
+        std.ascii.eqlIgnoreCase(name, "mcp-protocol-version") or
+        std.ascii.eqlIgnoreCase(name, "mcp-session-id");
+}
+
+fn configureCa(arena: std.mem.Allocator, io: std.Io, client: *std.http.Client, ca_file: ?[]const u8) !void {
+    if (ca_file) |path| {
+        const now = std.Io.Clock.real.now(io);
+        try client.ca_bundle.addCertsFromFilePathAbsolute(arena, io, now, path);
+        client.now = now;
+    }
+}
+
+fn sleepDeadline(io: std.Io, timeout_ms: u64) void {
+    const d: std.Io.Clock.Duration = .{
+        .raw = std.Io.Duration.fromMilliseconds(@intCast(timeout_ms)),
+        .clock = .awake,
+    };
+    d.sleep(io) catch {};
+}
+
+fn statusOk(status: u16) bool {
+    return status >= 200 and status < 300 and status != 202;
+}
+
+fn statusOkOrAccepted(status: u16) bool {
+    return status >= 200 and status < 300;
+}
+
+fn responseValue(arena: std.mem.Allocator, body: []const u8, want_id: i64) !std.json.Value {
+    return findResponse(arena, body, want_id);
 }
 
 fn formatResponse(
@@ -284,7 +602,159 @@ fn findResponse(arena: std.mem.Allocator, stdout: []const u8, want_id: i64) !std
         const idv = value.object.get("id") orelse continue;
         if (idMatches(idv, want_id)) return value;
     }
+    if (findSseResponse(arena, stdout, want_id)) |value| return value else |err| switch (err) {
+        error.McpProtocolError => {},
+        else => |e| return e,
+    }
     return error.McpProtocolError;
+}
+
+const SseEvent = struct {
+    event: []const u8 = "message",
+    data: []const u8,
+};
+
+fn findSseResponse(arena: std.mem.Allocator, text: []const u8, want_id: i64) !std.json.Value {
+    var data: std.ArrayList(u8) = .empty;
+    var saw_data = false;
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const line = std.mem.trim(u8, raw, " \t\r\n");
+        if (line.len == 0) {
+            if (saw_data) {
+                if (try parseMaybeWantedResponse(arena, data.items, want_id)) |value| return value;
+                data.clearRetainingCapacity();
+                saw_data = false;
+            }
+            continue;
+        }
+        if (std.mem.startsWith(u8, line, "data:")) {
+            if (data.items.len != 0) try data.append(arena, '\n');
+            try data.appendSlice(arena, std.mem.trim(u8, line["data:".len..], " "));
+            saw_data = true;
+        }
+    }
+    if (saw_data) {
+        if (try parseMaybeWantedResponse(arena, data.items, want_id)) |value| return value;
+    }
+    return error.McpProtocolError;
+}
+
+fn parseMaybeWantedResponse(arena: std.mem.Allocator, data: []const u8, want_id: i64) !?std.json.Value {
+    const value = std.json.parseFromSliceLeaky(std.json.Value, arena, data, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+    if (value != .object) return null;
+    const idv = value.object.get("id") orelse return null;
+    return if (idMatches(idv, want_id)) value else null;
+}
+
+fn readSseResponse(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    reader: *std.Io.Reader,
+    want_id: i64,
+    opts: Options,
+) ![]const u8 {
+    while (true) {
+        const event = try readSseEvent(arena, io, reader, opts);
+        if (event.data.len == 0) continue;
+        const value = std.json.parseFromSliceLeaky(std.json.Value, arena, event.data, .{}) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => continue,
+        };
+        if (value != .object) continue;
+        const idv = value.object.get("id") orelse continue;
+        if (idMatches(idv, want_id)) return event.data;
+    }
+}
+
+fn readSseEvent(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    reader: *std.Io.Reader,
+    opts: Options,
+) !SseEvent {
+    if (opts.timeout_ms == 0) return readSseEventBlocking(arena, reader, opts.stdout_limit);
+
+    const Outcome = union(enum) { event: SseAttempt, timed_out: void };
+    var buf: [2]Outcome = undefined;
+    var sel = std.Io.Select(Outcome).init(io, &buf);
+    sel.concurrent(.event, readSseEventAttempt, .{ arena, reader, opts.stdout_limit }) catch {
+        return readSseEventBlocking(arena, reader, opts.stdout_limit);
+    };
+    sel.concurrent(.timed_out, sleepDeadline, .{ io, opts.timeout_ms }) catch {
+        sel.cancelDiscard();
+        return readSseEventBlocking(arena, reader, opts.stdout_limit);
+    };
+
+    const winner = sel.await() catch {
+        sel.cancelDiscard();
+        return error.Canceled;
+    };
+    sel.cancelDiscard();
+    return switch (winner) {
+        .event => |attempt| switch (attempt) {
+            .ok => |event| event,
+            .err => |err| err,
+        },
+        .timed_out => error.Timeout,
+    };
+}
+
+const SseAttempt = union(enum) {
+    ok: SseEvent,
+    err: anyerror,
+};
+
+fn readSseEventAttempt(arena: std.mem.Allocator, reader: *std.Io.Reader, limit: usize) SseAttempt {
+    return .{ .ok = readSseEventBlocking(arena, reader, limit) catch |err| return .{ .err = err } };
+}
+
+fn readSseEventBlocking(arena: std.mem.Allocator, reader: *std.Io.Reader, limit: usize) !SseEvent {
+    var event_name: []const u8 = "message";
+    var data: std.ArrayList(u8) = .empty;
+    while (true) {
+        const maybe_line = reader.takeDelimiter('\n') catch |err| switch (err) {
+            error.StreamTooLong => return error.McpOutputTooLarge,
+            else => |e| return e,
+        };
+        const raw = maybe_line orelse {
+            if (data.items.len == 0) return error.McpProtocolError;
+            return .{ .event = event_name, .data = data.items };
+        };
+        const line = std.mem.trim(u8, raw, " \t\r\n");
+        if (line.len == 0) {
+            if (data.items.len == 0) continue;
+            return .{ .event = event_name, .data = data.items };
+        }
+        if (std.mem.startsWith(u8, line, "event:")) {
+            event_name = try arena.dupe(u8, std.mem.trim(u8, line["event:".len..], " \t"));
+        } else if (std.mem.startsWith(u8, line, "data:")) {
+            if (data.items.len != 0) try data.append(arena, '\n');
+            try data.appendSlice(arena, std.mem.trim(u8, line["data:".len..], " "));
+            if (limit != 0 and data.items.len > limit) return error.McpOutputTooLarge;
+        }
+    }
+}
+
+fn resolveEndpoint(arena: std.mem.Allocator, base: []const u8, endpoint_raw: []const u8) ![]const u8 {
+    const endpoint = std.mem.trim(u8, endpoint_raw, " \t\r\n");
+    if (std.mem.startsWith(u8, endpoint, "http://") or std.mem.startsWith(u8, endpoint, "https://"))
+        return arena.dupe(u8, endpoint);
+
+    const scheme_end = std.mem.indexOf(u8, base, "://") orelse return error.McpProtocolError;
+    const authority_start = scheme_end + "://".len;
+    const path_start = std.mem.indexOfScalarPos(u8, base, authority_start, '/') orelse base.len;
+    if (std.mem.startsWith(u8, endpoint, "/")) {
+        return std.fmt.allocPrint(arena, "{s}{s}", .{ base[0..path_start], endpoint });
+    }
+    const dir_end = if (std.mem.lastIndexOfScalar(u8, base[path_start..], '/')) |rel|
+        path_start + rel + 1
+    else
+        base.len;
+    return std.fmt.allocPrint(arena, "{s}{s}", .{ base[0..dir_end], endpoint });
 }
 
 fn idMatches(v: std.json.Value, want: i64) bool {
@@ -343,6 +813,54 @@ test "mcp: stdio request stream contains initialize/list/call" {
     try std.testing.expect(std.mem.indexOf(u8, got, "\"arguments\":{\"x\":1}") != null);
 }
 
+test "mcp: HTTP request builders emit single JSON-RPC messages" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const args = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"city\":\"长沙\"}", .{});
+
+    const init = try initializeRequest(arena);
+    try std.testing.expect(std.mem.indexOf(u8, init, "\"id\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, init, "\"method\":\"initialize\"") != null);
+
+    const call_req = try toolsCallRequest(arena, "weather", args);
+    try std.testing.expect(std.mem.indexOf(u8, call_req, "\"id\":3") != null);
+    try std.testing.expect(std.mem.indexOf(u8, call_req, "\"method\":\"tools/call\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, call_req, "\"arguments\":{\"city\":\"长沙\"}") != null);
+}
+
+test "mcp: remote headers resolve env credentials and reject protocol overrides" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("REMOTE_MCP_TOKEN", "sekret");
+
+    const headers = try extraHeaders(arena, .{
+        .name = "remote",
+        .headers = &.{
+            .{ .name = "Authorization", .value_env = "REMOTE_MCP_TOKEN", .prefix = "Bearer " },
+            .{ .name = "X-Client", .value = "scoot-test" },
+        },
+    }, "sid-1", "application/json", .{ .env = &env });
+    try std.testing.expectEqual(@as(usize, 5), headers.len);
+    try std.testing.expectEqualStrings("Mcp-Session-Id", headers[2].name);
+    try std.testing.expectEqualStrings("Authorization", headers[3].name);
+    try std.testing.expectEqualStrings("Bearer sekret", headers[3].value);
+    try std.testing.expectEqualStrings("X-Client", headers[4].name);
+    try std.testing.expectEqualStrings("scoot-test", headers[4].value);
+
+    try std.testing.expectError(error.McpInvalidHeader, extraHeaders(arena, .{
+        .name = "remote",
+        .headers = &.{.{ .name = "MCP-Protocol-Version", .value = "bad" }},
+    }, null, "application/json", .{}));
+    try std.testing.expectError(error.McpMissingHeaderEnv, extraHeaders(arena, .{
+        .name = "remote",
+        .headers = &.{.{ .name = "Authorization", .value_env = "MISSING", .prefix = "Bearer " }},
+    }, null, "application/json", .{ .env = &env }));
+}
+
 test "mcp: stdio fake server formats tools/call result" {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
@@ -378,10 +896,36 @@ test "mcp: stdio fake server formats tools/call result" {
     try std.testing.expect(std.mem.indexOf(u8, out, "pong") != null);
 }
 
-test "mcp: allowed tools fail closed and http/sse are reserved" {
+test "mcp: allowed tools fail closed and streamable_http aliases http" {
     try std.testing.expect(!toolAllowed(.{ .name = "s" }, "read"));
     try std.testing.expect(toolAllowed(.{ .name = "s", .allowed_tools = &.{"read"} }, "read"));
     try std.testing.expectEqual(TransportKind.http, TransportKind.fromString("streamable_http").?);
+}
+
+test "mcp: SSE response body can carry JSON-RPC tools/call result" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const body = "event: message\r\n" ++
+        "data: {\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"from-sse\"}],\"isError\":false}}\r\n" ++
+        "\r\n";
+    const out = try formatResponse(arena, "remote", "lookup", body, "");
+    try std.testing.expect(std.mem.indexOf(u8, out, "mcp remote/lookup returned") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "from-sse") != null);
+}
+
+test "mcp: legacy SSE endpoint resolves relative URLs" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    try std.testing.expectEqualStrings(
+        "https://example.test/messages?session=1",
+        try resolveEndpoint(arena, "https://example.test/mcp/sse", "/messages?session=1"),
+    );
+    try std.testing.expectEqualStrings(
+        "https://example.test/mcp/messages",
+        try resolveEndpoint(arena, "https://example.test/mcp/sse", "messages"),
+    );
 }
 
 test {
