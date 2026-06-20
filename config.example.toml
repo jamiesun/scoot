@@ -18,6 +18,10 @@ base_url = "http://127.0.0.1:11434/v1"
 # Model name sent to the backend.
 model = "qwen2.5"
 
+# Hard timeout for each backend Responses API call, in milliseconds.
+# Set to 0 only if you intentionally want no backend deadline.
+timeout_ms = 120000
+
 # Ask the backend to persist the response server-side via the Responses API
 # `store` flag. Off by default to keep Scoot stateless and local-first: the
 # full input is resent each turn so local context compaction stays in control.

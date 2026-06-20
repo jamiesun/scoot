@@ -71,6 +71,7 @@ pub fn start(gpa: std.mem.Allocator, io: std.Io, options: Options) !*Runtime {
         try config.Config.loadFromDirs(arena, io, dirs, &report);
     try cfg.applyEnvOverrides(arena, options.env, &report);
     try cfg.dirs.ensure(io);
+    if (cfg.agent.max_turns == 0) return error.InvalidAgentConfig;
 
     const token_value = if (cfg.resolveToken(arena, io, options.env)) |secret|
         secret.value
@@ -82,6 +83,7 @@ pub fn start(gpa: std.mem.Allocator, io: std.Io, options: Options) !*Runtime {
 
     state.client = llm.Client.init(io, cfg.backend.base_url, cfg.backend.model, token);
     state.client.ca_file = cfg.backend.ca_file;
+    state.client.timeout_ms = cfg.backend.timeout_ms;
     state.client.extra_body = cfg.backend.extra_body;
     state.client.model_ctx.store = cfg.backend.store;
 

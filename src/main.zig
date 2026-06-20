@@ -284,6 +284,7 @@ pub fn main(init: std.process.Init) !void {
         try out.print("  Logs:     {s}\n", .{cfg.dirs.logs_dir});
         try out.print("Backend:       {s} (model={s})\n", .{ cfg.backend.base_url, cfg.backend.model });
         if (cfg.backend.ca_file) |ca| try out.print("  CA:       {s}\n", .{ca});
+        try out.print("  timeout:  {d}ms\n", .{cfg.backend.timeout_ms});
         if (cfg.backend.extra_body) |eb| try out.print("  extra fields: {f}\n", .{std.json.fmt(eb, .{})});
         if (cfg.backend.store)
             try out.print("  store: server-side response storage enabled\n", .{});
@@ -322,6 +323,7 @@ pub fn main(init: std.process.Init) !void {
             try printSchedule(out, cfg);
             return;
         } else if (eql(action, "run")) {
+            validateAgentRuntimeConfig(out, cfg);
             try runSchedule(out, arena, io, env, cfg, schedule_ticks);
             return;
         } else {
@@ -332,6 +334,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (cmd_daemon) |action| {
         if (eql(action, "run")) {
+            validateAgentRuntimeConfig(out, cfg);
             try runDaemon(out, arena, io, env, cfg, schedule_ticks);
             return;
         } else if (eql(action, "status")) {
@@ -347,6 +350,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (eval_prompt) |prompt| {
+        validateAgentRuntimeConfig(err_out, cfg);
         // In one-shot `-e`, stdout carries only the final answer for scripts and
         // pipes, so warnings/errors go to stderr (issue #23).
         var client = try initBackendClient(err_out, cfg, arena, io, env);
@@ -380,18 +384,15 @@ pub fn main(init: std.process.Init) !void {
                 }
 
                 if (ag.audit) |lg| lg.log(.system_error, @errorName(err)) catch {};
-                finalizeRun(io, &sess, cfg.dirs.sessions_dir, &sink);
+                finalizeRun(err_out, io, &sess, cfg.dirs.sessions_dir, &sink);
                 try printRunSummary(err_out, arena, "error", &sess, cfg.dirs.sessions_dir, &sink, &client);
                 try err_out.print("[scoot] backend call failed: {s}\n", .{@errorName(err)});
                 try printBackendErrorDetail(err_out, &client);
-                try err_out.print(
-                    "        Backend {s} (model={s}). Make sure the OpenAI-compatible Responses service is running; set {s} if needed.\n",
-                    .{ cfg.backend.base_url, cfg.backend.model, cfg.backend.api_key_env },
-                );
+                try printBackendFailureHint(err_out, cfg, &client);
                 try err_out.flush();
                 die(out, 1);
             };
-            finalizeRun(io, &sess, cfg.dirs.sessions_dir, &sink);
+            finalizeRun(err_out, io, &sess, cfg.dirs.sessions_dir, &sink);
             try out.print("{s}\n", .{reply});
             try out.flush();
             try printRunSummary(err_out, arena, "ok", &sess, cfg.dirs.sessions_dir, &sink, &client);
@@ -399,12 +400,34 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    validateAgentRuntimeConfig(out, cfg);
     try runRepl(out, err_out, arena, io, env, cfg, trace);
+}
+
+fn validateAgentRuntimeConfig(out: *Io.Writer, cfg: scoot.config.Config) void {
+    if (cfg.agent.max_turns == 0) {
+        out.writeAll("error: agent.max_turns must be greater than 0 for agent runs\n") catch {};
+        die(out, 2);
+    }
 }
 
 fn printBackendErrorDetail(out: *Io.Writer, client: *const scoot.llm.Client) !void {
     const body = client.lastErrorBody();
     if (client.last_error_status == 0 and body.len == 0) return;
+
+    if (client.last_error_status == 0) {
+        try out.writeAll("        Backend transport error");
+        if (body.len == 0) {
+            try out.writeAll(", no detail.\n");
+            return;
+        }
+        try out.print(", detail (first {d} bytes{s}):\n{s}\n", .{
+            body.len,
+            if (client.last_error_body_truncated) ", truncated" else "",
+            body,
+        });
+        return;
+    }
 
     try out.print("        Backend response status={d}", .{client.last_error_status});
     if (body.len == 0) {
@@ -416,6 +439,27 @@ fn printBackendErrorDetail(out: *Io.Writer, client: *const scoot.llm.Client) !vo
         if (client.last_error_body_truncated) ", truncated" else "",
         body,
     });
+}
+
+fn printBackendFailureHint(out: *Io.Writer, cfg: scoot.config.Config, client: *const scoot.llm.Client) !void {
+    if (client.last_error_status == 0 and client.lastErrorBody().len != 0) {
+        try out.print(
+            "        Backend {s} (model={s}). Make sure the OpenAI-compatible Responses service is running and reachable.\n",
+            .{ cfg.backend.base_url, cfg.backend.model },
+        );
+        return;
+    }
+    if (client.last_error_status == 401 or client.last_error_status == 403) {
+        try out.print(
+            "        Backend {s} (model={s}). Authentication was rejected; set {s} if needed.\n",
+            .{ cfg.backend.base_url, cfg.backend.model, cfg.backend.api_key_env },
+        );
+        return;
+    }
+    try out.print(
+        "        Backend {s} (model={s}). Make sure the OpenAI-compatible Responses service is healthy and accepts this request.\n",
+        .{ cfg.backend.base_url, cfg.backend.model },
+    );
 }
 
 const default_eval_retries: u32 = 2;
@@ -709,7 +753,7 @@ fn runDoctor(
     try checkConfigFile(&d, io, cfg);
     try checkWritablePath(&d, arena, io, "runtime.logs", cfg.dirs.logs_dir);
     try checkWritablePath(&d, arena, io, "runtime.sessions", cfg.dirs.sessions_dir);
-    try checkBackendConfig(&d, io, cfg);
+    try checkBackendConfig(&d, arena, io, cfg);
     try checkPolicyConfig(&d, arena, cfg);
     try checkAgentConfig(&d, arena, cfg);
     try checkTokenSource(&d, arena, io, env, cfg);
@@ -747,7 +791,7 @@ fn checkWritablePath(
     try d.ok(name, dir);
 }
 
-fn checkBackendConfig(d: *Doctor, io: std.Io, cfg: scoot.config.Config) !void {
+fn checkBackendConfig(d: *Doctor, arena: std.mem.Allocator, io: std.Io, cfg: scoot.config.Config) !void {
     if (!startsWithHttp(cfg.backend.base_url)) {
         try d.fail("backend.base_url", "must start with http:// or https://");
     } else {
@@ -757,6 +801,11 @@ fn checkBackendConfig(d: *Doctor, io: std.Io, cfg: scoot.config.Config) !void {
         try d.fail("backend.model", "model must not be empty");
     } else {
         try d.ok("backend.model", cfg.backend.model);
+    }
+    if (cfg.backend.timeout_ms == 0) {
+        try d.warn("backend.timeout_ms", "0 means no backend hard timeout and is not recommended for agent runs");
+    } else {
+        try d.ok("backend.timeout_ms", try std.fmt.allocPrint(arena, "{d}ms", .{cfg.backend.timeout_ms}));
     }
     if (cfg.backend.ca_file) |ca| {
         if (fileExists(io, ca)) {
@@ -1376,12 +1425,12 @@ const RunCtx = struct {
         self.out.print("[scoot] > job {s} ({s}): {s}\n", .{ job.id, @tagName(eff), job.goal }) catch {};
         const reply = ag.run(a, &sess) catch |err| {
             if (ag.audit) |lg| lg.log(.system_error, @errorName(err)) catch {};
-            finalizeRun(self.io, &sess, self.cfg.dirs.sessions_dir, &sink);
+            finalizeRun(self.out, self.io, &sess, self.cfg.dirs.sessions_dir, &sink);
             self.out.print("[scoot] x job {s} failed: {s} (continuing to next)\n", .{ job.id, @errorName(err) }) catch {};
             self.out.flush() catch {};
             return;
         };
-        finalizeRun(self.io, &sess, self.cfg.dirs.sessions_dir, &sink);
+        finalizeRun(self.out, self.io, &sess, self.cfg.dirs.sessions_dir, &sink);
         self.out.print("[scoot] OK job {s}: {s}\n", .{ job.id, reply }) catch {};
         self.out.flush() catch {}; // Keep progress visible in long runs.
     }
@@ -1767,6 +1816,7 @@ fn initBackendClient(
     const token = try resolveToken(warn, cfg, arena, io, env);
     var client = scoot.llm.Client.init(io, cfg.backend.base_url, cfg.backend.model, token);
     client.ca_file = cfg.backend.ca_file;
+    client.timeout_ms = cfg.backend.timeout_ms;
     client.extra_body = cfg.backend.extra_body;
     client.model_ctx.store = cfg.backend.store;
     return client;
@@ -1862,7 +1912,7 @@ fn runRepl(
 
     replLoop(out, &ir.interface, &ag, &sess, arena, true) catch {};
 
-    finalizeRun(io, &sess, cfg.dirs.sessions_dir, &sink);
+    finalizeRun(err_out, io, &sess, cfg.dirs.sessions_dir, &sink);
     try printRunSummary(err_out, arena, "ok", &sess, cfg.dirs.sessions_dir, &sink, &client);
     try out.writeAll("Goodbye.\n");
 }
@@ -1964,9 +2014,14 @@ const AuditSink = struct {
 };
 
 /// Finalizes one run: flushes/closes audit and appends session snapshot. Best effort.
-fn finalizeRun(io: std.Io, sess: *scoot.session.Session, sessions_dir: []const u8, sink: *AuditSink) void {
+fn finalizeRun(warn: *Io.Writer, io: std.Io, sess: *scoot.session.Session, sessions_dir: []const u8, sink: *AuditSink) void {
     sink.close(io);
-    sess.persist(io, sessions_dir) catch {};
+    sess.persist(io, sessions_dir) catch |err| {
+        var pathbuf: [std.fs.max_path_bytes]u8 = undefined;
+        const transcript = std.fmt.bufPrint(&pathbuf, "{s}/{s}.jsonl", .{ sessions_dir, sess.id }) catch "<transcript>";
+        warn.print("[scoot] warning: transcript could not be persisted ({s}: {s}).\n", .{ transcript, @errorName(err) }) catch {};
+        warn.flush() catch {};
+    };
 }
 
 fn printRunSummary(
@@ -1980,7 +2035,10 @@ fn printRunSummary(
 ) !void {
     const st = sink.stats();
     const transcript = try std.fmt.allocPrint(arena, "{s}/{s}.jsonl", .{ sessions_dir, sess.id });
-    const backend = if (client.last_error_status == 0) "ok" else try std.fmt.allocPrint(arena, "status={d}", .{client.last_error_status});
+    const backend = if (client.last_error_status == 0)
+        if (client.lastErrorBody().len == 0) "ok" else "transport_error"
+    else
+        try std.fmt.allocPrint(arena, "status={d}", .{client.last_error_status});
     try out.print(
         "[scoot] summary status={s} turns={d} tools={d} policy_deny={d} system_error={d} events={d} backend={s} transcript={s}\n",
         .{ status, st.thought, st.tool_call, st.policy_deny, st.system_error, st.total(), backend, transcript },
