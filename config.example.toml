@@ -126,6 +126,28 @@ include_agents_skills = false
 extra_paths = []
 # extra_paths = ["/opt/scoot/skills", "./skills"]
 
+[mcp]
+# External MCP servers callable through the mcp_call action.
+# Calls fail closed: server names must match this list, and the requested tool
+# must be explicitly listed in allowed_tools. "stdio" works today; "http" and
+# "sse" are accepted in config as reserved transports for future support.
+
+# [[mcp.servers]]
+# name = "demo"
+# transport = "stdio"
+# command = "/path/to/mcp-server"
+# args = ["--flag", "value"]
+# env = [{ name = "SERVER_MODE", value = "readonly" }]
+# allowed_tools = ["lookup", "read_resource"]
+# policy = "readonly"
+
+# Reserved for future Streamable HTTP / legacy SSE transports:
+# [[mcp.servers]]
+# name = "remote-demo"
+# transport = "http"
+# url = "https://example.com/mcp"
+# allowed_tools = ["lookup"]
+
 [audit]
 # Audit verbosity: debug, info, warn, or error.
 level = "info"

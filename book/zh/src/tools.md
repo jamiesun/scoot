@@ -6,7 +6,7 @@
 { "thought": "one-line reasoning", "action": "<action>", "action_input": "<input>" }
 ```
 
-`action` 必须是下面十二个内建动作之一——Scoot 绝不执行
+`action` 必须是下面十三个内建动作之一——Scoot 绝不执行
 自由格式文本。每个工具都在带 **硬超时**（`tools.timeout_ms`，默认 30 秒）的沙盒中运行，
 其输出作为下一个 *观察* 返回给模型（会被裁剪以保持上下文精简）。某个动作是否
 被允许，取决于当前生效的 [执行策略](policy.md)。
@@ -26,6 +26,7 @@
 | `glob` | 按 glob 模式列出文件 | `{"pattern":...,"root":"."}` | 是 |
 | `outline` | 文件结构骨架 | `{"path":...}` | 是 |
 | `http_request` | 一次 HTTP/HTTPS 请求 | `{"method":...,"url":...,"body":...}` | 取决于方法 |
+| `mcp_call` | 调用已配置 MCP server 的工具 | `{"server":...,"tool":...,"args":{...}}` | 否 |
 | `skill` | 读取已加载技能的文件 | `{"name":...,"path":"SKILL.md"}` | 是（原生） |
 | `recall` | 搜索当前会话 transcript 归档 | `{"query":...}` 或 `{"seq":...}` | 是（原生） |
 | `parallel` | 1–4 个并发只读调用 | `{"calls":[...]}` | 是 |
@@ -138,6 +139,23 @@
 策略处理按方法划分：读式（`GET`/`HEAD`）vs 写式
 （其他一切）。**`readonly` 阻止网络变更**；`guarded` 可通过
 `block_internal_http` 阻止内部/元数据主机。参见 [策略](policy.md)。
+
+## `mcp_call`
+
+```json
+{ "server": "demo", "tool": "lookup", "args": { "query": "example" } }
+```
+
+调用一个已配置 MCP server 上的工具。server 配置位于 `[[mcp.servers]]`；
+`server` 名称必须存在，`tool` 必须显式列在该 server 的 `allowed_tools` 中。
+`allowed_tools` 为空会拒绝全部 MCP 工具。
+
+当前已实现 `stdio` transport。`http` / `streamable_http` 与 `sse` 已作为保留
+transport 被配置模型接受，但调用时会返回清晰的暂不支持观察，直到对应 client 实现完成。
+
+MCP 调用按可能具有外部副作用的执行处理。`readonly` 会拒绝它；`guarded` 与
+`unrestricted` 仍要求显式 server 与工具 allowlist。MCP 调用像其他工具一样进入审计，
+并受同一个硬超时约束。
 
 ## `skill`
 

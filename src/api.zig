@@ -96,6 +96,7 @@ pub fn start(gpa: std.mem.Allocator, io: std.Io, options: Options) !*Runtime {
     state.agent_template.compactor = compressor.fromString(cfg.agent.compactor);
     state.agent_template.confine_writes = cfg.tools.confine_writes;
     state.agent_template.block_internal_http = cfg.tools.block_internal_http;
+    state.agent_template.mcp_servers = cfg.mcp.servers;
     state.dirs = cfg.dirs;
     state.skill_paths = if (cfg.skills.enabled) try cfg.skillPaths(arena) else &.{};
 

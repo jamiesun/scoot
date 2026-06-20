@@ -113,6 +113,7 @@ Either way no secret is ever written to disk.
 | `[agent]` | ReACT turn limit, cognition mode, context budget |
 | `[tools]` | Tool timeout, execution policy, guarded hardening |
 | `[skills]` | Skill discovery toggle and extra search paths |
+| `[mcp]` | External MCP server declarations for `mcp_call` |
 | `[audit]` | Audit log level and file output |
 | `[schedule]` | Unattended scheduled jobs and the poll interval |
 
@@ -254,6 +255,55 @@ enabled = true
 include_project_skills = false
 include_agents_skills = false
 extra_paths = ["/opt/scoot/skills", "./skills"]
+```
+
+---
+
+## `[mcp]`
+
+External Model Context Protocol servers callable through the `mcp_call`
+meta-action. MCP is client-only: Scoot launches or connects to configured
+servers and calls their tools, but it does not expose a server.
+
+Calls fail closed. The target `server` must exist in `[[mcp.servers]]`, and the
+requested `tool` must be listed in `allowed_tools`; an empty `allowed_tools`
+list denies every tool. `readonly` policy denies `mcp_call` entirely because
+external MCP tools can read, write, or reach networks outside Scoot's static
+tool classes. `guarded` and `unrestricted` still require the explicit server and
+tool allowlist.
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `servers` | array | `[]` | MCP server declarations. |
+
+Each `[[mcp.servers]]` entry:
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `name` | string | `""` | Name used by `mcp_call.server`. |
+| `transport` | string | `stdio` | `stdio` works today. `http` / `streamable_http` and `sse` are accepted but currently return unsupported errors. |
+| `command` | string | `""` | Command to launch for stdio transport. |
+| `args` | list of string | `[]` | Arguments for `command`. |
+| `env` | list of `{ name, value }` | `[]` | Environment override block for the child process. If set, include everything the child needs, such as `PATH`. |
+| `allowed_tools` | list of string | `[]` | Explicit tool allowlist. Empty means deny all. |
+| `policy` | string | `readonly` | Declarative server posture for audit and future policy expansion. |
+| `url` | string? | unset | Reserved for HTTP/SSE transports. |
+
+```toml
+[[mcp.servers]]
+name = "demo"
+transport = "stdio"
+command = "/path/to/mcp-server"
+args = ["--flag", "value"]
+env = [{ name = "SERVER_MODE", value = "readonly" }]
+allowed_tools = ["lookup", "read_resource"]
+policy = "readonly"
+
+[[mcp.servers]]
+name = "remote-demo"
+transport = "http"                # reserved; not implemented yet
+url = "https://example.com/mcp"
+allowed_tools = ["lookup"]
 ```
 
 ---
