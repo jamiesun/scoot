@@ -774,6 +774,10 @@ test "parseTomlConfig: array of tables mcp.servers maps transport seam" {
         \\transport = "http"
         \\url = "https://mcp.example.test/mcp"
         \\allowed_tools = ["lookup"]
+        \\headers = [
+        \\  { name = "Authorization", value_env = "REMOTE_MCP_TOKEN", prefix = "Bearer " },
+        \\  { name = "X-Client", value = "scoot-test" },
+        \\]
     ;
     const fc = try parseTomlConfig(arena.allocator(), src, null);
     try std.testing.expectEqual(@as(usize, 2), fc.mcp.servers.len);
@@ -785,6 +789,10 @@ test "parseTomlConfig: array of tables mcp.servers maps transport seam" {
     try std.testing.expectEqualStrings("FAKE_MODE", fc.mcp.servers[0].env[0].name);
     try std.testing.expectEqualStrings("http", fc.mcp.servers[1].transport);
     try std.testing.expectEqualStrings("https://mcp.example.test/mcp", fc.mcp.servers[1].url.?);
+    try std.testing.expectEqualStrings("Authorization", fc.mcp.servers[1].headers[0].name);
+    try std.testing.expectEqualStrings("REMOTE_MCP_TOKEN", fc.mcp.servers[1].headers[0].value_env.?);
+    try std.testing.expectEqualStrings("Bearer ", fc.mcp.servers[1].headers[0].prefix);
+    try std.testing.expectEqualStrings("scoot-test", fc.mcp.servers[1].headers[1].value.?);
 }
 
 test "parseTomlConfig: blank falls back to defaults; malformed returns InvalidConfig" {

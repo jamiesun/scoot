@@ -318,13 +318,19 @@ Each `[[mcp.servers]]` entry:
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |
 | `name` | string | `""` | Name used by `mcp_call.server`. |
-| `transport` | string | `stdio` | `stdio` works today. `http` / `streamable_http` and `sse` are accepted but currently return unsupported errors. |
+| `transport` | string | `stdio` | Supported transports: `stdio`, Streamable HTTP (`http` / `streamable_http`), and legacy `sse`. |
 | `command` | string | `""` | Command to launch for stdio transport. |
 | `args` | list of string | `[]` | Arguments for `command`. |
 | `env` | list of `{ name, value }` | `[]` | Environment override block for the child process. If set, include everything the child needs, such as `PATH`. |
 | `allowed_tools` | list of string | `[]` | Explicit tool allowlist. Empty means deny all. |
 | `policy` | string | `readonly` | Declarative server posture for audit and future policy expansion. |
-| `url` | string? | unset | Reserved for HTTP/SSE transports. |
+| `url` | string? | unset | Remote endpoint URL for HTTP/SSE transports. |
+| `headers` | list of header objects | `[]` | Extra HTTP headers for remote transports. Use `value_env` for secrets. |
+
+Header objects support `name`, exactly one of `value` or `value_env`, and an
+optional `prefix`. Protocol headers such as `Accept`, `Content-Type`,
+`MCP-Protocol-Version`, and `Mcp-Session-Id` are owned by Scoot and cannot be
+overridden. If a `value_env` variable is missing or empty, the call fails closed.
 
 ```toml
 [[mcp.servers]]
@@ -338,9 +344,21 @@ policy = "readonly"
 
 [[mcp.servers]]
 name = "remote-demo"
-transport = "http"                # reserved; not implemented yet
+transport = "http"
 url = "https://example.com/mcp"
 allowed_tools = ["lookup"]
+headers = [
+  { name = "Authorization", value_env = "REMOTE_MCP_TOKEN", prefix = "Bearer " },
+]
+
+[[mcp.servers]]
+name = "legacy-sse-demo"
+transport = "sse"
+url = "https://example.com/sse"
+allowed_tools = ["lookup"]
+headers = [
+  { name = "X-API-Key", value_env = "REMOTE_MCP_API_KEY" },
+]
 ```
 
 ---

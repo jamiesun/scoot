@@ -157,9 +157,11 @@ Calls one tool on a configured MCP server. Server configuration lives under
 listed in that server's `allowed_tools`. Empty `allowed_tools` denies every MCP
 tool.
 
-`stdio` transport is implemented now. `http` / `streamable_http` and `sse` are
-accepted by config as reserved transports, but calling them returns a clear
-unsupported-transport observation until those clients are implemented.
+Supported transports are `stdio`, Streamable HTTP (`http` or
+`streamable_http`), and legacy `sse`. Remote transports use the configured
+`url`, the same hard timeout as other tools, and the backend CA bundle setting
+when `backend.ca_file` is configured. Header-based authentication is configured
+per server with `headers`; use `value_env` plus an optional `prefix` for tokens.
 
 MCP calls are treated as external side-effect-capable execution. `readonly`
 denies them; `guarded` and `unrestricted` still require the explicit server and

@@ -72,7 +72,7 @@ pub const system_prompt =
     \\  - "glob": list matching file paths under a directory subtree; action_input is JSON {"pattern":"glob pattern","root":"start directory, optional, default ."}. * ? [] do not cross /, while ** crosses directory levels. Returned paths can be passed to file_read / grep.
     \\  - "outline": retrieve a low-token structural outline of a file, such as source function/type signatures or Markdown headings; action_input is JSON {"path":"file path"}. This is a best-effort heuristic overview, not precise parsing.
     \\  - "http_request": make one HTTP/HTTPS request; action_input is JSON {"method":"GET","url":"https://...","body":"optional body"}. method is GET/POST/PUT/DELETE/HEAD/PATCH. Returns status code and response body with a hard timeout.
-    \\  - "mcp_call": call one configured MCP server tool through Scoot's MCP client; action_input is JSON {"server":"configured server name","tool":"tool name","args":{}}. Only configured servers and explicitly allowed tools can run. stdio transport is supported now; http/sse transports are reserved for future support.
+    \\  - "mcp_call": call one configured MCP server tool through Scoot's MCP client; action_input is JSON {"server":"configured server name","tool":"tool name","args":{}}. Only configured servers and explicitly allowed tools can run. stdio, Streamable HTTP, and legacy SSE transports are supported.
     \\  - "skill": read instructions or resources for a loaded skill. This is Scoot native read-only capability and works even in readonly mode; action_input is JSON {"name":"skill name","path":"relative path inside the skill directory, optional, default SKILL.md"}. Skill-requested bash/write/network actions still obey execution policy.
     \\  - "recall": recall original text from the current session transcript archive. action_input is JSON {"query":"keyword","limit":8} or {"seq":12,"context":2}. seq starts at 1.
     \\  - "parallel": run 1-4 independent read-only calls concurrently; action_input is JSON {"calls":[{"action":"file_read","input":"{\"path\":\"README.md\"}"},{"action":"grep","input":"{\"pattern\":\"Scoot\",\"path\":\"AGENT.md\"}"}]}. Only file_read / grep / glob / outline / HTTP GET or HEAD are allowed; bash, writes, skill, recall, final, and nested parallel are forbidden.
@@ -249,6 +249,8 @@ pub const Agent = struct {
     block_internal_http: bool = true,
     /// Absolute custom CA bundle path (PEM) for http_request; null uses system roots.
     ca_file: ?[]const u8 = null,
+    /// Process environment used for MCP remote header credentials.
+    env: ?*const std.process.Environ.Map = null,
     /// Optional CLI trace output for explicit debugging; final answer stays caller-owned.
     trace: ?*std.Io.Writer = null,
     /// Loaded name->dir skill table injected by setupRun from Registry. Arena-owned
@@ -480,8 +482,8 @@ pub const Agent = struct {
     }
 
     /// Guards MCP calls as external side-effect-capable execution. The policy
-    /// path intentionally stays independent of the current stdio transport so
-    /// future HTTP/SSE transports can reuse the same action and audit surface.
+    /// path intentionally stays independent of the selected transport so stdio,
+    /// HTTP, and SSE reuse the same action and audit surface.
     fn guardMcp(self: *Agent, arena: std.mem.Allocator, input: []const u8) policy.Decision {
         const args = parseToolArgs(McpCallArgs, arena, input) catch
             return .{ .deny = "mcp_call action_input must be {\"server\":\"...\",\"tool\":\"...\",\"args\":{...}} JSON" };
@@ -625,6 +627,8 @@ pub const Agent = struct {
                 const server = tools.mcp.findServer(self.mcp_servers, args.server) orelse return error.McpServerNotFound;
                 break :blk try tools.mcp.call(arena, self.io, server, args.tool, args.args, .{
                     .timeout_ms = self.tool_timeout_ms,
+                    .ca_file = self.ca_file,
+                    .env = self.env,
                 });
             },
             .parallel => try self.execParallel(arena, input),
@@ -1012,7 +1016,11 @@ fn toolErrorObservation(arena: std.mem.Allocator, err: anyerror) ![]u8 {
         error.McpToolNotAllowed => "mcp_call tool is not listed in that server's allowed_tools.",
         error.McpArgsMustBeObject => "mcp_call args must be a JSON object.",
         error.McpMissingCommand => "mcp stdio server command is empty.",
-        error.UnsupportedMcpTransport => "mcp_call transport is configured but not implemented yet. stdio works now; http/sse are reserved for the next transport implementation.",
+        error.McpMissingUrl => "mcp remote server url is missing. Set url for http, streamable_http, or sse transports.",
+        error.McpInvalidHeader => "mcp remote header config is invalid. Header names must be safe, non-protocol headers and exactly one of value/value_env must be set.",
+        error.McpMissingHeaderEnv => "mcp remote header value_env is missing or empty in the environment.",
+        error.McpHttpStatus => "mcp remote server returned an unsuccessful HTTP status.",
+        error.UnsupportedMcpTransport => "mcp_call server transport is unknown. Use stdio, http, streamable_http, or sse.",
         error.McpProtocolError => "mcp server did not return a valid JSON-RPC tools/call response.",
         error.McpOutputTooLarge => "mcp server output exceeded the configured output limit.",
         error.McpWriteFailed => "failed to write JSON-RPC request to the mcp stdio server.",

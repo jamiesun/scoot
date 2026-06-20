@@ -145,8 +145,8 @@ extra_paths = []
 [mcp]
 # External MCP servers callable through the mcp_call action.
 # Calls fail closed: server names must match this list, and the requested tool
-# must be explicitly listed in allowed_tools. "stdio" works today; "http" and
-# "sse" are accepted in config as reserved transports for future support.
+# must be explicitly listed in allowed_tools. Supported transports: "stdio",
+# "http" / "streamable_http", and legacy "sse".
 
 # [[mcp.servers]]
 # name = "demo"
@@ -157,12 +157,23 @@ extra_paths = []
 # allowed_tools = ["lookup", "read_resource"]
 # policy = "readonly"
 
-# Reserved for future Streamable HTTP / legacy SSE transports:
 # [[mcp.servers]]
 # name = "remote-demo"
 # transport = "http"
 # url = "https://example.com/mcp"
 # allowed_tools = ["lookup"]
+# headers = [
+#   { name = "Authorization", value_env = "REMOTE_MCP_TOKEN", prefix = "Bearer " },
+# ]
+#
+# [[mcp.servers]]
+# name = "legacy-sse-demo"
+# transport = "sse"
+# url = "https://example.com/sse"
+# allowed_tools = ["lookup"]
+# headers = [
+#   { name = "X-API-Key", value_env = "REMOTE_MCP_API_KEY" },
+# ]
 
 [audit]
 # Audit verbosity: debug, info, warn, or error.

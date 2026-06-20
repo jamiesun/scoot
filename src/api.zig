@@ -91,6 +91,7 @@ pub fn start(gpa: std.mem.Allocator, io: std.Io, options: Options) !*Runtime {
     state.agent_template.tool_timeout_ms = cfg.tools.timeout_ms;
     state.agent_template.policy_mode = policy.Mode.fromString(cfg.tools.policy);
     state.agent_template.ca_file = cfg.backend.ca_file;
+    state.agent_template.env = options.env;
     state.agent_template.context_budget_bytes = cfg.agent.context_budget_bytes;
     state.agent_template.compactor = try cfg.resolveCompressor(arena);
     state.agent_template.confine_writes = cfg.tools.confine_writes;
