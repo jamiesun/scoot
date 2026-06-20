@@ -85,6 +85,10 @@ const catastrophic_patterns = [_][]const u8{
     "chown -r ",
 };
 
+const compact_catastrophic_patterns = [_][]const u8{
+    ":(){:|:&};:",
+};
+
 /// Checks whether one command may execute. `arena` is only for normalization.
 pub fn evaluate(arena: std.mem.Allocator, command: []const u8, mode: Mode) Decision {
     const raw = std.mem.trim(u8, command, " \t\r\n");
@@ -99,6 +103,8 @@ pub fn evaluate(arena: std.mem.Allocator, command: []const u8, mode: Mode) Decis
     for (catastrophic_patterns) |pat| {
         if (std.mem.indexOf(u8, norm, pat) != null)
             return .{ .deny = "matched catastrophic command tripwire (irreversible or destructive operation)" };
+    }
+    for (compact_catastrophic_patterns) |pat| {
         if (std.mem.indexOf(u8, compact, pat) != null)
             return .{ .deny = "matched catastrophic command tripwire (irreversible or destructive operation)" };
     }
@@ -467,6 +473,19 @@ test "guarded:catastrophic commands are blocked including whitespace/case evasio
                 return error.ShouldHaveDenied;
             },
         }
+    }
+}
+
+test "guarded: compact tripwire is limited to fork bomb shape" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try testing.expectEqual(Decision.allow, evaluate(a, "echo \"shut down the service\"", .guarded));
+    try testing.expectEqual(Decision.allow, evaluate(a, "git commit -m \"power off path\"", .guarded));
+    switch (evaluate(a, ":(){ :|:& };:", .guarded)) {
+        .deny => {},
+        .allow => return error.ShouldHaveDenied,
     }
 }
 
