@@ -37,6 +37,9 @@ heading when cutting a release.
   `input` array, and transport is stateless by default (full `input` resent each
   turn) so local context compaction stays in control. Requires a Responses-capable
   backend such as Ollama >= 0.13.3, vLLM, or OpenAI (#110).
+- Guarded mode now confines file writes to the project root by default, wraps
+  tool observations in an explicit untrusted-data boundary, and requires an
+  opt-in for repository-carried `<cwd>/.agents/skills` (#113).
 - Context compaction now goes through a `Compressor` strategy seam with `drop`
   retained as the smallest fallback strategy (#97).
 - Added the built-in `extractive` compactor and `agent.compactor` /
@@ -60,6 +63,10 @@ heading when cutting a release.
 - Default agent configuration now enables a conservative context budget with
   `extractive` compaction, while `context_budget_bytes = 0` still explicitly
   disables the guard (#96).
+- Catastrophic shell-command detection now also catches whitespace-obfuscated
+  fork-bomb patterns (#113).
+- GitHub workflows now pin action references to commit SHAs and verify the
+  downloaded Zig toolchain tarball checksum before extraction (#113).
 
 ## [0.2.0] - 2026-06-19
 

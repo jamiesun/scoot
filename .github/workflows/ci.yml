@@ -12,12 +12,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Setup Zig
         run: |
           version=0.16.0
+          sha256=70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
           curl -fsSL "https://ziglang.org/download/${version}/zig-x86_64-linux-${version}.tar.xz" -o zig.tar.xz
+          echo "${sha256}  zig.tar.xz" | sha256sum -c -
           tar -xf zig.tar.xz
           echo "$PWD/zig-x86_64-linux-${version}" >> "$GITHUB_PATH"
           "$PWD/zig-x86_64-linux-${version}/zig" version
@@ -33,7 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
       - name: Install mdBook
         run: cargo install mdbook --locked

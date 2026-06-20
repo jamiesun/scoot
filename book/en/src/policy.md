@@ -2,7 +2,7 @@
 
 Scoot never lets unvalidated model output reach your system directly. Every tool
 action passes through a **policy gate** before it runs. This page explains the
-three modes, the decision model, the opt-in hardening, and — honestly — what the
+three modes, the decision model, the default guarded hardening, and — honestly — what the
 policy does and does **not** protect you from.
 
 ## The Three Modes
@@ -12,7 +12,7 @@ Ordered from least to most restrictive: `unrestricted` < `guarded` < `readonly`.
 | Mode | Shell (`bash`) | Local writes | Network | Local reads | Use when |
 | --- | --- | --- | --- | --- | --- |
 | `unrestricted` | allowed | allowed | allowed | allowed | You fully trust the goal; still audited. |
-| `guarded` *(default)* | allowed except catastrophic | allowed | allowed | allowed | Interactive use with a human watching. |
+| `guarded` *(default)* | allowed except catastrophic | allowed, project-confined by default | allowed, with internal-host guard by default | allowed | Interactive use with a human watching. |
 | `readonly` | **denied** | **denied** | **denied** | allowed (confined) | Unattended/untrusted; fail-closed safety. |
 
 Set the mode in config (`[tools] policy = "..."`) or test any action with
@@ -38,8 +38,9 @@ catastrophic list, including:
 - a fork bomb, and reckless `chmod 777 /` / recursive `chown`.
 
 Built-in tools (`file_*`, `grep`, `glob`, `http_request`) are allowed in
-`guarded`; they have no "delete the whole disk" equivalent and are bounded by
-their own path/size/timeout limits.
+`guarded`; they are bounded by their own path/size/timeout limits. By default,
+guarded mode also confines `file_write`/`file_edit` to the project root and
+blocks `http_request` to loopback/private/link-local/cloud metadata hosts.
 
 ### `readonly` — fail-closed safety primitive
 
@@ -79,7 +80,7 @@ surface**. Beyond the `evaluateReadPath`-gated reads above (project-cwd,
 non-sensitive, no `..`/absolute), it can read **any file under any registered
 skill directory**:
 
-1. `<cwd>/.agents/skills`
+1. `<cwd>/.agents/skills` when `[skills] include_project_skills = true`
 2. `~/.agents/skills` when `[skills] include_agents_skills = true`
 3. `~/.scoot/skills`
 4. `extra_paths` declared in `[skills]`
@@ -99,10 +100,11 @@ network, or process side effects, so it is also native and allowed in
 `readonly`. Unlike `skill`, it does not widen the filesystem read surface; it
 only returns content already present in the session transcript.
 
-## Opt-in Hardening (guarded only)
+## Default Guarded Hardening
 
-Two flags tighten `guarded` mode. Both default to `false` and apply **only in
-`guarded`** (`readonly` already fail-closes writes and network).
+Two flags tighten `guarded` mode. Both default to `true` and apply **only in
+`guarded`** (`readonly` already fail-closes writes and network). Disable them
+only when you intentionally accept the broader write or network surface.
 
 ### `confine_writes`
 

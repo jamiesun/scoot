@@ -62,10 +62,10 @@ pub const Tools = struct {
     /// Execution policy mode: guarded by default, readonly fail-closed allowlist,
     /// or unrestricted. See policy.zig. Unattended scenarios should use readonly.
     policy: []const u8 = "guarded",
-    /// Opt-in hardening, default off and only active in guarded: confines
+    /// Default-on hardening, only active in guarded: confines
     /// file_write/file_edit to the project root and rejects absolute paths, `..`
     /// escapes, and shell expansion (issue #32). readonly already denies writes.
-    confine_writes: bool = false,
+    confine_writes: bool = true,
     /// Default-on hardening, only active in guarded: rejects http_request to
     /// loopback, private, link-local, and cloud metadata addresses to narrow SSRF
     /// and exfiltration surface (issues #32 / #50). Legitimate agent HTTP rarely
@@ -77,6 +77,9 @@ pub const Tools = struct {
 /// Skill mechanism configuration.
 pub const Skills = struct {
     enabled: bool = true,
+    /// Whether to load project-local skills from <cwd>/.agents/skills. Disabled
+    /// by default because repository-carried skill instructions are untrusted.
+    include_project_skills: bool = false,
     /// Whether to load cross-agent user skills from ~/.agents/skills. Disabled
     /// by default to avoid global skills polluting this agent.
     include_agents_skills: bool = false,
@@ -506,6 +509,7 @@ pub const Config = struct {
 
         // Skills.
         try overrideEnvBool(env, "SCOOT_SKILLS_ENABLED", &self.skills.enabled, &warnings, arena);
+        try overrideEnvBool(env, "SCOOT_SKILLS_INCLUDE_PROJECT_SKILLS", &self.skills.include_project_skills, &warnings, arena);
         try overrideEnvBool(env, "SCOOT_SKILLS_INCLUDE_AGENTS_SKILLS", &self.skills.include_agents_skills, &warnings, arena);
 
         // Audit.
@@ -532,15 +536,15 @@ pub const Config = struct {
 
     /// All skill search paths in priority order. First wins because
     /// `Registry.discover` deduplicates by name. This matches other agent tools:
-    ///   1. `<cwd>/.agents/skills`: project-local, repository-carried, highest
-    ///      priority, resolved relative to process cwd.
+    ///   1. `<cwd>/.agents/skills`: optional project-local directory when
+    ///      include_project_skills=true, resolved relative to process cwd.
     ///   2. `~/.agents/skills`: optional cross-agent user directory when
     ///      include_agents_skills=true.
     ///   3. `~/.scoot/skills`: Scoot's own user-level directory.
     ///   4. Explicit `extra_paths` from config.
     pub fn skillPaths(self: Config, arena: std.mem.Allocator) ![]const []const u8 {
         var list: std.ArrayList([]const u8) = .empty;
-        try list.append(arena, ".agents/skills");
+        if (self.skills.include_project_skills) try list.append(arena, ".agents/skills");
         if (self.skills.include_agents_skills) {
             if (self.dirs.agents_skills_dir) |d| try list.append(arena, d);
         }
@@ -554,7 +558,7 @@ test {
     std.testing.refAllDecls(@This());
 }
 
-test "skillPaths:does not load ~/.agents/skills by default but can enable it" {
+test "skillPaths: project and ~/.agents skills are opt-in" {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -563,12 +567,11 @@ test "skillPaths:does not load ~/.agents/skills by default but can enable it" {
     dirs.agents_skills_dir = "/home/u/.agents/skills";
     const cfg_default: Config = .{ .dirs = dirs, .skills = .{ .enabled = true, .extra_paths = &.{"/opt/extra/skills"} } };
     const got_default = try cfg_default.skillPaths(arena);
-    try std.testing.expectEqual(@as(usize, 3), got_default.len);
-    try std.testing.expectEqualStrings(".agents/skills", got_default[0]);
-    try std.testing.expectEqualStrings("/home/u/.scoot/skills", got_default[1]);
-    try std.testing.expectEqualStrings("/opt/extra/skills", got_default[2]);
+    try std.testing.expectEqual(@as(usize, 2), got_default.len);
+    try std.testing.expectEqualStrings("/home/u/.scoot/skills", got_default[0]);
+    try std.testing.expectEqualStrings("/opt/extra/skills", got_default[1]);
 
-    const cfg: Config = .{ .dirs = dirs, .skills = .{ .enabled = true, .include_agents_skills = true, .extra_paths = &.{"/opt/extra/skills"} } };
+    const cfg: Config = .{ .dirs = dirs, .skills = .{ .enabled = true, .include_project_skills = true, .include_agents_skills = true, .extra_paths = &.{"/opt/extra/skills"} } };
     const got = try cfg.skillPaths(arena);
     try std.testing.expectEqual(@as(usize, 4), got.len);
     try std.testing.expectEqualStrings(".agents/skills", got[0]);
@@ -579,7 +582,7 @@ test "skillPaths:does not load ~/.agents/skills by default but can enable it" {
     // Unknown $HOME: skip the ~/.agents layer even when enabled; cwd stays first.
     var cfg2: Config = .{
         .dirs = try paths.Paths.fromHome(arena, "/home/u/.scoot"),
-        .skills = .{ .include_agents_skills = true },
+        .skills = .{ .include_project_skills = true, .include_agents_skills = true },
     };
     cfg2.dirs.agents_skills_dir = null;
     const got2 = try cfg2.skillPaths(arena);
@@ -608,6 +611,7 @@ test "parseTomlConfig: TOML to FileConfig with extra_body passthrough and per-se
         \\policy = "guarded"
         \\
         \\[skills]
+        \\include_project_skills = true
         \\include_agents_skills = true
     ;
     const fc = try parseTomlConfig(arena.allocator(), src, null);
@@ -617,6 +621,7 @@ test "parseTomlConfig: TOML to FileConfig with extra_body passthrough and per-se
     try std.testing.expectEqual(true, fc.backend.store);
     try std.testing.expectEqualStrings("WJT_AZURE_OPENAI_API_KEY", fc.backend.api_key_env);
     try std.testing.expectEqualStrings("guarded", fc.tools.policy);
+    try std.testing.expectEqual(true, fc.skills.include_project_skills);
     try std.testing.expectEqual(true, fc.skills.include_agents_skills);
     // Unspecified sections fall back to defaults.
     try std.testing.expectEqual(@as(u32, 32), fc.agent.max_turns);
@@ -970,6 +975,7 @@ test "applyEnvOverrides: integer/bool fields parse" {
     try map.put("SCOOT_TOOLS_CONFINE_WRITES", "true");
     try map.put("SCOOT_TOOLS_BLOCK_INTERNAL_HTTP", "0");
     try map.put("SCOOT_SKILLS_ENABLED", "FALSE");
+    try map.put("SCOOT_SKILLS_INCLUDE_PROJECT_SKILLS", "1");
     try map.put("SCOOT_SKILLS_INCLUDE_AGENTS_SKILLS", "1");
 
     var cfg: Config = .{ .dirs = undefined };
@@ -982,6 +988,7 @@ test "applyEnvOverrides: integer/bool fields parse" {
     try std.testing.expectEqual(true, cfg.tools.confine_writes);
     try std.testing.expectEqual(false, cfg.tools.block_internal_http);
     try std.testing.expectEqual(false, cfg.skills.enabled);
+    try std.testing.expectEqual(true, cfg.skills.include_project_skills);
     try std.testing.expectEqual(true, cfg.skills.include_agents_skills);
 }
 

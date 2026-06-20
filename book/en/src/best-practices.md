@@ -227,6 +227,7 @@ with code.
 
 ```sh
 scoot skills check .agents/skills/incident-triage
+SCOOT_SKILLS_INCLUDE_PROJECT_SKILLS=1 \
 scoot -e "Use the incident-triage skill to inspect this checkout and prepare a triage brief."
 ```
 
@@ -234,6 +235,7 @@ Best practice:
 
 - keep skill instructions specific and reviewable;
 - avoid embedding secrets in skill files;
+- enable project-local skills only for repositories you trust;
 - prefer project-local skills over broad user-global skills for production
   work;
 - remember that reading skill files works even in `readonly`, but any action the

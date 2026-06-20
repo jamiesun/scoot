@@ -34,9 +34,9 @@ The loop repeats until the model emits a `final` answer or hits `max_turns`.
   `grep`, `glob`, `outline`, `http_request`, `skill`, `recall`, `parallel`, and `final`. The
   structured tools work without external commands, so they behave identically on
   stripped-down systems. See [Built-in Tools](tools.md).
-- **Three execution policies** — `guarded` (interactive tripwire), `readonly`
-  (fail-closed), and `unrestricted` (audited but unlimited), plus opt-in
-  hardening for write-confinement and SSRF. See [Execution Policy & Security](policy.md).
+- **Three execution policies** — `guarded` (interactive tripwire with default
+  write-confinement and SSRF guard), `readonly` (fail-closed), and
+  `unrestricted` (audited but unlimited). See [Execution Policy & Security](policy.md).
 - **Local skills** with progressive disclosure — task-specific instruction packs
   discovered from the project and user directories, read through a native,
   read-only `skill` action. See [Skills](skills.md).

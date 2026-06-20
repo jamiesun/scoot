@@ -111,7 +111,7 @@ Long-running stability matters more than feature count.
 - Config files are `config.toml` first, `config.json` second.
 - Never add inline plaintext API keys to config.
 - Secret priority is env, then 0600 token file, then credential command.
-- Skill directories contain `SKILL.md` with front matter. Discovery reads only name and description; full instructions are loaded only when relevant. Search order: `<cwd>/.agents/skills` > optional `~/.agents/skills` (`skills.include_agents_skills=true`) > `~/.scoot/skills` > configured `extra_paths`.
+- Skill directories contain `SKILL.md` with front matter. Discovery reads only name and description; full instructions are loaded only when relevant. Search order: optional `<cwd>/.agents/skills` (`skills.include_project_skills=true`, default off) > optional `~/.agents/skills` (`skills.include_agents_skills=true`) > `~/.scoot/skills` > configured `extra_paths`.
 - Reading a skill's instructions/resources is a native, read-only capability (the `skill` action), confined to the skill directory and audited, and is intentionally not policy-gated — so skills stay usable in `readonly`. Skill *scripts and commands* get no special privileges: they run through the same tool sandbox and policy gates as normal actions.
 - Sessions are short-term memory only. Do not introduce vector databases or long-term semantic memory without first revisiting the roadmap.
 
