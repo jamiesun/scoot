@@ -6,9 +6,16 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+env:
+  ZIG_VERSION: 0.16.0
+  ZIG_SHA256: 70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
+
 jobs:
   zig:
-    name: Zig build and test
+    name: Zig format, build, and test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -16,19 +23,54 @@ jobs:
 
       - name: Setup Zig
         run: |
-          version=0.16.0
-          sha256=70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00
-          curl -fsSL "https://ziglang.org/download/${version}/zig-x86_64-linux-${version}.tar.xz" -o zig.tar.xz
-          echo "${sha256}  zig.tar.xz" | sha256sum -c -
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" -o zig.tar.xz
+          echo "${ZIG_SHA256}  zig.tar.xz" | sha256sum -c -
           tar -xf zig.tar.xz
-          echo "$PWD/zig-x86_64-linux-${version}" >> "$GITHUB_PATH"
-          "$PWD/zig-x86_64-linux-${version}/zig" version
+          echo "$PWD/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
+          "$PWD/zig-x86_64-linux-${ZIG_VERSION}/zig" version
 
-      - name: Build
+      - name: Format check
+        run: zig fmt --check build.zig src examples
+
+      - name: Build Debug
         run: zig build
 
       - name: Test
         run: zig build test
+
+      - name: Build ReleaseSafe
+        run: zig build -Doptimize=ReleaseSafe
+
+      - name: CLI smoke
+        run: zig build run -- --version
+
+  release-smoke:
+    name: Release target smoke (${{ matrix.asset }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - asset: linux-amd64
+            target: x86_64-linux-musl
+          - asset: linux-arm64
+            target: aarch64-linux-musl
+          - asset: macos-arm64
+            target: aarch64-macos
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Setup Zig
+        run: |
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" -o zig.tar.xz
+          echo "${ZIG_SHA256}  zig.tar.xz" | sha256sum -c -
+          tar -xf zig.tar.xz
+          echo "$PWD/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
+          "$PWD/zig-x86_64-linux-${ZIG_VERSION}/zig" version
+
+      - name: Cross-compile ReleaseSafe
+        run: zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }}
 
   docs:
     name: mdBook build

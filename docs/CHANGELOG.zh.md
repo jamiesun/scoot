@@ -28,8 +28,9 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 - 新增 `backend.store` 配置项与 `SCOOT_BACKEND_STORE` 覆盖，可选择让后端通过
   Responses API 在服务端持久化响应；默认关闭，以保持 Scoot 无状态、本地优先（#110）。
 - 新增 client-side MCP 支持：通过受策略门控的 `mcp_call` 元动作与
-  `[[mcp.servers]]` 配置调用外部 MCP server。MVP 支持 stdio server，并在同一配置与策略
-  接缝后预留 HTTP/SSE transport（#103）。
+  `[[mcp.servers]]` 配置调用外部 MCP server。当前 client 支持 stdio、Streamable
+  HTTP 与 legacy SSE transport，并复用同一配置与策略接缝；远程 server 支持基于
+  环境变量取值的 per-server header 认证（#103）。
 - 新增外部上下文压缩插件：可通过 `agent.compactor = "plugin:<name>"`
   选择，并在 `[agent.compactor_plugin.<name>]` 下配置。插件包复用
   `wasm_tool` 描述符边界，使用 `kind = "compressor"`，执行时作为有界子进程运行，

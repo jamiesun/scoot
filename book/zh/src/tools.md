@@ -150,8 +150,10 @@
 `server` 名称必须存在，`tool` 必须显式列在该 server 的 `allowed_tools` 中。
 `allowed_tools` 为空会拒绝全部 MCP 工具。
 
-当前已实现 `stdio` transport。`http` / `streamable_http` 与 `sse` 已作为保留
-transport 被配置模型接受，但调用时会返回清晰的暂不支持观察，直到对应 client 实现完成。
+当前支持 `stdio`、Streamable HTTP（`http` 或 `streamable_http`）以及 legacy
+`sse` transport。远程 transport 使用配置中的 `url`，复用工具硬超时；如果配置了
+`backend.ca_file`，也会复用该 CA bundle。基于 header 的认证按 server 配置
+`headers`；token 请使用 `value_env`，可配合 `prefix` 生成 `Bearer ...`。
 
 MCP 调用按可能具有外部副作用的执行处理。`readonly` 会拒绝它；`guarded` 与
 `unrestricted` 仍要求显式 server 与工具 allowlist。MCP 调用像其他工具一样进入审计，
