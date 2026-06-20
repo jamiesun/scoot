@@ -8,6 +8,7 @@ const secret = @import("secret.zig");
 const schedule = @import("schedule.zig");
 const policy = @import("policy.zig");
 const tomlmod = @import("toml.zig");
+const mcp_tool = @import("tools/mcp.zig");
 
 pub const default_context_budget_bytes: usize = 80_000;
 
@@ -87,6 +88,15 @@ pub const Skills = struct {
     extra_paths: []const []const u8 = &.{},
 };
 
+pub const McpServer = mcp_tool.Server;
+
+/// External MCP servers callable through the `mcp_call` meta-action. Servers
+/// fail closed: a call is denied unless the server exists and `allowed_tools`
+/// explicitly includes the requested tool.
+pub const Mcp = struct {
+    servers: []const McpServer = &.{},
+};
+
 /// Audit log configuration.
 pub const Audit = struct {
     /// Log level: debug / info / warn / error.
@@ -164,6 +174,7 @@ const FileConfig = struct {
     agent: Agent = .{},
     tools: Tools = .{},
     skills: Skills = .{},
+    mcp: Mcp = .{},
     audit: Audit = .{},
     schedule: Schedule = .{},
 };
@@ -393,6 +404,7 @@ pub const Config = struct {
     agent: Agent = .{},
     tools: Tools = .{},
     skills: Skills = .{},
+    mcp: Mcp = .{},
     audit: Audit = .{},
     schedule: Schedule = .{},
     /// Resolved runtime directories.
@@ -453,6 +465,7 @@ pub const Config = struct {
             .agent = fc.agent,
             .tools = fc.tools,
             .skills = fc.skills,
+            .mcp = fc.mcp,
             .audit = fc.audit,
             .schedule = fc.schedule,
             .dirs = dirs,
@@ -651,6 +664,37 @@ test "parseTomlConfig: array of tables schedule.jobs maps correctly" {
     try std.testing.expectEqual(@as(usize, 1), fc.schedule.jobs.len);
     try std.testing.expectEqualStrings("disk", fc.schedule.jobs[0].id);
     try std.testing.expectEqual(@as(?u64, 300), fc.schedule.jobs[0].every_sec);
+}
+
+test "parseTomlConfig: array of tables mcp.servers maps transport seam" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const src =
+        \\[[mcp.servers]]
+        \\name = "fake"
+        \\transport = "stdio"
+        \\command = "/bin/sh"
+        \\args = ["server.sh"]
+        \\allowed_tools = ["echo"]
+        \\env = [{ name = "FAKE_MODE", value = "test" }]
+        \\policy = "readonly"
+        \\
+        \\[[mcp.servers]]
+        \\name = "remote"
+        \\transport = "http"
+        \\url = "https://mcp.example.test/mcp"
+        \\allowed_tools = ["lookup"]
+    ;
+    const fc = try parseTomlConfig(arena.allocator(), src, null);
+    try std.testing.expectEqual(@as(usize, 2), fc.mcp.servers.len);
+    try std.testing.expectEqualStrings("fake", fc.mcp.servers[0].name);
+    try std.testing.expectEqualStrings("stdio", fc.mcp.servers[0].transport);
+    try std.testing.expectEqualStrings("/bin/sh", fc.mcp.servers[0].command);
+    try std.testing.expectEqualStrings("server.sh", fc.mcp.servers[0].args[0]);
+    try std.testing.expectEqualStrings("echo", fc.mcp.servers[0].allowed_tools[0]);
+    try std.testing.expectEqualStrings("FAKE_MODE", fc.mcp.servers[0].env[0].name);
+    try std.testing.expectEqualStrings("http", fc.mcp.servers[1].transport);
+    try std.testing.expectEqualStrings("https://mcp.example.test/mcp", fc.mcp.servers[1].url.?);
 }
 
 test "parseTomlConfig: blank falls back to defaults; malformed returns InvalidConfig" {

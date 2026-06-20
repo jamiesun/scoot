@@ -27,6 +27,9 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
   最小嵌入示例（#106）。
 - 新增 `backend.store` 配置项与 `SCOOT_BACKEND_STORE` 覆盖，可选择让后端通过
   Responses API 在服务端持久化响应；默认关闭，以保持 Scoot 无状态、本地优先（#110）。
+- 新增 client-side MCP 支持：通过受策略门控的 `mcp_call` 元动作与
+  `[[mcp.servers]]` 配置调用外部 MCP server。MVP 支持 stdio server，并在同一配置与策略
+  接缝后预留 HTTP/SSE transport（#103）。
 
 ### 变更
 

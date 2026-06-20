@@ -6,7 +6,7 @@ Every turn, the model must emit exactly one JSON step:
 { "thought": "one-line reasoning", "action": "<action>", "action_input": "<input>" }
 ```
 
-`action` must be one of the twelve built-in actions below — Scoot never executes
+`action` must be one of the thirteen built-in actions below — Scoot never executes
 free-form text. Each tool runs inside a sandbox with a **hard timeout**
 (`tools.timeout_ms`, default 30 s) and its output is returned to the model as the
 next *observation* (clipped to keep the context small). Whether a given action is
@@ -28,6 +28,7 @@ Prefer them over shelling out.
 | `glob` | List files by glob pattern | `{"pattern":...,"root":"."}` | yes |
 | `outline` | Structural skeleton of a file | `{"path":...}` | yes |
 | `http_request` | One HTTP/HTTPS request | `{"method":...,"url":...,"body":...}` | depends on method |
+| `mcp_call` | Call a configured MCP server tool | `{"server":...,"tool":...,"args":{...}}` | no |
 | `skill` | Read a loaded skill's files | `{"name":...,"path":"SKILL.md"}` | yes (native) |
 | `recall` | Search the current session transcript archive | `{"query":...}` or `{"seq":...}` | yes (native) |
 | `parallel` | 1–4 concurrent read-only calls | `{"calls":[...]}` | yes |
@@ -144,6 +145,26 @@ of `GET`/`POST`/`PUT`/`DELETE`/`HEAD`/`PATCH`; HTTPS is negotiated automatically
 Policy treatment splits by method: read-style (`GET`/`HEAD`) vs write-style
 (everything else). **`readonly` blocks network mutations**; `guarded` can block
 internal/metadata hosts via `block_internal_http`. See [Policy](policy.md).
+
+## `mcp_call`
+
+```json
+{ "server": "demo", "tool": "lookup", "args": { "query": "example" } }
+```
+
+Calls one tool on a configured MCP server. Server configuration lives under
+`[[mcp.servers]]`; the server name must exist and the tool must be explicitly
+listed in that server's `allowed_tools`. Empty `allowed_tools` denies every MCP
+tool.
+
+`stdio` transport is implemented now. `http` / `streamable_http` and `sse` are
+accepted by config as reserved transports, but calling them returns a clear
+unsupported-transport observation until those clients are implemented.
+
+MCP calls are treated as external side-effect-capable execution. `readonly`
+denies them; `guarded` and `unrestricted` still require the explicit server and
+tool allowlist. MCP calls are audited like other tool calls and run under the
+same hard timeout.
 
 ## `skill`
 

@@ -29,6 +29,9 @@ heading when cutting a release.
 - `backend.store` config key and `SCOOT_BACKEND_STORE` override to opt into
   Responses API server-side response persistence; defaults to off so Scoot
   stays stateless and local-first (#110).
+- Client-side MCP support through a guarded `mcp_call` meta-action and
+  `[[mcp.servers]]` config. The MVP supports stdio servers and reserves HTTP/SSE
+  transports behind the same config and policy seam (#103).
 
 ### Changed
 

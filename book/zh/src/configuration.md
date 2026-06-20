@@ -103,6 +103,7 @@ jobs:
 | `[agent]` | ReACT 回合上限、认知模式、上下文预算 |
 | `[tools]` | 工具超时、执行策略、guarded 加固 |
 | `[skills]` | 技能发现开关与额外搜索路径 |
+| `[mcp]` | `mcp_call` 可调用的外部 MCP server 声明 |
 | `[audit]` | 审计日志级别与文件输出 |
 | `[schedule]` | 无人值守的调度任务与轮询间隔 |
 
@@ -232,6 +233,52 @@ enabled = true
 include_project_skills = false
 include_agents_skills = false
 extra_paths = ["/opt/scoot/skills", "./skills"]
+```
+
+---
+
+## `[mcp]`
+
+外部 Model Context Protocol server 声明，通过 `mcp_call` 这个元动作调用。Scoot
+这里只做 MCP client：启动或连接已配置的 server 并调用其工具，不对外暴露 MCP server。
+
+调用默认 fail-closed。目标 `server` 必须存在于 `[[mcp.servers]]`，请求的 `tool`
+也必须出现在 `allowed_tools`；`allowed_tools` 为空表示拒绝所有工具。`readonly`
+策略会完全拒绝 `mcp_call`，因为外部 MCP 工具可能绕过 Scoot 静态工具分类去读写文件或访问网络。
+`guarded` 与 `unrestricted` 仍然要求显式 server 与工具 allowlist。
+
+| 键 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `servers` | array | `[]` | MCP server 声明列表。 |
+
+每个 `[[mcp.servers]]` 条目：
+
+| 键 | 类型 | 默认值 | 说明 |
+| --- | --- | --- | --- |
+| `name` | string | `""` | `mcp_call.server` 使用的名称。 |
+| `transport` | string | `stdio` | 当前支持 `stdio`。`http` / `streamable_http` 与 `sse` 可写入配置，但执行时会返回暂未支持。 |
+| `command` | string | `""` | stdio transport 要启动的命令。 |
+| `args` | list of string | `[]` | 传给 `command` 的参数。 |
+| `env` | list of `{ name, value }` | `[]` | 子进程环境覆盖块。若设置，请包含子进程需要的一切变量，例如 `PATH`。 |
+| `allowed_tools` | list of string | `[]` | 显式工具 allowlist。为空即拒绝全部。 |
+| `policy` | string | `readonly` | 用于审计和未来策略扩展的 server 姿态声明。 |
+| `url` | string? | 未设置 | 为 HTTP/SSE transport 预留。 |
+
+```toml
+[[mcp.servers]]
+name = "demo"
+transport = "stdio"
+command = "/path/to/mcp-server"
+args = ["--flag", "value"]
+env = [{ name = "SERVER_MODE", value = "readonly" }]
+allowed_tools = ["lookup", "read_resource"]
+policy = "readonly"
+
+[[mcp.servers]]
+name = "remote-demo"
+transport = "http"                # 预留；暂未实现
+url = "https://example.com/mcp"
+allowed_tools = ["lookup"]
 ```
 
 ---

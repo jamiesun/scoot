@@ -627,6 +627,7 @@ fn policyDecisionForAction(
                 break :blk scoot.policy.evaluateTool(.net_write, mode);
             break :blk scoot.policy.evaluateTool(if (scoot.tools.http.isWrite(method)) .net_write else .net_read, mode);
         },
+        .mcp_call => scoot.policy.evaluateTool(.net_write, mode),
         .parallel => policyDecisionForParallel(arena, mode, input),
         .skill => .allow, // Native read-only capability, intentionally outside policy.
         .recall => .allow, // Current session transcript recall; native read-only capability.
@@ -660,6 +661,7 @@ fn policyDecisionForParallel(
                 if (scoot.tools.http.isWrite(method))
                     return .{ .deny = "parallel only allows HTTP GET/HEAD, not write HTTP methods" };
             },
+            .mcp_call => return .{ .deny = "parallel forbids mcp_call; MCP tools may have external side effects" },
             .bash => return .{ .deny = "parallel forbids bash; use structured read-only tools" },
             .file_write, .file_edit => return .{ .deny = "parallel forbids writing or editing files" },
             .skill => return .{ .deny = "parallel forbids skill; use a separate skill action to read skill instructions" },
@@ -1860,6 +1862,7 @@ fn setupRun(
     ag.confine_writes = cfg.tools.confine_writes;
     ag.block_internal_http = cfg.tools.block_internal_http;
     ag.skills = skills;
+    ag.mcp_servers = cfg.mcp.servers;
 
     sink.open(warn, arena, io, cfg.dirs.logs_dir);
     ag.audit = sink.loggerPtr();
