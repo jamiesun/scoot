@@ -896,10 +896,156 @@ test "mcp: stdio fake server formats tools/call result" {
     try std.testing.expect(std.mem.indexOf(u8, out, "pong") != null);
 }
 
+test "mcp: JSON-RPC error and missing call response become observations" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const rpc_error = try formatResponse(
+        arena,
+        "fake",
+        "lookup",
+        \\{"jsonrpc":"2.0","id":1,"result":{}}
+        \\not json
+        \\{"jsonrpc":"2.0","id":3,"error":{"code":-32602,"message":"bad args"}}
+        \\
+    ,
+        "server warned",
+    );
+    try std.testing.expect(std.mem.indexOf(u8, rpc_error, "JSON-RPC error") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rpc_error, "\"message\":\"bad args\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rpc_error, "server warned") != null);
+
+    const missing = try formatResponse(
+        arena,
+        "fake",
+        "lookup",
+        \\{"jsonrpc":"2.0","id":1,"result":{}}
+        \\{"jsonrpc":"2.0","id":2,"result":{"tools":[]}}
+        \\
+    ,
+        "stderr marker",
+    );
+    try std.testing.expect(std.mem.indexOf(u8, missing, "protocol error") != null);
+    try std.testing.expect(std.mem.indexOf(u8, missing, "stderr marker") != null);
+    try std.testing.expect(std.mem.indexOf(u8, missing, "\"id\":2") != null);
+}
+
+test "mcp: tool result preserves isError and non-text content" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const value = try std.json.parseFromSliceLeaky(std.json.Value, arena,
+        \\{"content":[{"type":"text","text":"first"},{"type":"image","data":"abc"}],"isError":true}
+    , .{});
+    const out = try toolResultText(arena, value);
+    try std.testing.expect(std.mem.indexOf(u8, out, "[MCP tool reported isError=true]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "first") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"type\":\"image\"") != null);
+}
+
+test "mcp: stdio passes configured environment and rejects invalid env" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const io = std.testing.io;
+
+    try std.testing.expectError(error.McpInvalidEnv, call(arena, io, .{
+        .name = "fake",
+        .transport = "stdio",
+        .command = "/bin/true",
+        .allowed_tools = &.{"echo"},
+        .env = &.{.{ .name = "", .value = "bad" }},
+    }, "echo", null, .{ .timeout_ms = 5_000 }));
+
+    const dir = "/tmp/scoot_mcp_env_fake";
+    const cwd = std.Io.Dir.cwd();
+    cwd.deleteTree(io, dir) catch {};
+    defer cwd.deleteTree(io, dir) catch {};
+    try cwd.createDirPath(io, dir);
+    const script = dir ++ "/server.sh";
+    try cwd.writeFile(io, .{ .sub_path = script, .data =
+        \\#!/bin/sh
+        \\while IFS= read -r line; do
+        \\  case "$line" in
+        \\    *'"id":1'*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"fake","version":"1"}}}' ;;
+        \\    *'"id":2'*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","inputSchema":{"type":"object"}}]}}' ;;
+        \\    *'"id":3'*) printf '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"%s"}],"isError":false}}\n' "$MCP_TEST_VALUE" ;;
+        \\  esac
+        \\done
+        \\
+    });
+
+    const out = try call(arena, io, .{
+        .name = "fake",
+        .transport = "stdio",
+        .command = "/bin/sh",
+        .args = &.{script},
+        .allowed_tools = &.{"echo"},
+        .env = &.{.{ .name = "MCP_TEST_VALUE", .value = "from-env" }},
+    }, "echo", null, .{ .timeout_ms = 5_000 });
+    try std.testing.expect(std.mem.indexOf(u8, out, "from-env") != null);
+}
+
+test "mcp: stdio enforces output limits and timeout" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+
+    const noisy_dir = "/tmp/scoot_mcp_noisy_fake";
+    cwd.deleteTree(io, noisy_dir) catch {};
+    defer cwd.deleteTree(io, noisy_dir) catch {};
+    try cwd.createDirPath(io, noisy_dir);
+    const noisy_script = noisy_dir ++ "/server.sh";
+    try cwd.writeFile(io, .{ .sub_path = noisy_script, .data =
+        \\#!/bin/sh
+        \\printf '%s\n' 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
+        \\
+    });
+    try std.testing.expectError(error.McpOutputTooLarge, call(arena, io, .{
+        .name = "fake",
+        .transport = "stdio",
+        .command = "/bin/sh",
+        .args = &.{noisy_script},
+        .allowed_tools = &.{"echo"},
+    }, "echo", null, .{ .timeout_ms = 5_000, .stdout_limit = 8 }));
+
+    const sleepy_dir = "/tmp/scoot_mcp_sleepy_fake";
+    cwd.deleteTree(io, sleepy_dir) catch {};
+    defer cwd.deleteTree(io, sleepy_dir) catch {};
+    try cwd.createDirPath(io, sleepy_dir);
+    const sleepy_script = sleepy_dir ++ "/server.sh";
+    try cwd.writeFile(io, .{ .sub_path = sleepy_script, .data =
+        \\#!/bin/sh
+        \\sleep 1
+        \\
+    });
+    try std.testing.expectError(error.Timeout, call(arena, io, .{
+        .name = "fake",
+        .transport = "stdio",
+        .command = "/bin/sh",
+        .args = &.{sleepy_script},
+        .allowed_tools = &.{"echo"},
+    }, "echo", null, .{ .timeout_ms = 20 }));
+}
+
 test "mcp: allowed tools fail closed and streamable_http aliases http" {
     try std.testing.expect(!toolAllowed(.{ .name = "s" }, "read"));
     try std.testing.expect(toolAllowed(.{ .name = "s", .allowed_tools = &.{"read"} }, "read"));
     try std.testing.expectEqual(TransportKind.http, TransportKind.fromString("streamable_http").?);
+    try std.testing.expectError(error.McpToolNotAllowed, call(std.testing.allocator, std.testing.io, .{
+        .name = "s",
+        .transport = "stdio",
+        .command = "/bin/true",
+    }, "read", null, .{}));
+    try std.testing.expectError(error.UnsupportedMcpTransport, call(std.testing.allocator, std.testing.io, .{
+        .name = "s",
+        .transport = "websocket",
+        .allowed_tools = &.{"read"},
+    }, "read", null, .{}));
 }
 
 test "mcp: SSE response body can carry JSON-RPC tools/call result" {

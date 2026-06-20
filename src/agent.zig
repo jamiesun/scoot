@@ -1821,6 +1821,12 @@ test "guard: mcp_call requires policy, configured server, and allowed tool" {
             .url = "https://example.com/mcp",
             .allowed_tools = &.{"lookup"},
         },
+        .{
+            .name = "bad-transport",
+            .transport = "websocket",
+            .url = "wss://example.com/mcp",
+            .allowed_tools = &.{"lookup"},
+        },
     };
 
     const ok =
@@ -1838,12 +1844,20 @@ test "guard: mcp_call requires policy, configured server, and allowed tool" {
     const remote =
         \\{"server":"remote","tool":"lookup","args":{}}
     ;
+    const unknown_transport =
+        \\{"server":"bad-transport","tool":"lookup","args":{}}
+    ;
+    const parallel_mcp =
+        \\{"calls":[{"action":"mcp_call","input":"{\"server\":\"demo\",\"tool\":\"lookup\",\"args\":{}}"}]}
+    ;
 
     try std.testing.expectEqual(policy.Decision.allow, ag.guard(arena, .mcp_call, ok));
     try std.testing.expectEqual(policy.Decision.allow, ag.guard(arena, .mcp_call, remote));
     try expectDeny(ag.guard(arena, .mcp_call, unknown_server));
     try expectDeny(ag.guard(arena, .mcp_call, unknown_tool));
     try expectDeny(ag.guard(arena, .mcp_call, array_args));
+    try expectDeny(ag.guard(arena, .mcp_call, unknown_transport));
+    try expectDeny(ag.guard(arena, .parallel, parallel_mcp));
 
     ag.policy_mode = .readonly;
     try expectDeny(ag.guard(arena, .mcp_call, ok));
