@@ -5,7 +5,6 @@
 
 const std = @import("std");
 const agent = @import("agent.zig");
-const compressor = @import("compressor.zig");
 const config = @import("config.zig");
 const llm = @import("llm.zig");
 const paths = @import("paths.zig");
@@ -93,7 +92,7 @@ pub fn start(gpa: std.mem.Allocator, io: std.Io, options: Options) !*Runtime {
     state.agent_template.policy_mode = policy.Mode.fromString(cfg.tools.policy);
     state.agent_template.ca_file = cfg.backend.ca_file;
     state.agent_template.context_budget_bytes = cfg.agent.context_budget_bytes;
-    state.agent_template.compactor = compressor.fromString(cfg.agent.compactor);
+    state.agent_template.compactor = try cfg.resolveCompressor(arena);
     state.agent_template.confine_writes = cfg.tools.confine_writes;
     state.agent_template.block_internal_http = cfg.tools.block_internal_http;
     state.agent_template.mcp_servers = cfg.mcp.servers;

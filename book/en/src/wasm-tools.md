@@ -36,6 +36,7 @@ segments).
 capabilities:
 
 ```toml
+kind = "tool"
 name = "calculator"
 description = "Evaluate simple math expressions"
 entry = "call"
@@ -44,6 +45,10 @@ input_schema = "schema/input.json"
 output_schema = "schema/output.json"
 capabilities = ["compute"]
 ```
+
+`kind` defaults to `tool` for backward compatibility. External context
+compressors use the same static package boundary with `kind = "compressor"`;
+Scoot still does not load or execute Wasm from core.
 
 `policy.toml` declares the capabilities actually **granted**, and must be a
 **subset** of the manifest's — a package can't silently gain authority it didn't

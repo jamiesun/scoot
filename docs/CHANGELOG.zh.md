@@ -30,6 +30,10 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 - 新增 client-side MCP 支持：通过受策略门控的 `mcp_call` 元动作与
   `[[mcp.servers]]` 配置调用外部 MCP server。MVP 支持 stdio server，并在同一配置与策略
   接缝后预留 HTTP/SSE transport（#103）。
+- 新增外部上下文压缩插件：可通过 `agent.compactor = "plugin:<name>"`
+  选择，并在 `[agent.compactor_plugin.<name>]` 下配置。插件包复用
+  `wasm_tool` 描述符边界，使用 `kind = "compressor"`，执行时作为有界子进程运行，
+  失败则回退到 `extractive`/`drop`（#98）。
 
 ### 变更
 

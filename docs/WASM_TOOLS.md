@@ -34,6 +34,7 @@ and rejects unsafe paths. It never loads or executes `component.wasm`.
 capabilities:
 
 ```toml
+kind = "tool"
 name = "calculator"
 description = "Evaluate simple math expressions"
 entry = "call"
@@ -45,6 +46,7 @@ capabilities = ["compute"]
 
 Rules:
 
+- `kind` must be `tool` or `compressor`; omitted defaults to `tool`.
 - `name` uses the same identifier rules as skills: ASCII letters, digits, `.`,
   `_`, and `-`, up to 64 bytes.
 - `description` must be non-empty.

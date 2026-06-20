@@ -49,7 +49,7 @@ ephemeral, run-once-then-discard execution.
 | `SCOOT_BACKEND_STORE` | `backend.store` | bool (`true`/`false`/`1`/`0`) |
 | `SCOOT_BACKEND_EXTRA_BODY` | `backend.extra_body` | JSON object |
 | `SCOOT_AGENT_DEFAULT_MODE` | `agent.default_mode` | string (`goal`/`plan`) |
-| `SCOOT_AGENT_COMPACTOR` | `agent.compactor` | string (`drop`/`extractive`) |
+| `SCOOT_AGENT_COMPACTOR` | `agent.compactor` | string (`drop`/`extractive`/`plugin:<name>`) |
 | `SCOOT_AGENT_MAX_TURNS` | `agent.max_turns` | integer |
 | `SCOOT_AGENT_CONTEXT_BUDGET_BYTES` | `agent.context_budget_bytes` | integer |
 | `SCOOT_TOOLS_POLICY` | `tools.policy` | string (`guarded`/`readonly`/`unrestricted`) |
@@ -110,7 +110,7 @@ Either way no secret is ever written to disk.
 | Section | Purpose |
 | --- | --- |
 | `[backend]` | LLM endpoint, model, API-key source, TLS, extra request fields |
-| `[agent]` | ReACT turn limit, cognition mode, context budget |
+| `[agent]` | ReACT turn limit, cognition mode, context budget, compactor plugins |
 | `[tools]` | Tool timeout, execution policy, guarded hardening |
 | `[skills]` | Skill discovery toggle and extra search paths |
 | `[mcp]` | External MCP server declarations for `mcp_call` |
@@ -168,8 +168,9 @@ The cognition engine.
 | --- | --- | --- | --- |
 | `max_turns` | u32 | `32` | Maximum ReACT turns before the agent stops, to bound runaway loops. |
 | `default_mode` | string | `goal` | Cognition mode. `goal` is implemented today; `plan` is reserved (see Roadmap) and does not yet change execution. |
-| `compactor` | string | `extractive` | Context compaction strategy: `extractive` writes a deterministic summary of files, commands, denials, and notable observations; `drop` keeps the old count marker. |
+| `compactor` | string | `extractive` | Context compaction strategy: `extractive` writes a deterministic summary; `drop` keeps the old count marker; `plugin:<name>` runs an external compressor package. |
 | `context_budget_bytes` | usize | `80000` | Cumulative prompt-history budget in **bytes**. `0` disables it. |
+| `compactor_plugin` | table | unset | Dynamic plugin configs keyed by name under `[agent.compactor_plugin.<name>]`. |
 
 **`context_budget_bytes`** guards small-context backends. When the running
 transcript would exceed this size, the agent first **compacts history** —
@@ -178,6 +179,10 @@ using `agent.compactor`. The default `extractive` strategy keeps a deterministic
 navigation summary, such as files read or changed, commands and exit codes,
 policy denials, and obvious TODO-like observations. `drop` is the smallest
 fallback behavior: it replaces older tool transcripts with a short count marker.
+`plugin:<name>` runs the configured external compressor first, but falls back to
+`extractive` and then `drop` if the package is invalid, policy-denied, times
+out, returns malformed output, or produces a marker that would still exceed the
+budget.
 It only fails fast (with a clear error) *before* the next backend call if the
 transcript is still over budget after compaction (the budget is too small for
 even the minimal retained context). Bytes are a coarse proxy for tokens. The
@@ -191,6 +196,38 @@ max_turns = 32
 default_mode = "goal"
 compactor = "extractive"          # or "drop"
 context_budget_bytes = 80000      # 0 disables; tune below your backend window
+```
+
+### `[agent.compactor_plugin.<name>]`
+
+External compressor plugins use the same static package descriptor boundary as
+Wasm tool packages, but `manifest.toml` must set `kind = "compressor"`. Scoot
+does not embed a Wasm runtime; compression is performed by a bounded child
+process. The plugin receives a JSON `CompactionRequest` on stdin and must print
+a JSON object such as `{"marker":"..."}` on stdout.
+
+The package policy must grant only `compute`. Any non-`compute` capability, bad
+output, timeout, non-zero exit, or over-budget marker is treated as unusable and
+falls through to the built-in fallback chain.
+
+| Key | Type | Default | Description |
+| --- | --- | --- | --- |
+| `package` | string | required | Directory validated by `wasm_tool.validatePackage`. |
+| `host` | list of string | unset | Command argv template. Placeholders: `{package}`, `{component}`, `{entry}`. If unset, Scoot tries `{package}/{entry}`. |
+| `timeout_ms` | u64? | `tools.timeout_ms` | Hard child-process timeout. `0` disables the deadline. |
+| `stdout_limit` | usize? | `1048576` | Maximum stdout bytes accepted from the plugin. |
+| `stderr_limit` | usize? | `262144` | Maximum stderr bytes accepted from the plugin. |
+
+```toml
+[agent]
+compactor = "plugin:tiny"
+
+[agent.compactor_plugin.tiny]
+package = "/opt/scoot/compressors/tiny"
+host = ["/usr/bin/env", "tiny-compressor-host", "{package}", "{component}"]
+timeout_ms = 30000
+stdout_limit = 1048576
+stderr_limit = 262144
 ```
 
 ---

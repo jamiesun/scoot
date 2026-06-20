@@ -296,7 +296,11 @@ pub const Agent = struct {
             if (self.context_budget_bytes != 0) {
                 var used = historyBytes(sess.items());
                 if (used > self.context_budget_bytes) {
-                    const compacted = self.compactor.compact(backing, sess, .{ .keep_recent = history_keep_recent }) catch false;
+                    const compacted = self.compactor.compact(backing, sess, .{
+                        .keep_recent = history_keep_recent,
+                        .target_budget_bytes = self.context_budget_bytes,
+                        .io = self.io,
+                    }) catch false;
                     if (compacted) {
                         used = historyBytes(sess.items());
                         self.traceCompacted(turn + 1, used);

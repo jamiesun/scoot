@@ -32,6 +32,11 @@ heading when cutting a release.
 - Client-side MCP support through a guarded `mcp_call` meta-action and
   `[[mcp.servers]]` config. The MVP supports stdio servers and reserves HTTP/SSE
   transports behind the same config and policy seam (#103).
+- External context compressor plugins can now be selected with
+  `agent.compactor = "plugin:<name>"` and configured under
+  `[agent.compactor_plugin.<name>]`. Packages reuse the `wasm_tool` descriptor
+  boundary with `kind = "compressor"` and run as bounded subprocesses with
+  extractive/drop fallback (#98).
 
 ### Changed
 
