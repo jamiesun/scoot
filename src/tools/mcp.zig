@@ -861,18 +861,27 @@ test "mcp: remote headers resolve env credentials and reject protocol overrides"
     }, null, "application/json", .{ .env = &env }));
 }
 
+// Each stdio test spawns `/bin/sh <script>`, and the shell opens the script
+// asynchronously at exec time. A shared /tmp path lets a concurrently-running
+// test binary's deleteTree remove the script first, so the parallel test
+// artifacts race (issue #122). Make every temp dir unique per process.
+fn testTmpDir(arena: std.mem.Allocator, name: []const u8) ![]const u8 {
+    const pid: i64 = @intCast(std.posix.system.getpid());
+    return std.fmt.allocPrint(arena, "/tmp/{s}_{d}", .{ name, pid });
+}
+
 test "mcp: stdio fake server formats tools/call result" {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const io = std.testing.io;
 
-    const dir = "/tmp/scoot_mcp_fake";
+    const dir = try testTmpDir(arena, "scoot_mcp_fake");
     const cwd = std.Io.Dir.cwd();
     cwd.deleteTree(io, dir) catch {};
     defer cwd.deleteTree(io, dir) catch {};
     try cwd.createDirPath(io, dir);
-    const script = dir ++ "/server.sh";
+    const script = try std.fmt.allocPrint(arena, "{s}/server.sh", .{dir});
     try cwd.writeFile(io, .{ .sub_path = script, .data =
         \\#!/bin/sh
         \\while IFS= read -r line; do
@@ -959,12 +968,12 @@ test "mcp: stdio passes configured environment and rejects invalid env" {
         .env = &.{.{ .name = "", .value = "bad" }},
     }, "echo", null, .{ .timeout_ms = 5_000 }));
 
-    const dir = "/tmp/scoot_mcp_env_fake";
+    const dir = try testTmpDir(arena, "scoot_mcp_env_fake");
     const cwd = std.Io.Dir.cwd();
     cwd.deleteTree(io, dir) catch {};
     defer cwd.deleteTree(io, dir) catch {};
     try cwd.createDirPath(io, dir);
-    const script = dir ++ "/server.sh";
+    const script = try std.fmt.allocPrint(arena, "{s}/server.sh", .{dir});
     try cwd.writeFile(io, .{ .sub_path = script, .data =
         \\#!/bin/sh
         \\while IFS= read -r line; do
@@ -995,11 +1004,11 @@ test "mcp: stdio enforces output limits and timeout" {
     const io = std.testing.io;
     const cwd = std.Io.Dir.cwd();
 
-    const noisy_dir = "/tmp/scoot_mcp_noisy_fake";
+    const noisy_dir = try testTmpDir(arena, "scoot_mcp_noisy_fake");
     cwd.deleteTree(io, noisy_dir) catch {};
     defer cwd.deleteTree(io, noisy_dir) catch {};
     try cwd.createDirPath(io, noisy_dir);
-    const noisy_script = noisy_dir ++ "/server.sh";
+    const noisy_script = try std.fmt.allocPrint(arena, "{s}/server.sh", .{noisy_dir});
     try cwd.writeFile(io, .{ .sub_path = noisy_script, .data =
         \\#!/bin/sh
         \\printf '%s\n' 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
@@ -1013,11 +1022,11 @@ test "mcp: stdio enforces output limits and timeout" {
         .allowed_tools = &.{"echo"},
     }, "echo", null, .{ .timeout_ms = 5_000, .stdout_limit = 8 }));
 
-    const sleepy_dir = "/tmp/scoot_mcp_sleepy_fake";
+    const sleepy_dir = try testTmpDir(arena, "scoot_mcp_sleepy_fake");
     cwd.deleteTree(io, sleepy_dir) catch {};
     defer cwd.deleteTree(io, sleepy_dir) catch {};
     try cwd.createDirPath(io, sleepy_dir);
-    const sleepy_script = sleepy_dir ++ "/server.sh";
+    const sleepy_script = try std.fmt.allocPrint(arena, "{s}/server.sh", .{sleepy_dir});
     try cwd.writeFile(io, .{ .sub_path = sleepy_script, .data =
         \\#!/bin/sh
         \\sleep 1

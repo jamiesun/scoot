@@ -66,6 +66,8 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 - 灾难性 shell 命令检测现在也能拦截用空白字符混淆的 fork bomb 模式（#113）。
 - GitHub workflows 现在把 action 引用固定到 commit SHA，并在解压前校验下载的
   Zig 工具链 tarball checksum（#113）。
+- MCP stdio 测试现在使用每进程独立的临时目录，使并行 `zig build test`
+  的多个测试产物不再因共享 `/tmp` 路径而相互竞争（#122）。
 
 ## [0.2.0] - 2026-06-19
 
