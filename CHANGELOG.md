@@ -83,6 +83,9 @@ heading when cutting a release.
   a server that accepts the connection but never sends headers, or that dribbles
   one event just before each per-event deadline, can no longer hang the agent
   indefinitely (#123).
+- MCP remote header values sourced from environment variables (`value_env`) are
+  now checked for CR/LF, closing a header-injection gap where the literal
+  `value` and `prefix` were validated but the resolved env value was not (#124).
 
 ## [0.2.0] - 2026-06-19
 

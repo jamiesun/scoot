@@ -71,6 +71,9 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 - MCP SSE 传输现在对整个会话（建立连接、`receiveHead`、每次 POST 与每次事件
   读取）强制一个累计超时，使得「接受连接却始终不返回响应头」或「在每次单事件
   超时前才挤出一个事件」的服务器再也无法让 agent 永久挂起（#123）。
+- MCP 远程 header 中来自环境变量（`value_env`）的取值现在也会校验 CR/LF，
+  修复了此前只校验字面 `value` 与 `prefix`、却放过已解析环境变量取值的
+  header 注入缺口（#124）。
 
 ## [0.2.0] - 2026-06-19
 
