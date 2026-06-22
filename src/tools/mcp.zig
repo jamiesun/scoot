@@ -500,6 +500,10 @@ fn resolveHeaderValue(arena: std.mem.Allocator, h: Header, env: ?*const std.proc
         if (value.len == 0) return error.McpMissingHeaderEnv;
         break :blk value;
     };
+    // Env-sourced values never pass through validateUserHeader, so re-check the
+    // resolved value here. Without this an environment variable carrying CRLF
+    // could split the header and inject additional request headers.
+    if (headerValueHasNewline(raw)) return error.McpInvalidHeader;
     if (h.prefix.len == 0) return raw;
     return std.fmt.allocPrint(arena, "{s}{s}", .{ h.prefix, raw });
 }
@@ -859,6 +863,36 @@ test "mcp: remote headers resolve env credentials and reject protocol overrides"
         .name = "remote",
         .headers = &.{.{ .name = "Authorization", .value_env = "MISSING", .prefix = "Bearer " }},
     }, null, "application/json", .{ .env = &env }));
+}
+
+test "mcp: env-sourced header values with CRLF are rejected" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+
+    // A CRLF in an env-resolved value must not be able to inject extra headers.
+    try env.put("CRLF_TOKEN", "sekret\r\nX-Injected: 1");
+    try std.testing.expectError(error.McpInvalidHeader, extraHeaders(arena, .{
+        .name = "remote",
+        .headers = &.{.{ .name = "Authorization", .value_env = "CRLF_TOKEN", .prefix = "Bearer " }},
+    }, null, "application/json", .{ .env = &env }));
+
+    // A bare newline (no carriage return) is rejected too.
+    try env.put("LF_TOKEN", "a\nb");
+    try std.testing.expectError(error.McpInvalidHeader, extraHeaders(arena, .{
+        .name = "remote",
+        .headers = &.{.{ .name = "X-Custom", .value_env = "LF_TOKEN" }},
+    }, null, "application/json", .{ .env = &env }));
+
+    // A clean env value still resolves normally.
+    try env.put("OK_TOKEN", "clean-value");
+    const headers = try extraHeaders(arena, .{
+        .name = "remote",
+        .headers = &.{.{ .name = "X-Custom", .value_env = "OK_TOKEN" }},
+    }, null, "application/json", .{ .env = &env });
+    try std.testing.expectEqualStrings("clean-value", headers[headers.len - 1].value);
 }
 
 test "mcp: stdio fake server formats tools/call result" {

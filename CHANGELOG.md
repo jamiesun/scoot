@@ -76,6 +76,9 @@ heading when cutting a release.
   fork-bomb patterns (#113).
 - GitHub workflows now pin action references to commit SHAs and verify the
   downloaded Zig toolchain tarball checksum before extraction (#113).
+- MCP remote header values sourced from environment variables (`value_env`) are
+  now checked for CR/LF, closing a header-injection gap where the literal
+  `value` and `prefix` were validated but the resolved env value was not (#124).
 
 ## [0.2.0] - 2026-06-19
 

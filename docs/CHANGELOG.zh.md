@@ -66,6 +66,9 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 - 灾难性 shell 命令检测现在也能拦截用空白字符混淆的 fork bomb 模式（#113）。
 - GitHub workflows 现在把 action 引用固定到 commit SHA，并在解压前校验下载的
   Zig 工具链 tarball checksum（#113）。
+- MCP 远程 header 中来自环境变量（`value_env`）的取值现在也会校验 CR/LF，
+  修复了此前只校验字面 `value` 与 `prefix`、却放过已解析环境变量取值的
+  header 注入缺口（#124）。
 
 ## [0.2.0] - 2026-06-19
 
