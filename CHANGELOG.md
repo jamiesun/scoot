@@ -76,6 +76,10 @@ heading when cutting a release.
   fork-bomb patterns (#113).
 - GitHub workflows now pin action references to commit SHAs and verify the
   downloaded Zig toolchain tarball checksum before extraction (#113).
+- `zig build test` now runs its three test artifacts sequentially instead of
+  in parallel, so tests that share hardcoded `/tmp/scoot_*` paths across
+  binaries no longer race (one binary's `deleteTree` removing a file another is
+  mid-`exec` on); compilation still parallelizes (#127).
 
 ## [0.2.0] - 2026-06-19
 

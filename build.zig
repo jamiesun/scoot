@@ -66,6 +66,17 @@ pub fn build(b: *std.Build) void {
     const run_internal_tests = b.addRunArtifact(internal_tests);
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
     const run_exe_tests = b.addRunArtifact(exe_tests);
+
+    // The three test artifacts compile overlapping source files, so the same
+    // test (and its hardcoded /tmp/scoot_* path) is built into more than one
+    // binary. Left unordered, the build runner executes the run steps in
+    // parallel and the binaries race on those shared paths: one binary's
+    // `deleteTree` defer can remove a file another is mid-`exec` on. Serialize
+    // the run steps (compilation still parallelizes) so the suite is
+    // deterministic under `zig build test`. See #127.
+    run_internal_tests.step.dependOn(&run_mod_tests.step);
+    run_exe_tests.step.dependOn(&run_internal_tests.step);
+
     const test_step = b.step("test", "运行全部测试");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_internal_tests.step);

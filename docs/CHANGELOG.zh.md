@@ -66,6 +66,9 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 - 灾难性 shell 命令检测现在也能拦截用空白字符混淆的 fork bomb 模式（#113）。
 - GitHub workflows 现在把 action 引用固定到 commit SHA，并在解压前校验下载的
   Zig 工具链 tarball checksum（#113）。
+- `zig build test` 现在会顺序运行三个测试产物，而不是并行执行，因此在多个测试
+  二进制间共享硬编码 `/tmp/scoot_*` 路径的测试不再相互竞争（某个二进制的
+  `deleteTree` 删掉另一个正在 `exec` 的文件）；编译仍然并行（#127）。
 
 ## [0.2.0] - 2026-06-19
 
