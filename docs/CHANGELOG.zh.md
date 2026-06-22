@@ -66,6 +66,8 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 - 灾难性 shell 命令检测现在也能拦截用空白字符混淆的 fork bomb 模式（#113）。
 - GitHub workflows 现在把 action 引用固定到 commit SHA，并在解压前校验下载的
   Zig 工具链 tarball checksum（#113）。
+- MCP stdio 测试现在使用每进程独立的临时目录，使并行 `zig build test`
+  的多个测试产物不再因共享 `/tmp` 路径而相互竞争（#122）。
 - MCP SSE 传输现在对整个会话（建立连接、`receiveHead`、每次 POST 与每次事件
   读取）强制一个累计超时，使得「接受连接却始终不返回响应头」或「在每次单事件
   超时前才挤出一个事件」的服务器再也无法让 agent 永久挂起（#123）。
