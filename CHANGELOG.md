@@ -18,6 +18,11 @@ heading when cutting a release.
 
 ### Added
 
+- `scoot setup` interactive command generates a config directory in a few
+  prompts (config dir with overwrite confirmation, backend `base_url`/`model`,
+  token source via env/0600 file/command, `max_turns`, policy), creates the
+  runtime tree, and writes `config.toml` without ever inlining the token —
+  the fast path for provisioning multiple isolated instances on one host.
 - Release workflow now publishes explicit `ReleaseSmall` assets with `-small`
   suffixes for every supported target.
 - Installer supports `SCOOT_INSTALL_FLAVOR=small` to select the small release

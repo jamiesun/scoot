@@ -14,6 +14,7 @@ const usage =
     \\
     \\Commands:
     \\  repl                 enter interactive REPL (default; /exit quits)
+    \\  setup                interactively generate a config directory (quick / multi-instance deploy)
     \\  config               print resolved runtime directory and backend config
     \\  doctor               check local runtime, config, secret source, and audit paths
     \\  policy check <action> <input> [--mode <mode>]
@@ -65,6 +66,7 @@ pub fn main(init: std.process.Init) !void {
     var trace = false;
     var cmd_config = false;
     var cmd_doctor = false;
+    var cmd_setup = false;
     var cmd_policy_check: ?PolicyCheckCommand = null;
     var cmd_skills: ?SkillsCommand = null;
     var cmd_wasm_tools: ?WasmToolsCommand = null;
@@ -117,6 +119,8 @@ pub fn main(init: std.process.Init) !void {
                 try out.print("error: --ticks argument is not a valid integer: '{s}'\n", .{args[i]});
                 die(out, 2);
             };
+        } else if (eql(arg, "setup")) {
+            cmd_setup = true;
         } else if (eql(arg, "config")) {
             cmd_config = true;
         } else if (eql(arg, "doctor")) {
@@ -198,7 +202,7 @@ pub fn main(init: std.process.Init) !void {
     // --trace is only meaningful for entries that run the ReACT loop (-e/--eval
     // and default REPL). Reject it for non-agent subcommands instead of silently
     // doing nothing.
-    const non_agent_cmd = cmd_config or cmd_doctor or
+    const non_agent_cmd = cmd_config or cmd_doctor or cmd_setup or
         (cmd_policy_check != null) or (cmd_skills != null) or
         (cmd_wasm_tools != null) or (cmd_schedule != null) or (cmd_daemon != null);
     if (trace and non_agent_cmd) {
@@ -220,6 +224,15 @@ pub fn main(init: std.process.Init) !void {
             },
             else => return err,
         };
+
+    // `setup` bootstraps a fresh config directory and must run before the config
+    // load/ensure below: it may target a directory that does not exist yet, and
+    // it has to work even when the current config file is missing or invalid.
+    if (cmd_setup) {
+        try runSetup(out, arena, io, env, dirs.home);
+        return;
+    }
+
     var load_report: scoot.config.LoadReport = .{};
     var cfg = scoot.config.Config.loadFromDirs(arena, io, dirs, &load_report) catch |err| switch (err) {
         error.InvalidConfig => {
@@ -917,6 +930,306 @@ fn checkScheduleConfig(d: *Doctor, cfg: scoot.config.Config) !void {
     } else {
         try d.warn("schedule.jobs", "invalid job triggers exist and will be skipped at runtime");
     }
+}
+
+// --- scoot setup: interactive config directory generator -------------------
+//
+// Provisions a runtime directory (default ~/.scoot or the resolved SCOOT_HOME)
+// in a few prompts: backend base_url/model, the token *source* (env/file/cmd),
+// max_turns, and tool policy. The token itself is never written into
+// config.toml; only the source is recorded, and a chosen token file is tightened
+// to 0600 so secret.zig will accept it. Each generated home is self-contained,
+// which is the basis for running multiple isolated instances (and daemons) on
+// one host via distinct --scoot-home / SCOOT_HOME values.
+
+const SetupError = error{SetupAborted};
+
+const KeySource = enum { env, file, cmd };
+
+const SetupChoices = struct {
+    base_url: []const u8,
+    model: []const u8,
+    key_source: KeySource,
+    api_key_env: []const u8,
+    api_key_file: ?[]const u8,
+    api_key_cmd: ?[]const u8,
+    max_turns: u32,
+    policy: []const u8,
+};
+
+fn runSetup(
+    out: *Io.Writer,
+    arena: std.mem.Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+    default_home: []const u8,
+) !void {
+    var in_buf: [1 << 16]u8 = undefined;
+    var ir: Io.File.Reader = .init(.stdin(), io, &in_buf);
+    runSetupCore(out, &ir.interface, arena, io, env, default_home) catch |err| switch (err) {
+        SetupError.SetupAborted => {
+            out.writeAll("\nSetup aborted; no changes were written.\n") catch {};
+        },
+        else => return err,
+    };
+}
+
+/// IO-injectable wizard core so tests can drive it with a fixed reader. All
+/// filesystem effects happen only after every prompt succeeds, so an aborted
+/// run (EOF / Ctrl-D) leaves the target directory untouched.
+fn runSetupCore(
+    out: *Io.Writer,
+    in: *Io.Reader,
+    arena: std.mem.Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+    default_home: []const u8,
+) !void {
+    try out.writeAll(
+        \\scoot setup
+        \\Interactive configuration generator. Press Enter to accept the [default].
+        \\
+    );
+
+    const home_in = try promptValue(arena, out, in, "Config directory", default_home);
+    const home = try expandTilde(arena, env, home_in);
+    const dirs = try scoot.paths.Paths.fromHome(arena, home);
+
+    if (fileExists(io, dirs.config_toml_file)) {
+        const question = try std.fmt.allocPrint(arena, "Config already exists at {s}. Overwrite?", .{dirs.config_toml_file});
+        if (!try promptYesNo(out, in, question, false)) {
+            try out.writeAll("Keeping the existing config; nothing changed.\n");
+            return;
+        }
+    }
+
+    const base_url = try promptValue(arena, out, in, "Backend base_url", "http://127.0.0.1:11434/v1");
+    const model = try promptValue(arena, out, in, "Model", "qwen2.5");
+
+    try out.writeAll(
+        \\
+        \\API key source (the token itself is never written into config.toml):
+        \\  1) env  - read from an environment variable (recommended)
+        \\  2) file - read from a 0600 token file
+        \\  3) cmd  - run a command whose stdout is the token
+        \\
+    );
+    const choice = try promptValue(arena, out, in, "Choose 1/2/3", "1");
+
+    var key_source: KeySource = .env;
+    var api_key_env: []const u8 = "OPENAI_API_KEY";
+    var api_key_file: ?[]const u8 = null;
+    var api_key_cmd: ?[]const u8 = null;
+    var token_to_write: ?[]const u8 = null;
+
+    if (eql(choice, "2") or std.ascii.eqlIgnoreCase(choice, "file")) {
+        key_source = .file;
+        api_key_file = try promptValue(arena, out, in, "Token file path", dirs.token_file);
+        const tok = try promptValue(arena, out, in, "Paste token now (blank = create the file later)", "");
+        if (tok.len > 0) token_to_write = tok;
+    } else if (eql(choice, "3") or std.ascii.eqlIgnoreCase(choice, "cmd")) {
+        key_source = .cmd;
+        api_key_cmd = try promptNonEmpty(arena, out, in, "Token command (its stdout is the token)");
+    } else {
+        key_source = .env;
+        api_key_env = try promptValue(arena, out, in, "Environment variable name", "OPENAI_API_KEY");
+    }
+
+    const max_turns = try promptU32(out, in, "Max ReACT turns", 32);
+    const policy = try promptPolicy(arena, out, in);
+
+    const choices = SetupChoices{
+        .base_url = base_url,
+        .model = model,
+        .key_source = key_source,
+        .api_key_env = api_key_env,
+        .api_key_file = api_key_file,
+        .api_key_cmd = api_key_cmd,
+        .max_turns = max_turns,
+        .policy = policy,
+    };
+
+    try dirs.ensure(io);
+    if (token_to_write) |tok| try writeTokenFile(io, api_key_file.?, tok);
+
+    const toml = try buildConfigToml(arena, choices);
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = dirs.config_toml_file, .data = toml });
+    Io.Dir.cwd().setFilePermissions(io, dirs.config_toml_file, Io.File.Permissions.fromMode(0o600), .{}) catch {};
+
+    try printSetupSummary(out, dirs, choices, token_to_write != null);
+}
+
+/// Expands a leading `~` / `~/` against $HOME so a typed path does not create a
+/// literal `~` directory. The `~user` form is intentionally not expanded.
+fn expandTilde(arena: std.mem.Allocator, env: *const std.process.Environ.Map, path: []const u8) ![]const u8 {
+    if (path.len == 0 or path[0] != '~') return path;
+    const home = env.get("HOME") orelse return path;
+    if (path.len == 1) return arena.dupe(u8, home);
+    if (path[1] == '/') return std.fs.path.join(arena, &.{ home, path[2..] });
+    return path;
+}
+
+fn writeTokenFile(io: std.Io, path: []const u8, token: []const u8) !void {
+    if (std.fs.path.dirname(path)) |parent| Io.Dir.cwd().createDirPath(io, parent) catch {};
+    try Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = token });
+    // secret.zig refuses to read a token file with any group/other permission bit.
+    Io.Dir.cwd().setFilePermissions(io, path, Io.File.Permissions.fromMode(0o600), .{}) catch {};
+}
+
+/// Reads one line. Empty input returns an arena copy of `default_val`. EOF aborts
+/// the whole wizard. Returned strings are arena-owned because the underlying
+/// stdin buffer is reused on the next read.
+fn promptValue(
+    arena: std.mem.Allocator,
+    out: *Io.Writer,
+    in: *Io.Reader,
+    label: []const u8,
+    default_val: []const u8,
+) ![]const u8 {
+    try out.print("{s} [{s}]: ", .{ label, default_val });
+    out.flush() catch {};
+    const raw = (readLine(in) catch return SetupError.SetupAborted) orelse return SetupError.SetupAborted;
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    return arena.dupe(u8, if (trimmed.len == 0) default_val else trimmed);
+}
+
+fn promptNonEmpty(
+    arena: std.mem.Allocator,
+    out: *Io.Writer,
+    in: *Io.Reader,
+    label: []const u8,
+) ![]const u8 {
+    while (true) {
+        try out.print("{s}: ", .{label});
+        out.flush() catch {};
+        const raw = (readLine(in) catch return SetupError.SetupAborted) orelse return SetupError.SetupAborted;
+        const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+        if (trimmed.len != 0) return arena.dupe(u8, trimmed);
+        try out.writeAll("  (a value is required)\n");
+    }
+}
+
+fn promptYesNo(out: *Io.Writer, in: *Io.Reader, question: []const u8, default_yes: bool) !bool {
+    try out.writeAll(question);
+    try out.writeAll(if (default_yes) " [Y/n]: " else " [y/N]: ");
+    out.flush() catch {};
+    const raw = (readLine(in) catch return SetupError.SetupAborted) orelse return SetupError.SetupAborted;
+    const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+    if (trimmed.len == 0) return default_yes;
+    return trimmed[0] == 'y' or trimmed[0] == 'Y';
+}
+
+fn promptU32(out: *Io.Writer, in: *Io.Reader, label: []const u8, default_val: u32) !u32 {
+    while (true) {
+        try out.print("{s} [{d}]: ", .{ label, default_val });
+        out.flush() catch {};
+        const raw = (readLine(in) catch return SetupError.SetupAborted) orelse return SetupError.SetupAborted;
+        const trimmed = std.mem.trim(u8, raw, " \t\r\n");
+        if (trimmed.len == 0) return default_val;
+        const v = std.fmt.parseInt(u32, trimmed, 10) catch {
+            try out.writeAll("  (enter a whole number)\n");
+            continue;
+        };
+        if (v == 0) {
+            try out.writeAll("  (must be greater than 0)\n");
+            continue;
+        }
+        return v;
+    }
+}
+
+fn promptPolicy(arena: std.mem.Allocator, out: *Io.Writer, in: *Io.Reader) ![]const u8 {
+    while (true) {
+        const v = try promptValue(arena, out, in, "Tool policy (guarded/readonly/unrestricted)", "guarded");
+        if (eql(v, "guarded") or eql(v, "readonly") or eql(v, "unrestricted")) return v;
+        try out.writeAll("  (choose guarded, readonly, or unrestricted)\n");
+    }
+}
+
+fn writeTomlBasicString(w: *Io.Writer, s: []const u8) !void {
+    try w.writeByte('"');
+    for (s) |c| switch (c) {
+        '"' => try w.writeAll("\\\""),
+        '\\' => try w.writeAll("\\\\"),
+        '\n' => try w.writeAll("\\n"),
+        '\r' => try w.writeAll("\\r"),
+        '\t' => try w.writeAll("\\t"),
+        else => if (c < 0x20) try w.print("\\u{x:0>4}", .{c}) else try w.writeByte(c),
+    };
+    try w.writeByte('"');
+}
+
+fn emitTomlKV(w: *Io.Writer, key: []const u8, value: []const u8) !void {
+    try w.writeAll(key);
+    try w.writeAll(" = ");
+    try writeTomlBasicString(w, value);
+    try w.writeByte('\n');
+}
+
+fn buildConfigToml(arena: std.mem.Allocator, c: SetupChoices) ![]const u8 {
+    var aw = std.Io.Writer.Allocating.init(arena);
+    const w = &aw.writer;
+
+    try w.writeAll(
+        \\# Scoot configuration generated by `scoot setup`.
+        \\# Loading order: config.toml first, then config.json. Missing fields fall back to
+        \\# built-in defaults. Keep secrets out of this file; configure only the token source
+        \\# via api_key_env / api_key_file / api_key_cmd. See config.example.toml for all options.
+    );
+    try w.writeAll("\n\n[backend]\n");
+    try emitTomlKV(w, "base_url", c.base_url);
+    try emitTomlKV(w, "model", c.model);
+    try w.writeAll("timeout_ms = 120000\n");
+    switch (c.key_source) {
+        .env => try emitTomlKV(w, "api_key_env", c.api_key_env),
+        .file => {
+            try w.writeAll("# Token is read from this file (must be 0600); env OPENAI_API_KEY is still tried first.\n");
+            try emitTomlKV(w, "api_key_file", c.api_key_file.?);
+        },
+        .cmd => {
+            try w.writeAll("# Token is read from this command's stdout; env OPENAI_API_KEY is still tried first.\n");
+            try emitTomlKV(w, "api_key_cmd", c.api_key_cmd.?);
+        },
+    }
+    try w.writeAll("\n[agent]\n");
+    try w.print("max_turns = {d}\n", .{c.max_turns});
+    try w.writeAll("\n[tools]\n");
+    try emitTomlKV(w, "policy", c.policy);
+    try w.writeAll("\n[audit]\nlevel = \"info\"\nto_file = true\n");
+
+    return aw.written();
+}
+
+fn printSetupSummary(out: *Io.Writer, dirs: scoot.paths.Paths, c: SetupChoices, wrote_token: bool) !void {
+    try out.print(
+        \\
+        \\Done. Wrote {s}
+        \\  base_url : {s}
+        \\  model    : {s}
+        \\  policy   : {s}
+        \\  max_turns: {d}
+        \\
+    , .{ dirs.config_toml_file, c.base_url, c.model, c.policy, c.max_turns });
+
+    switch (c.key_source) {
+        .env => try out.print("  token    : from env ${s} (export it before running)\n", .{c.api_key_env}),
+        .file => if (wrote_token)
+            try out.print("  token    : written to {s} (0600)\n", .{c.api_key_file.?})
+        else
+            try out.print("  token    : will be read from {s}; create it as a 0600 file\n", .{c.api_key_file.?}),
+        .cmd => try out.print("  token    : from command `{s}`\n", .{c.api_key_cmd.?}),
+    }
+
+    try out.print(
+        \\
+        \\Created runtime tree under {s} (skills/, logs/, state/sessions/).
+        \\Edit {s} to tune advanced options (see config.example.toml).
+        \\
+        \\Use this instance with either:
+        \\  scoot --scoot-home {s}
+        \\  SCOOT_HOME={s} scoot daemon run
+        \\
+    , .{ dirs.home, dirs.config_toml_file, dirs.home, dirs.home });
 }
 
 fn fileExists(io: std.Io, path: []const u8) bool {
@@ -2430,6 +2743,115 @@ test "AuditSink: audit file is created owner-only" {
 
     const st = try cwd.statFile(io, dir ++ "/audit.jsonl", .{});
     try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), st.permissions.toMode() & 0o777);
+}
+
+test "buildConfigToml: writes chosen fields, escapes strings, never inlines secrets" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const toml = try buildConfigToml(arena, .{
+        .base_url = "https://api.example.com/\"weird\"\\path/v1",
+        .model = "gpt-4o-mini",
+        .key_source = .file,
+        .api_key_env = "OPENAI_API_KEY",
+        .api_key_file = "/home/user/.scoot/token",
+        .api_key_cmd = null,
+        .max_turns = 16,
+        .policy = "readonly",
+    });
+
+    try std.testing.expect(std.mem.indexOf(u8, toml, "model = \"gpt-4o-mini\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, toml, "api_key_file = \"/home/user/.scoot/token\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, toml, "max_turns = 16") != null);
+    try std.testing.expect(std.mem.indexOf(u8, toml, "policy = \"readonly\"") != null);
+    // Quotes and backslashes inside values must be TOML-escaped.
+    try std.testing.expect(std.mem.indexOf(u8, toml, "\\\"weird\\\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, toml, "\\\\path") != null);
+    // The file source must not also emit an active cmd assignment (the header
+    // comment naming all three sources is expected and fine).
+    try std.testing.expect(std.mem.indexOf(u8, toml, "api_key_cmd = ") == null);
+}
+
+test "runSetupCore: generates 0600 config + token file and runtime tree, no secret in config" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cwd = Io.Dir.cwd();
+    const home = "/tmp/scoot_setup_core_test";
+    cwd.deleteTree(io, home) catch {};
+    defer cwd.deleteTree(io, home) catch {};
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var env: std.process.Environ.Map = .init(gpa);
+    defer env.deinit();
+
+    // Answers: dir(default), base_url, model, source 2 (file), file path(default),
+    // token value, max_turns, policy(default).
+    var in = Io.Reader.fixed("\n" ++
+        "http://localhost:8080/v1\n" ++
+        "gpt-4o-mini\n" ++
+        "2\n" ++
+        "\n" ++
+        "sk-secret-xyz\n" ++
+        "16\n" ++
+        "\n");
+    var obuf: [8192]u8 = undefined;
+    var ow = Io.Writer.fixed(&obuf);
+
+    try runSetupCore(&ow, &in, arena, io, &env, home);
+
+    const cfg_path = home ++ "/config.toml";
+    const st = try cwd.statFile(io, cfg_path, .{});
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), st.permissions.toMode() & 0o777);
+
+    const body = try cwd.readFileAlloc(io, cfg_path, arena, .limited(64 * 1024));
+    try std.testing.expect(std.mem.indexOf(u8, body, "base_url = \"http://localhost:8080/v1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "model = \"gpt-4o-mini\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "max_turns = 16") != null);
+    try std.testing.expect(std.mem.indexOf(u8, body, "api_key_file = ") != null);
+    // Secret must never land in config.toml.
+    try std.testing.expect(std.mem.indexOf(u8, body, "sk-secret-xyz") == null);
+
+    const tok_path = home ++ "/token";
+    const tst = try cwd.statFile(io, tok_path, .{});
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), tst.permissions.toMode() & 0o777);
+    const tok = try cwd.readFileAlloc(io, tok_path, arena, .limited(1024));
+    try std.testing.expectEqualStrings("sk-secret-xyz", tok);
+
+    // The runtime tree must be created.
+    var d = try cwd.openDir(io, home ++ "/state/sessions", .{});
+    d.close(io);
+}
+
+test "runSetupCore: declining overwrite of an existing config leaves it unchanged" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cwd = Io.Dir.cwd();
+    const home = "/tmp/scoot_setup_decline_test";
+    cwd.deleteTree(io, home) catch {};
+    defer cwd.deleteTree(io, home) catch {};
+    try cwd.createDirPath(io, home);
+    try cwd.writeFile(io, .{ .sub_path = home ++ "/config.toml", .data = "ORIGINAL\n" });
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var env: std.process.Environ.Map = .init(gpa);
+    defer env.deinit();
+
+    // dir(default), then decline the overwrite prompt.
+    var in = Io.Reader.fixed("\n" ++ "n\n");
+    var obuf: [4096]u8 = undefined;
+    var ow = Io.Writer.fixed(&obuf);
+
+    try runSetupCore(&ow, &in, arena, io, &env, home);
+
+    const body = try cwd.readFileAlloc(io, home ++ "/config.toml", arena, .limited(1024));
+    try std.testing.expectEqualStrings("ORIGINAL\n", body);
 }
 
 test {

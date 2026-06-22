@@ -113,7 +113,16 @@ zig build -Doptimize=ReleaseSmall
 
 ### 2. 配置
 
-Scoot 默认使用 `~/.scoot`。从示例配置开始：
+最快的方式是交互式向导。它会为你创建运行目录并写出 `config.toml`，只需回答后端、token
+来源、`max_turns` 与策略等少数问题 —— 它也是在同一台主机上搭建 **多个隔离实例** 的最简方式
+（让每个实例各自指向自己的 `--scoot-home` / `SCOOT_HOME`）：
+
+```sh
+./zig-out/bin/scoot setup
+./zig-out/bin/scoot --scoot-home /opt/scoot/instance-a setup
+```
+
+或者手动从示例配置开始。Scoot 默认使用 `~/.scoot`：
 
 ```sh
 mkdir -p ~/.scoot
@@ -166,6 +175,7 @@ export OPENAI_API_KEY="sk-..."
 | `scoot` 或 `scoot repl` | 启动交互式 REPL。 |
 | `scoot -e "<goal>"` | 执行一个目标后退出。 |
 | `scoot --trace -e "<goal>"` | 执行一个目标，并把执行轨迹写到 stderr。 |
+| `scoot setup` | 交互式生成配置目录（快速 / 多实例部署）。 |
 | `scoot config` | 显示解析后的配置，密钥会被隐藏。 |
 | `scoot doctor` | 执行本地健康检查。 |
 | `scoot policy check <action> <input>` | 在指定策略下 dry-run 一个工具动作。 |

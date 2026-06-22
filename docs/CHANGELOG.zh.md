@@ -17,6 +17,10 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 ### 新增
 
+- 新增 `scoot setup` 交互式命令，通过几步提问生成配置目录（配置目录并带覆盖确认、
+  后端 `base_url`/`model`、token 来源 env/0600 文件/命令、`max_turns`、策略），创建运行
+  目录树并写出 `config.toml`，且绝不内联 token —— 是在同一台主机上搭建多个隔离实例的
+  快捷路径。
 - Release workflow 现在会为每个支持目标发布带 `-small` 后缀的
   `ReleaseSmall` 产物。
 - 安装脚本支持 `SCOOT_INSTALL_FLAVOR=small`，可选择 small release 产物，
