@@ -78,6 +78,11 @@ heading when cutting a release.
   downloaded Zig toolchain tarball checksum before extraction (#113).
 - MCP stdio tests now use per-process temp directories, so the parallel
   `zig build test` artifacts no longer race on shared `/tmp` paths (#122).
+- MCP SSE transport now enforces a single cumulative timeout across the entire
+  session (connection setup, `receiveHead`, every POST, and every event read) so
+  a server that accepts the connection but never sends headers, or that dribbles
+  one event just before each per-event deadline, can no longer hang the agent
+  indefinitely (#123).
 
 ## [0.2.0] - 2026-06-19
 

@@ -168,51 +168,111 @@ const SseTransport = struct {
         args: ?std.json.Value,
         opts: Options,
     ) ![]const u8 {
-        const sse_url = server.url orelse return error.McpMissingUrl;
+        // One cumulative deadline bounds the whole SSE session: connection setup,
+        // receiveHead, every POST, and every event read. Per-operation timeouts
+        // alone let the initial GET/receiveHead block forever and let
+        // readSseResponse re-arm a fresh per-event timeout indefinitely against a
+        // slow or hostile server. Running the inner session with timeout_ms = 0
+        // keeps it blocking (no nested Select); the deadline arm cancels it.
+        if (opts.timeout_ms == 0) return sseSession(arena, io, server, tool, args, opts);
 
-        var client: std.http.Client = .{ .allocator = arena, .io = io };
-        defer client.deinit();
-        try configureCa(arena, io, &client, opts.ca_file);
+        var inner_opts = opts;
+        inner_opts.timeout_ms = 0;
 
-        const uri = try std.Uri.parse(sse_url);
-        var req = try client.request(.GET, uri, .{
-            .headers = .{
-                .accept_encoding = .{ .override = "identity" },
+        const Outcome = union(enum) { done: SseCallAttempt, timed_out: void };
+        var buf: [2]Outcome = undefined;
+        var sel = std.Io.Select(Outcome).init(io, &buf);
+        sel.concurrent(.done, sseSessionAttempt, .{ arena, io, server, tool, args, inner_opts }) catch {
+            return sseSession(arena, io, server, tool, args, opts);
+        };
+        sel.concurrent(.timed_out, sleepDeadline, .{ io, opts.timeout_ms }) catch {
+            sel.cancelDiscard();
+            return sseSession(arena, io, server, tool, args, opts);
+        };
+
+        const winner = sel.await() catch {
+            sel.cancelDiscard();
+            return error.Canceled;
+        };
+        sel.cancelDiscard();
+        return switch (winner) {
+            .done => |r| switch (r) {
+                .ok => |body| body,
+                .err => |err| err,
             },
-            .extra_headers = try extraHeaders(arena, server, null, "text/event-stream", opts),
-            .keep_alive = false,
-        });
-        defer req.deinit();
-        try req.sendBodiless();
-
-        var redirect_buffer: [8 * 1024]u8 = undefined;
-        var response = try req.receiveHead(&redirect_buffer);
-        if (!statusOk(@intFromEnum(response.head.status))) return error.McpHttpStatus;
-
-        var transfer_buffer: [64]u8 = undefined;
-        const reader = response.reader(&transfer_buffer);
-
-        const endpoint_event = try readSseEvent(arena, io, reader, opts);
-        if (!std.mem.eql(u8, endpoint_event.event, "endpoint")) return error.McpProtocolError;
-        const endpoint = try resolveEndpoint(arena, sse_url, endpoint_event.data);
-
-        const init = try initializeRequest(arena);
-        try postSseMessage(arena, io, server, endpoint, init, opts);
-        _ = try readSseResponse(arena, io, reader, 1, opts);
-
-        const initialized = try initializedNotification(arena);
-        try postSseMessage(arena, io, server, endpoint, initialized, opts);
-
-        const list = try toolsListRequest(arena);
-        try postSseMessage(arena, io, server, endpoint, list, opts);
-        _ = try readSseResponse(arena, io, reader, 2, opts);
-
-        const call_req = try toolsCallRequest(arena, tool, args);
-        try postSseMessage(arena, io, server, endpoint, call_req, opts);
-        const body = try readSseResponse(arena, io, reader, 3, opts);
-        return try formatResponse(arena, server.name, tool, body, "");
+            .timed_out => error.Timeout,
+        };
     }
 };
+
+const SseCallAttempt = union(enum) {
+    ok: []const u8,
+    err: anyerror,
+};
+
+fn sseSessionAttempt(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    server: Server,
+    tool: []const u8,
+    args: ?std.json.Value,
+    opts: Options,
+) SseCallAttempt {
+    return .{ .ok = sseSession(arena, io, server, tool, args, opts) catch |err| return .{ .err = err } };
+}
+
+fn sseSession(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    server: Server,
+    tool: []const u8,
+    args: ?std.json.Value,
+    opts: Options,
+) ![]const u8 {
+    const sse_url = server.url orelse return error.McpMissingUrl;
+
+    var client: std.http.Client = .{ .allocator = arena, .io = io };
+    defer client.deinit();
+    try configureCa(arena, io, &client, opts.ca_file);
+
+    const uri = try std.Uri.parse(sse_url);
+    var req = try client.request(.GET, uri, .{
+        .headers = .{
+            .accept_encoding = .{ .override = "identity" },
+        },
+        .extra_headers = try extraHeaders(arena, server, null, "text/event-stream", opts),
+        .keep_alive = false,
+    });
+    defer req.deinit();
+    try req.sendBodiless();
+
+    var redirect_buffer: [8 * 1024]u8 = undefined;
+    var response = try req.receiveHead(&redirect_buffer);
+    if (!statusOk(@intFromEnum(response.head.status))) return error.McpHttpStatus;
+
+    var transfer_buffer: [64]u8 = undefined;
+    const reader = response.reader(&transfer_buffer);
+
+    const endpoint_event = try readSseEvent(arena, io, reader, opts);
+    if (!std.mem.eql(u8, endpoint_event.event, "endpoint")) return error.McpProtocolError;
+    const endpoint = try resolveEndpoint(arena, sse_url, endpoint_event.data);
+
+    const init = try initializeRequest(arena);
+    try postSseMessage(arena, io, server, endpoint, init, opts);
+    _ = try readSseResponse(arena, io, reader, 1, opts);
+
+    const initialized = try initializedNotification(arena);
+    try postSseMessage(arena, io, server, endpoint, initialized, opts);
+
+    const list = try toolsListRequest(arena);
+    try postSseMessage(arena, io, server, endpoint, list, opts);
+    _ = try readSseResponse(arena, io, reader, 2, opts);
+
+    const call_req = try toolsCallRequest(arena, tool, args);
+    try postSseMessage(arena, io, server, endpoint, call_req, opts);
+    const body = try readSseResponse(arena, io, reader, 3, opts);
+    return try formatResponse(arena, server.name, tool, body, "");
+}
 
 const StdioTransport = struct {
     fn call(
@@ -1081,6 +1141,29 @@ test "mcp: legacy SSE endpoint resolves relative URLs" {
         "https://example.test/mcp/messages",
         try resolveEndpoint(arena, "https://example.test/mcp/sse", "messages"),
     );
+}
+
+test "mcp: SSE transport times out when server never sends response headers" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const io = std.testing.io;
+
+    // Listen but never accept: the kernel completes the TCP handshake from its
+    // backlog, so the client connects and sends the GET, then blocks forever in
+    // receiveHead waiting for response headers. The session deadline must fire.
+    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var server = try addr.listen(io, .{ .reuse_address = true });
+    defer server.deinit(io);
+    const port = server.socket.address.getPort();
+
+    const url = try std.fmt.allocPrint(arena, "http://127.0.0.1:{d}/sse", .{port});
+    try std.testing.expectError(error.Timeout, call(arena, io, .{
+        .name = "remote",
+        .transport = "sse",
+        .url = url,
+        .allowed_tools = &.{"lookup"},
+    }, "lookup", null, .{ .timeout_ms = 100 }));
 }
 
 test {
