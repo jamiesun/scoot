@@ -86,6 +86,10 @@ heading when cutting a release.
 - MCP remote header values sourced from environment variables (`value_env`) are
   now checked for CR/LF, closing a header-injection gap where the literal
   `value` and `prefix` were validated but the resolved env value was not (#124).
+- MCP stdio transport now bounds the child-process stdin write with the
+  configured timeout. Previously a server that never drained its stdin blocked
+  the write forever once the OS pipe buffer filled with the model-controlled
+  request, and the `defer child.kill` cleanup could never run (#125).
 
 ## [0.2.0] - 2026-06-19
 
