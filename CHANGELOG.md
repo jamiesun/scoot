@@ -76,6 +76,8 @@ heading when cutting a release.
   fork-bomb patterns (#113).
 - GitHub workflows now pin action references to commit SHAs and verify the
   downloaded Zig toolchain tarball checksum before extraction (#113).
+- MCP stdio tests now use per-process temp directories, so the parallel
+  `zig build test` artifacts no longer race on shared `/tmp` paths (#122).
 
 ## [0.2.0] - 2026-06-19
 
