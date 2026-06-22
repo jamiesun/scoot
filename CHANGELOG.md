@@ -76,6 +76,20 @@ heading when cutting a release.
   fork-bomb patterns (#113).
 - GitHub workflows now pin action references to commit SHAs and verify the
   downloaded Zig toolchain tarball checksum before extraction (#113).
+- MCP stdio tests now use per-process temp directories, so the parallel
+  `zig build test` artifacts no longer race on shared `/tmp` paths (#122).
+- MCP SSE transport now enforces a single cumulative timeout across the entire
+  session (connection setup, `receiveHead`, every POST, and every event read) so
+  a server that accepts the connection but never sends headers, or that dribbles
+  one event just before each per-event deadline, can no longer hang the agent
+  indefinitely (#123).
+- MCP remote header values sourced from environment variables (`value_env`) are
+  now checked for CR/LF, closing a header-injection gap where the literal
+  `value` and `prefix` were validated but the resolved env value was not (#124).
+- MCP stdio transport now bounds the child-process stdin write with the
+  configured timeout. Previously a server that never drained its stdin blocked
+  the write forever once the OS pipe buffer filled with the model-controlled
+  request, and the `defer child.kill` cleanup could never run (#125).
 - `zig build test` now runs its three test artifacts sequentially instead of
   in parallel, so tests that share hardcoded `/tmp/scoot_*` paths across
   binaries no longer race (one binary's `deleteTree` removing a file another is

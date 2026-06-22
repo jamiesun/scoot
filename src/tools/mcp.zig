@@ -168,51 +168,111 @@ const SseTransport = struct {
         args: ?std.json.Value,
         opts: Options,
     ) ![]const u8 {
-        const sse_url = server.url orelse return error.McpMissingUrl;
+        // One cumulative deadline bounds the whole SSE session: connection setup,
+        // receiveHead, every POST, and every event read. Per-operation timeouts
+        // alone let the initial GET/receiveHead block forever and let
+        // readSseResponse re-arm a fresh per-event timeout indefinitely against a
+        // slow or hostile server. Running the inner session with timeout_ms = 0
+        // keeps it blocking (no nested Select); the deadline arm cancels it.
+        if (opts.timeout_ms == 0) return sseSession(arena, io, server, tool, args, opts);
 
-        var client: std.http.Client = .{ .allocator = arena, .io = io };
-        defer client.deinit();
-        try configureCa(arena, io, &client, opts.ca_file);
+        var inner_opts = opts;
+        inner_opts.timeout_ms = 0;
 
-        const uri = try std.Uri.parse(sse_url);
-        var req = try client.request(.GET, uri, .{
-            .headers = .{
-                .accept_encoding = .{ .override = "identity" },
+        const Outcome = union(enum) { done: SseCallAttempt, timed_out: void };
+        var buf: [2]Outcome = undefined;
+        var sel = std.Io.Select(Outcome).init(io, &buf);
+        sel.concurrent(.done, sseSessionAttempt, .{ arena, io, server, tool, args, inner_opts }) catch {
+            return sseSession(arena, io, server, tool, args, opts);
+        };
+        sel.concurrent(.timed_out, sleepDeadline, .{ io, opts.timeout_ms }) catch {
+            sel.cancelDiscard();
+            return sseSession(arena, io, server, tool, args, opts);
+        };
+
+        const winner = sel.await() catch {
+            sel.cancelDiscard();
+            return error.Canceled;
+        };
+        sel.cancelDiscard();
+        return switch (winner) {
+            .done => |r| switch (r) {
+                .ok => |body| body,
+                .err => |err| err,
             },
-            .extra_headers = try extraHeaders(arena, server, null, "text/event-stream", opts),
-            .keep_alive = false,
-        });
-        defer req.deinit();
-        try req.sendBodiless();
-
-        var redirect_buffer: [8 * 1024]u8 = undefined;
-        var response = try req.receiveHead(&redirect_buffer);
-        if (!statusOk(@intFromEnum(response.head.status))) return error.McpHttpStatus;
-
-        var transfer_buffer: [64]u8 = undefined;
-        const reader = response.reader(&transfer_buffer);
-
-        const endpoint_event = try readSseEvent(arena, io, reader, opts);
-        if (!std.mem.eql(u8, endpoint_event.event, "endpoint")) return error.McpProtocolError;
-        const endpoint = try resolveEndpoint(arena, sse_url, endpoint_event.data);
-
-        const init = try initializeRequest(arena);
-        try postSseMessage(arena, io, server, endpoint, init, opts);
-        _ = try readSseResponse(arena, io, reader, 1, opts);
-
-        const initialized = try initializedNotification(arena);
-        try postSseMessage(arena, io, server, endpoint, initialized, opts);
-
-        const list = try toolsListRequest(arena);
-        try postSseMessage(arena, io, server, endpoint, list, opts);
-        _ = try readSseResponse(arena, io, reader, 2, opts);
-
-        const call_req = try toolsCallRequest(arena, tool, args);
-        try postSseMessage(arena, io, server, endpoint, call_req, opts);
-        const body = try readSseResponse(arena, io, reader, 3, opts);
-        return try formatResponse(arena, server.name, tool, body, "");
+            .timed_out => error.Timeout,
+        };
     }
 };
+
+const SseCallAttempt = union(enum) {
+    ok: []const u8,
+    err: anyerror,
+};
+
+fn sseSessionAttempt(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    server: Server,
+    tool: []const u8,
+    args: ?std.json.Value,
+    opts: Options,
+) SseCallAttempt {
+    return .{ .ok = sseSession(arena, io, server, tool, args, opts) catch |err| return .{ .err = err } };
+}
+
+fn sseSession(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    server: Server,
+    tool: []const u8,
+    args: ?std.json.Value,
+    opts: Options,
+) ![]const u8 {
+    const sse_url = server.url orelse return error.McpMissingUrl;
+
+    var client: std.http.Client = .{ .allocator = arena, .io = io };
+    defer client.deinit();
+    try configureCa(arena, io, &client, opts.ca_file);
+
+    const uri = try std.Uri.parse(sse_url);
+    var req = try client.request(.GET, uri, .{
+        .headers = .{
+            .accept_encoding = .{ .override = "identity" },
+        },
+        .extra_headers = try extraHeaders(arena, server, null, "text/event-stream", opts),
+        .keep_alive = false,
+    });
+    defer req.deinit();
+    try req.sendBodiless();
+
+    var redirect_buffer: [8 * 1024]u8 = undefined;
+    var response = try req.receiveHead(&redirect_buffer);
+    if (!statusOk(@intFromEnum(response.head.status))) return error.McpHttpStatus;
+
+    var transfer_buffer: [64]u8 = undefined;
+    const reader = response.reader(&transfer_buffer);
+
+    const endpoint_event = try readSseEvent(arena, io, reader, opts);
+    if (!std.mem.eql(u8, endpoint_event.event, "endpoint")) return error.McpProtocolError;
+    const endpoint = try resolveEndpoint(arena, sse_url, endpoint_event.data);
+
+    const init = try initializeRequest(arena);
+    try postSseMessage(arena, io, server, endpoint, init, opts);
+    _ = try readSseResponse(arena, io, reader, 1, opts);
+
+    const initialized = try initializedNotification(arena);
+    try postSseMessage(arena, io, server, endpoint, initialized, opts);
+
+    const list = try toolsListRequest(arena);
+    try postSseMessage(arena, io, server, endpoint, list, opts);
+    _ = try readSseResponse(arena, io, reader, 2, opts);
+
+    const call_req = try toolsCallRequest(arena, tool, args);
+    try postSseMessage(arena, io, server, endpoint, call_req, opts);
+    const body = try readSseResponse(arena, io, reader, 3, opts);
+    return try formatResponse(arena, server.name, tool, body, "");
+}
 
 const StdioTransport = struct {
     fn call(
@@ -250,7 +310,7 @@ const StdioTransport = struct {
         defer child.kill(io);
 
         const input = try requestStream(arena, tool, args);
-        child.stdin.?.writeStreamingAll(io, input) catch return error.McpWriteFailed;
+        try writeStdinWithTimeout(io, child.stdin.?, input, opts.timeout_ms);
         child.stdin.?.close(io);
         child.stdin = null;
 
@@ -280,6 +340,58 @@ const StdioTransport = struct {
         return try formatResponse(arena, server.name, tool, stdout, stderr);
     }
 };
+
+const StdinWriteAttempt = union(enum) {
+    ok: void,
+    err: anyerror,
+};
+
+fn writeStdin(io: std.Io, file: std.Io.File, input: []const u8) !void {
+    file.writeStreamingAll(io, input) catch |err| switch (err) {
+        // The server closed its stdin read end: it does not consume the request
+        // (or exited early). That is not fatal here; fall through and read
+        // whatever it produced so the response/error path stays authoritative.
+        error.BrokenPipe => {},
+        else => return error.McpWriteFailed,
+    };
+}
+
+fn writeStdinAttempt(io: std.Io, file: std.Io.File, input: []const u8) StdinWriteAttempt {
+    writeStdin(io, file, input) catch |err| return .{ .err = err };
+    return .{ .ok = {} };
+}
+
+// Bound the stdin write with a hard timeout. Without it a server that stays
+// alive but never drains its stdin blocks writeStreamingAll forever once the OS
+// pipe buffer fills (the request is model-controlled and uncapped), and the
+// `defer child.kill` can never run because we are stuck inside the write.
+fn writeStdinWithTimeout(io: std.Io, file: std.Io.File, input: []const u8, timeout_ms: u64) !void {
+    if (timeout_ms == 0) return writeStdin(io, file, input);
+
+    const Outcome = union(enum) { done: StdinWriteAttempt, timed_out: void };
+    var buf: [2]Outcome = undefined;
+    var sel = std.Io.Select(Outcome).init(io, &buf);
+    sel.concurrent(.done, writeStdinAttempt, .{ io, file, input }) catch {
+        return writeStdin(io, file, input);
+    };
+    sel.concurrent(.timed_out, sleepDeadline, .{ io, timeout_ms }) catch {
+        sel.cancelDiscard();
+        return writeStdin(io, file, input);
+    };
+
+    const winner = sel.await() catch {
+        sel.cancelDiscard();
+        return error.Canceled;
+    };
+    sel.cancelDiscard();
+    return switch (winner) {
+        .done => |r| switch (r) {
+            .ok => {},
+            .err => |err| err,
+        },
+        .timed_out => error.Timeout,
+    };
+}
 
 fn deadline(io: std.Io, timeout_ms: u64) std.Io.Timeout {
     if (timeout_ms == 0) return .none;
@@ -500,6 +612,10 @@ fn resolveHeaderValue(arena: std.mem.Allocator, h: Header, env: ?*const std.proc
         if (value.len == 0) return error.McpMissingHeaderEnv;
         break :blk value;
     };
+    // Env-sourced values never pass through validateUserHeader, so re-check the
+    // resolved value here. Without this an environment variable carrying CRLF
+    // could split the header and inject additional request headers.
+    if (headerValueHasNewline(raw)) return error.McpInvalidHeader;
     if (h.prefix.len == 0) return raw;
     return std.fmt.allocPrint(arena, "{s}{s}", .{ h.prefix, raw });
 }
@@ -861,18 +977,57 @@ test "mcp: remote headers resolve env credentials and reject protocol overrides"
     }, null, "application/json", .{ .env = &env }));
 }
 
+test "mcp: env-sourced header values with CRLF are rejected" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+
+    // A CRLF in an env-resolved value must not be able to inject extra headers.
+    try env.put("CRLF_TOKEN", "sekret\r\nX-Injected: 1");
+    try std.testing.expectError(error.McpInvalidHeader, extraHeaders(arena, .{
+        .name = "remote",
+        .headers = &.{.{ .name = "Authorization", .value_env = "CRLF_TOKEN", .prefix = "Bearer " }},
+    }, null, "application/json", .{ .env = &env }));
+
+    // A bare newline (no carriage return) is rejected too.
+    try env.put("LF_TOKEN", "a\nb");
+    try std.testing.expectError(error.McpInvalidHeader, extraHeaders(arena, .{
+        .name = "remote",
+        .headers = &.{.{ .name = "X-Custom", .value_env = "LF_TOKEN" }},
+    }, null, "application/json", .{ .env = &env }));
+
+    // A clean env value still resolves normally.
+    try env.put("OK_TOKEN", "clean-value");
+    const headers = try extraHeaders(arena, .{
+        .name = "remote",
+        .headers = &.{.{ .name = "X-Custom", .value_env = "OK_TOKEN" }},
+    }, null, "application/json", .{ .env = &env });
+    try std.testing.expectEqualStrings("clean-value", headers[headers.len - 1].value);
+}
+
+// Each stdio test spawns `/bin/sh <script>`, and the shell opens the script
+// asynchronously at exec time. A shared /tmp path lets a concurrently-running
+// test binary's deleteTree remove the script first, so the parallel test
+// artifacts race (issue #122). Make every temp dir unique per process.
+fn testTmpDir(arena: std.mem.Allocator, name: []const u8) ![]const u8 {
+    const pid: i64 = @intCast(std.posix.system.getpid());
+    return std.fmt.allocPrint(arena, "/tmp/{s}_{d}", .{ name, pid });
+}
+
 test "mcp: stdio fake server formats tools/call result" {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const io = std.testing.io;
 
-    const dir = "/tmp/scoot_mcp_fake";
+    const dir = try testTmpDir(arena, "scoot_mcp_fake");
     const cwd = std.Io.Dir.cwd();
     cwd.deleteTree(io, dir) catch {};
     defer cwd.deleteTree(io, dir) catch {};
     try cwd.createDirPath(io, dir);
-    const script = dir ++ "/server.sh";
+    const script = try std.fmt.allocPrint(arena, "{s}/server.sh", .{dir});
     try cwd.writeFile(io, .{ .sub_path = script, .data =
         \\#!/bin/sh
         \\while IFS= read -r line; do
@@ -959,12 +1114,12 @@ test "mcp: stdio passes configured environment and rejects invalid env" {
         .env = &.{.{ .name = "", .value = "bad" }},
     }, "echo", null, .{ .timeout_ms = 5_000 }));
 
-    const dir = "/tmp/scoot_mcp_env_fake";
+    const dir = try testTmpDir(arena, "scoot_mcp_env_fake");
     const cwd = std.Io.Dir.cwd();
     cwd.deleteTree(io, dir) catch {};
     defer cwd.deleteTree(io, dir) catch {};
     try cwd.createDirPath(io, dir);
-    const script = dir ++ "/server.sh";
+    const script = try std.fmt.allocPrint(arena, "{s}/server.sh", .{dir});
     try cwd.writeFile(io, .{ .sub_path = script, .data =
         \\#!/bin/sh
         \\while IFS= read -r line; do
@@ -995,11 +1150,11 @@ test "mcp: stdio enforces output limits and timeout" {
     const io = std.testing.io;
     const cwd = std.Io.Dir.cwd();
 
-    const noisy_dir = "/tmp/scoot_mcp_noisy_fake";
+    const noisy_dir = try testTmpDir(arena, "scoot_mcp_noisy_fake");
     cwd.deleteTree(io, noisy_dir) catch {};
     defer cwd.deleteTree(io, noisy_dir) catch {};
     try cwd.createDirPath(io, noisy_dir);
-    const noisy_script = noisy_dir ++ "/server.sh";
+    const noisy_script = try std.fmt.allocPrint(arena, "{s}/server.sh", .{noisy_dir});
     try cwd.writeFile(io, .{ .sub_path = noisy_script, .data =
         \\#!/bin/sh
         \\printf '%s\n' 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
@@ -1013,11 +1168,11 @@ test "mcp: stdio enforces output limits and timeout" {
         .allowed_tools = &.{"echo"},
     }, "echo", null, .{ .timeout_ms = 5_000, .stdout_limit = 8 }));
 
-    const sleepy_dir = "/tmp/scoot_mcp_sleepy_fake";
+    const sleepy_dir = try testTmpDir(arena, "scoot_mcp_sleepy_fake");
     cwd.deleteTree(io, sleepy_dir) catch {};
     defer cwd.deleteTree(io, sleepy_dir) catch {};
     try cwd.createDirPath(io, sleepy_dir);
-    const sleepy_script = sleepy_dir ++ "/server.sh";
+    const sleepy_script = try std.fmt.allocPrint(arena, "{s}/server.sh", .{sleepy_dir});
     try cwd.writeFile(io, .{ .sub_path = sleepy_script, .data =
         \\#!/bin/sh
         \\sleep 1
@@ -1030,6 +1185,42 @@ test "mcp: stdio enforces output limits and timeout" {
         .args = &.{sleepy_script},
         .allowed_tools = &.{"echo"},
     }, "echo", null, .{ .timeout_ms = 20 }));
+}
+
+test "mcp: stdio stdin write times out when the server never reads stdin" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+
+    const pid = std.posix.system.getpid();
+    const dir = try std.fmt.allocPrint(arena, "/tmp/scoot_mcp_write_block_{d}", .{pid});
+    cwd.deleteTree(io, dir) catch {};
+    defer cwd.deleteTree(io, dir) catch {};
+    try cwd.createDirPath(io, dir);
+    const script = try std.fmt.allocPrint(arena, "{s}/server.sh", .{dir});
+    // Stays alive but never reads stdin, so once the OS pipe buffer fills the
+    // client's stdin write blocks indefinitely.
+    try cwd.writeFile(io, .{ .sub_path = script, .data =
+        \\#!/bin/sh
+        \\sleep 5
+        \\
+    });
+
+    // Oversized, model-controlled arguments that exceed any default pipe buffer.
+    const big = try arena.alloc(u8, 2 * 1024 * 1024);
+    @memset(big, 'a');
+    const args_json = try std.fmt.allocPrint(arena, "{{\"data\":\"{s}\"}}", .{big});
+    const args = try std.json.parseFromSliceLeaky(std.json.Value, arena, args_json, .{});
+
+    try std.testing.expectError(error.Timeout, call(arena, io, .{
+        .name = "fake",
+        .transport = "stdio",
+        .command = "/bin/sh",
+        .args = &.{script},
+        .allowed_tools = &.{"echo"},
+    }, "echo", args, .{ .timeout_ms = 100 }));
 }
 
 test "mcp: allowed tools fail closed and streamable_http aliases http" {
@@ -1072,6 +1263,29 @@ test "mcp: legacy SSE endpoint resolves relative URLs" {
         "https://example.test/mcp/messages",
         try resolveEndpoint(arena, "https://example.test/mcp/sse", "messages"),
     );
+}
+
+test "mcp: SSE transport times out when server never sends response headers" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const io = std.testing.io;
+
+    // Listen but never accept: the kernel completes the TCP handshake from its
+    // backlog, so the client connects and sends the GET, then blocks forever in
+    // receiveHead waiting for response headers. The session deadline must fire.
+    const addr = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var server = try addr.listen(io, .{ .reuse_address = true });
+    defer server.deinit(io);
+    const port = server.socket.address.getPort();
+
+    const url = try std.fmt.allocPrint(arena, "http://127.0.0.1:{d}/sse", .{port});
+    try std.testing.expectError(error.Timeout, call(arena, io, .{
+        .name = "remote",
+        .transport = "sse",
+        .url = url,
+        .allowed_tools = &.{"lookup"},
+    }, "lookup", null, .{ .timeout_ms = 100 }));
 }
 
 test {

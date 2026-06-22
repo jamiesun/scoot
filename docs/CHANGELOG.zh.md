@@ -66,6 +66,17 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 - 灾难性 shell 命令检测现在也能拦截用空白字符混淆的 fork bomb 模式（#113）。
 - GitHub workflows 现在把 action 引用固定到 commit SHA，并在解压前校验下载的
   Zig 工具链 tarball checksum（#113）。
+- MCP stdio 测试现在使用每进程独立的临时目录，使并行 `zig build test`
+  的多个测试产物不再因共享 `/tmp` 路径而相互竞争（#122）。
+- MCP SSE 传输现在对整个会话（建立连接、`receiveHead`、每次 POST 与每次事件
+  读取）强制一个累计超时，使得「接受连接却始终不返回响应头」或「在每次单事件
+  超时前才挤出一个事件」的服务器再也无法让 agent 永久挂起（#123）。
+- MCP 远程 header 中来自环境变量（`value_env`）的取值现在也会校验 CR/LF，
+  修复了此前只校验字面 `value` 与 `prefix`、却放过已解析环境变量取值的
+  header 注入缺口（#124）。
+- MCP stdio 传输现在会用配置的超时约束子进程 stdin 写入。此前当服务器始终不
+  读取自己的 stdin 时，一旦 OS 管道缓冲被模型可控的请求写满，写入就会永久阻塞，
+  且 `defer child.kill` 清理永远无法执行（#125）。
 - `zig build test` 现在会顺序运行三个测试产物，而不是并行执行，因此在多个测试
   二进制间共享硬编码 `/tmp/scoot_*` 路径的测试不再相互竞争（某个二进制的
   `deleteTree` 删掉另一个正在 `exec` 的文件）；编译仍然并行（#127）。
