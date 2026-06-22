@@ -66,6 +66,9 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 - 灾难性 shell 命令检测现在也能拦截用空白字符混淆的 fork bomb 模式（#113）。
 - GitHub workflows 现在把 action 引用固定到 commit SHA，并在解压前校验下载的
   Zig 工具链 tarball checksum（#113）。
+- MCP stdio 传输现在会用配置的超时约束子进程 stdin 写入。此前当服务器始终不
+  读取自己的 stdin 时，一旦 OS 管道缓冲被模型可控的请求写满，写入就会永久阻塞，
+  且 `defer child.kill` 清理永远无法执行（#125）。
 
 ## [0.2.0] - 2026-06-19
 

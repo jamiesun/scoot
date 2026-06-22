@@ -250,7 +250,7 @@ const StdioTransport = struct {
         defer child.kill(io);
 
         const input = try requestStream(arena, tool, args);
-        child.stdin.?.writeStreamingAll(io, input) catch return error.McpWriteFailed;
+        try writeStdinWithTimeout(io, child.stdin.?, input, opts.timeout_ms);
         child.stdin.?.close(io);
         child.stdin = null;
 
@@ -280,6 +280,58 @@ const StdioTransport = struct {
         return try formatResponse(arena, server.name, tool, stdout, stderr);
     }
 };
+
+const StdinWriteAttempt = union(enum) {
+    ok: void,
+    err: anyerror,
+};
+
+fn writeStdin(io: std.Io, file: std.Io.File, input: []const u8) !void {
+    file.writeStreamingAll(io, input) catch |err| switch (err) {
+        // The server closed its stdin read end: it does not consume the request
+        // (or exited early). That is not fatal here; fall through and read
+        // whatever it produced so the response/error path stays authoritative.
+        error.BrokenPipe => {},
+        else => return error.McpWriteFailed,
+    };
+}
+
+fn writeStdinAttempt(io: std.Io, file: std.Io.File, input: []const u8) StdinWriteAttempt {
+    writeStdin(io, file, input) catch |err| return .{ .err = err };
+    return .{ .ok = {} };
+}
+
+// Bound the stdin write with a hard timeout. Without it a server that stays
+// alive but never drains its stdin blocks writeStreamingAll forever once the OS
+// pipe buffer fills (the request is model-controlled and uncapped), and the
+// `defer child.kill` can never run because we are stuck inside the write.
+fn writeStdinWithTimeout(io: std.Io, file: std.Io.File, input: []const u8, timeout_ms: u64) !void {
+    if (timeout_ms == 0) return writeStdin(io, file, input);
+
+    const Outcome = union(enum) { done: StdinWriteAttempt, timed_out: void };
+    var buf: [2]Outcome = undefined;
+    var sel = std.Io.Select(Outcome).init(io, &buf);
+    sel.concurrent(.done, writeStdinAttempt, .{ io, file, input }) catch {
+        return writeStdin(io, file, input);
+    };
+    sel.concurrent(.timed_out, sleepDeadline, .{ io, timeout_ms }) catch {
+        sel.cancelDiscard();
+        return writeStdin(io, file, input);
+    };
+
+    const winner = sel.await() catch {
+        sel.cancelDiscard();
+        return error.Canceled;
+    };
+    sel.cancelDiscard();
+    return switch (winner) {
+        .done => |r| switch (r) {
+            .ok => {},
+            .err => |err| err,
+        },
+        .timed_out => error.Timeout,
+    };
+}
 
 fn deadline(io: std.Io, timeout_ms: u64) std.Io.Timeout {
     if (timeout_ms == 0) return .none;
@@ -1030,6 +1082,42 @@ test "mcp: stdio enforces output limits and timeout" {
         .args = &.{sleepy_script},
         .allowed_tools = &.{"echo"},
     }, "echo", null, .{ .timeout_ms = 20 }));
+}
+
+test "mcp: stdio stdin write times out when the server never reads stdin" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+
+    const pid = std.posix.system.getpid();
+    const dir = try std.fmt.allocPrint(arena, "/tmp/scoot_mcp_write_block_{d}", .{pid});
+    cwd.deleteTree(io, dir) catch {};
+    defer cwd.deleteTree(io, dir) catch {};
+    try cwd.createDirPath(io, dir);
+    const script = try std.fmt.allocPrint(arena, "{s}/server.sh", .{dir});
+    // Stays alive but never reads stdin, so once the OS pipe buffer fills the
+    // client's stdin write blocks indefinitely.
+    try cwd.writeFile(io, .{ .sub_path = script, .data =
+        \\#!/bin/sh
+        \\sleep 5
+        \\
+    });
+
+    // Oversized, model-controlled arguments that exceed any default pipe buffer.
+    const big = try arena.alloc(u8, 2 * 1024 * 1024);
+    @memset(big, 'a');
+    const args_json = try std.fmt.allocPrint(arena, "{{\"data\":\"{s}\"}}", .{big});
+    const args = try std.json.parseFromSliceLeaky(std.json.Value, arena, args_json, .{});
+
+    try std.testing.expectError(error.Timeout, call(arena, io, .{
+        .name = "fake",
+        .transport = "stdio",
+        .command = "/bin/sh",
+        .args = &.{script},
+        .allowed_tools = &.{"echo"},
+    }, "echo", args, .{ .timeout_ms = 100 }));
 }
 
 test "mcp: allowed tools fail closed and streamable_http aliases http" {

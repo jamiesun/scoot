@@ -76,6 +76,10 @@ heading when cutting a release.
   fork-bomb patterns (#113).
 - GitHub workflows now pin action references to commit SHAs and verify the
   downloaded Zig toolchain tarball checksum before extraction (#113).
+- MCP stdio transport now bounds the child-process stdin write with the
+  configured timeout. Previously a server that never drained its stdin blocked
+  the write forever once the OS pipe buffer filled with the model-controlled
+  request, and the `defer child.kill` cleanup could never run (#125).
 
 ## [0.2.0] - 2026-06-19
 
