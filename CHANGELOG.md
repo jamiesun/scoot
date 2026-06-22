@@ -90,6 +90,10 @@ heading when cutting a release.
   configured timeout. Previously a server that never drained its stdin blocked
   the write forever once the OS pipe buffer filled with the model-controlled
   request, and the `defer child.kill` cleanup could never run (#125).
+- `zig build test` now runs its three test artifacts sequentially instead of
+  in parallel, so tests that share hardcoded `/tmp/scoot_*` paths across
+  binaries no longer race (one binary's `deleteTree` removing a file another is
+  mid-`exec` on); compilation still parallelizes (#127).
 
 ## [0.2.0] - 2026-06-19
 

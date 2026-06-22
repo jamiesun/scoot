@@ -77,6 +77,9 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 - MCP stdio 传输现在会用配置的超时约束子进程 stdin 写入。此前当服务器始终不
   读取自己的 stdin 时，一旦 OS 管道缓冲被模型可控的请求写满，写入就会永久阻塞，
   且 `defer child.kill` 清理永远无法执行（#125）。
+- `zig build test` 现在会顺序运行三个测试产物，而不是并行执行，因此在多个测试
+  二进制间共享硬编码 `/tmp/scoot_*` 路径的测试不再相互竞争（某个二进制的
+  `deleteTree` 删掉另一个正在 `exec` 的文件）；编译仍然并行（#127）。
 
 ## [0.2.0] - 2026-06-19
 
