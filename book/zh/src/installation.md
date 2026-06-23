@@ -97,6 +97,137 @@ install -m 0755 scoot/scoot /usr/local/bin/scoot
 scoot --version
 ```
 
+## 用 Docker 运行
+
+每个 tag release 还会发布面向 `linux/amd64`、`linux/arm64` 和
+`linux/arm/v7` 的多平台 Linux 容器镜像。
+
+标签规则：
+
+| 标签形式 | 运行时基础镜像 | 示例 |
+| --- | --- | --- |
+| `<version>`、`<major>.<minor>`、`<major>`、`latest` | 极简 BusyBox/musl 运行时 | `ghcr.io/jamiesun/scoot:latest` |
+| `<version>-alpine`、`<major>.<minor>-alpine`、`<major>-alpine`、`latest-alpine` | 带 `apk` 的 Alpine 运行时 | `ghcr.io/jamiesun/scoot:latest-alpine` |
+
+镜像的 entrypoint 是 `scoot`，因此镜像名后面的参数就是普通 Scoot CLI 参数。
+容器里建议始终显式设置 `SCOOT_HOME` 并挂载一个运行目录，避免 `config.toml`、
+状态、会话、技能和日志留在镜像文件系统里：
+
+```sh
+mkdir -p scoot-data
+cp config.example.toml scoot-data/config.toml
+
+docker run --rm \
+  -e SCOOT_HOME=/scoot \
+  -e OPENAI_API_KEY \
+  -v "$PWD/scoot-data:/scoot" \
+  ghcr.io/jamiesun/scoot:latest \
+  --version
+```
+
+如果后端运行在 Docker 宿主机上，容器内的 `127.0.0.1` 指的是容器自身。请把挂载
+配置里的 `[backend] base_url` 改成容器可访问的地址：
+
+```toml
+[backend]
+base_url = "http://host.docker.internal:11434/v1"
+model = "qwen2.5"
+api_key_env = "OPENAI_API_KEY"
+```
+
+Docker Desktop 和 OrbStack 通常内置 `host.docker.internal`。Linux Docker
+Engine 可以给 `docker run` 增加：
+
+```sh
+--add-host=host.docker.internal:host-gateway
+```
+
+或者直接使用后端真实的 LAN / 容器网络地址。
+
+### 一次性容器运行
+
+当人、CI 或脚本只想立即执行一个目标时，使用一次性容器：
+
+```sh
+docker run --rm \
+  -e SCOOT_HOME=/scoot \
+  -e OPENAI_API_KEY \
+  -v "$PWD/scoot-data:/scoot" \
+  ghcr.io/jamiesun/scoot:latest \
+  -e "Inspect the mounted project and summarize obvious risks."
+```
+
+### 无人值守调度容器
+
+`config.example.toml` 默认关闭调度：
+
+```toml
+[schedule]
+enabled = false
+```
+
+这是有意的安全默认值。`scoot schedule run` 和 `scoot daemon run` 会在挂载配置
+没有显式启用调度时 fail-closed 退出。容器化调度任务需要编辑
+`scoot-data/config.toml`：
+
+```toml
+[schedule]
+enabled = true
+poll_ms = 1000
+
+[[schedule.jobs]]
+id = "disk-check"
+goal = "Inspect disk usage and summarize anomalies"
+every_sec = 300
+mode = "readonly"
+```
+
+当外部调度器每次拉起一个新容器时，例如宿主机 cron、CI、systemd timer 或
+Kubernetes CronJob，使用 `schedule run --ticks 1`：
+
+```sh
+docker run --rm \
+  -e SCOOT_HOME=/scoot \
+  -e OPENAI_API_KEY \
+  -v "$PWD/scoot-data:/scoot" \
+  ghcr.io/jamiesun/scoot:latest \
+  schedule run --ticks 1
+```
+
+因为每次容器退出后调度器运行时内存都会重置，`every_sec` 任务在每个新容器的第一轮
+都会到期。如果需要严格日历时间，建议使用与外部调度频率一致的 `cron` 触发器。
+
+当容器本身要长驻并负责持续轮询任务时，使用 `daemon run`。它保持前台运行，写入
+`state/daemon.json` 与 `state/daemon.pid`，并处理 SIGTERM/SIGINT 以便容器干净停止：
+
+```sh
+docker run -d --name scoot \
+  -e SCOOT_HOME=/scoot \
+  -e OPENAI_API_KEY \
+  -v "$PWD/scoot-data:/scoot" \
+  ghcr.io/jamiesun/scoot:latest \
+  daemon run
+```
+
+`docker compose` 示例：
+
+```yaml
+services:
+  scoot:
+    image: ghcr.io/jamiesun/scoot:latest
+    command: ["daemon", "run"]
+    restart: unless-stopped
+    environment:
+      SCOOT_HOME: /scoot
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+    volumes:
+      - ./scoot-data:/scoot
+```
+
+运行 `daemon run` 时，`/scoot` 挂载目录需要可写，因为 Scoot 要写入 state、session
+和 audit 文件。如果希望配置文件本身只读，可以让部署系统管理 `config.toml`，同时保留
+可写的 `state/`、`logs/` 和 `skills/` 子目录。
+
 ## 首次运行设置
 
 Scoot 在内置默认值下即可工作，但你通常会把它指向自己的后端与 token。

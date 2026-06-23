@@ -111,6 +111,53 @@ zig build -Doptimize=ReleaseSafe
 zig build -Doptimize=ReleaseSmall
 ```
 
+也可以直接使用发布的容器镜像运行 Scoot。建议显式设置 `SCOOT_HOME` 并挂载一个
+运行目录，让配置、状态、会话和日志都落在宿主机目录，而不是镜像文件系统里：
+
+```sh
+mkdir -p scoot-data
+cp config.example.toml scoot-data/config.toml
+
+docker run --rm \
+  -e SCOOT_HOME=/scoot \
+  -e OPENAI_API_KEY \
+  -v "$PWD/scoot-data:/scoot" \
+  ghcr.io/jamiesun/scoot:latest \
+  --version
+```
+
+无人值守容器任务必须编辑挂载出来的 `scoot-data/config.toml`，把 `[schedule]`
+里的 `enabled` 改成 `true`。示例配置默认保持关闭，因此 `schedule run` 和
+`daemon run` 会在未显式启用时 fail-closed 退出，这是刻意的安全默认值。
+
+如果由 Docker、cron、CI 或 Kubernetes 周期性拉起一次新容器，使用：
+
+```sh
+docker run --rm \
+  -e SCOOT_HOME=/scoot \
+  -e OPENAI_API_KEY \
+  -v "$PWD/scoot-data:/scoot" \
+  ghcr.io/jamiesun/scoot:latest \
+  schedule run --ticks 1
+```
+
+如果容器本身要长驻并负责持续轮询任务，使用：
+
+```sh
+docker run -d --name scoot \
+  -e SCOOT_HOME=/scoot \
+  -e OPENAI_API_KEY \
+  -v "$PWD/scoot-data:/scoot" \
+  ghcr.io/jamiesun/scoot:latest \
+  daemon run
+```
+
+如果后端运行在 Docker 宿主机上，请把挂载配置中的 `backend.base_url` 改成容器内
+可访问的地址，例如 `http://host.docker.internal:11434/v1`。Linux Docker
+Engine 可额外加 `--add-host=host.docker.internal:host-gateway`，或直接使用真实
+网络地址。Alpine 运行时镜像使用对应的 `-alpine` 标签，例如
+`ghcr.io/jamiesun/scoot:latest-alpine`。
+
 ### 2. 配置
 
 最快的方式是交互式向导。它会为你创建运行目录并写出 `config.toml`，只需回答后端、token
@@ -333,6 +380,10 @@ book/zh/             中文 mdBook 站点
 每个目标还会发布一个用 `ReleaseSmall` 构建的 `-small` 变体。每个产物包含
 `.tar.gz` 压缩包和 `.sha256` 校验文件。release 也会单独发布 `install.sh`，
 并且每个压缩包中也包含同一份安装脚本。
+
+Docker release 会发布面向 `linux/amd64`、`linux/arm64` 和 `linux/arm/v7`
+的多平台 Linux 镜像。默认标签使用极简运行时镜像；对应的 Alpine 运行时标签
+会带 `-alpine` 后缀，例如 `latest-alpine` 和 `<version>-alpine`。
 
 ## 文档同步规则
 

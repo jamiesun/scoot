@@ -1,0 +1,17 @@
+.git
+.github
+.gitignore
+.zig-cache
+zig-out
+dist
+dist-artifacts
+docs
+site
+book
+localtest
+README.md
+CHANGELOG.md
+AGENT.md
+LICENSE
+Makefile
+install.sh

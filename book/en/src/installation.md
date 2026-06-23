@@ -101,6 +101,144 @@ install -m 0755 scoot/scoot /usr/local/bin/scoot
 scoot --version
 ```
 
+## Run With Docker
+
+Tagged releases also publish multi-platform Linux container images for
+`linux/amd64`, `linux/arm64`, and `linux/arm/v7`.
+
+Use these tags:
+
+| Tag form | Runtime base | Example |
+| --- | --- | --- |
+| `<version>`, `<major>.<minor>`, `<major>`, `latest` | minimal BusyBox/musl runtime | `ghcr.io/jamiesun/scoot:latest` |
+| `<version>-alpine`, `<major>.<minor>-alpine`, `<major>-alpine`, `latest-alpine` | Alpine runtime with `apk` available | `ghcr.io/jamiesun/scoot:latest-alpine` |
+
+The image entrypoint is `scoot`, so arguments after the image name are normal
+Scoot CLI arguments. Always set `SCOOT_HOME` to an explicit mounted directory in
+containers; this keeps `config.toml`, state, sessions, skills, and logs outside
+the image filesystem.
+
+```sh
+mkdir -p scoot-data
+cp config.example.toml scoot-data/config.toml
+
+docker run --rm \
+  -e SCOOT_HOME=/scoot \
+  -e OPENAI_API_KEY \
+  -v "$PWD/scoot-data:/scoot" \
+  ghcr.io/jamiesun/scoot:latest \
+  --version
+```
+
+If the backend runs on the Docker host, `127.0.0.1` inside the container is the
+container itself. Set `[backend] base_url` in the mounted config to a
+container-reachable address:
+
+```toml
+[backend]
+base_url = "http://host.docker.internal:11434/v1"
+model = "qwen2.5"
+api_key_env = "OPENAI_API_KEY"
+```
+
+On Docker Desktop and OrbStack, `host.docker.internal` is normally available.
+On Linux Docker Engine, either add this flag to `docker run`:
+
+```sh
+--add-host=host.docker.internal:host-gateway
+```
+
+or use the backend's real LAN/container-network address.
+
+### One-Off Container Runs
+
+Use a one-off container when a human, CI job, or script wants one immediate
+goal:
+
+```sh
+docker run --rm \
+  -e SCOOT_HOME=/scoot \
+  -e OPENAI_API_KEY \
+  -v "$PWD/scoot-data:/scoot" \
+  ghcr.io/jamiesun/scoot:latest \
+  -e "Inspect the mounted project and summarize obvious risks."
+```
+
+### Unattended Scheduled Containers
+
+`config.example.toml` keeps scheduling disabled:
+
+```toml
+[schedule]
+enabled = false
+```
+
+That default is intentional. `scoot schedule run` and `scoot daemon run` fail
+closed until the mounted config explicitly opts into unattended work. For
+containerized scheduled jobs, edit `scoot-data/config.toml`:
+
+```toml
+[schedule]
+enabled = true
+poll_ms = 1000
+
+[[schedule.jobs]]
+id = "disk-check"
+goal = "Inspect disk usage and summarize anomalies"
+every_sec = 300
+mode = "readonly"
+```
+
+Use `schedule run --ticks 1` when an external scheduler starts a fresh container
+for each poll, such as host cron, CI, systemd timer, or a Kubernetes CronJob:
+
+```sh
+docker run --rm \
+  -e SCOOT_HOME=/scoot \
+  -e OPENAI_API_KEY \
+  -v "$PWD/scoot-data:/scoot" \
+  ghcr.io/jamiesun/scoot:latest \
+  schedule run --ticks 1
+```
+
+Because scheduler runtime memory resets when each container exits, an
+`every_sec` job is due on the first tick of each new container. For strict
+calendar timing under an external scheduler, prefer a `cron` trigger that
+matches the external schedule.
+
+Use `daemon run` when the container itself should stay up and own the polling
+loop. It stays in the foreground, writes `state/daemon.json` and
+`state/daemon.pid`, and handles SIGTERM/SIGINT for clean container shutdown:
+
+```sh
+docker run -d --name scoot \
+  -e SCOOT_HOME=/scoot \
+  -e OPENAI_API_KEY \
+  -v "$PWD/scoot-data:/scoot" \
+  ghcr.io/jamiesun/scoot:latest \
+  daemon run
+```
+
+For `docker compose`:
+
+```yaml
+services:
+  scoot:
+    image: ghcr.io/jamiesun/scoot:latest
+    command: ["daemon", "run"]
+    restart: unless-stopped
+    environment:
+      SCOOT_HOME: /scoot
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+    volumes:
+      - ./scoot-data:/scoot
+```
+
+Use a writable mount for `/scoot` when running `daemon run`, because Scoot needs
+to write state, session, and audit files. If you want the config file itself to
+be read-only, mount a directory with writable `state/`, `logs/`, and `skills/`
+subdirectories and keep `config.toml` owned by your deployment tooling.
+
 ## First-Run Setup
 
 Scoot works with built-in defaults, but you will usually point it at your own

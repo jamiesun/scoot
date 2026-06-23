@@ -36,3 +36,6 @@ cp docs/assets/scoot-logo.svg docs/assets/scoot-favicon.svg docs/assets/scoot-fa
 - `macos-arm64`
 
 每个目标上传一个 `.tar.gz` 压缩包和一个 `.sha256` 校验文件。
+
+Docker release 还会发布面向 `linux/amd64`、`linux/arm64` 和 `linux/arm/v7`
+的多平台 Linux 镜像。Alpine 运行时标签使用 `-alpine` 后缀。

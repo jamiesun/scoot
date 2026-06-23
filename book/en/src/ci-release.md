@@ -36,3 +36,7 @@ Tagged releases publish these targets:
 - `macos-arm64`
 
 Each target uploads a `.tar.gz` archive and a `.sha256` checksum.
+
+Docker releases also publish multi-platform Linux images for `linux/amd64`,
+`linux/arm64`, and `linux/arm/v7`. Alpine runtime tags use the `-alpine`
+suffix.

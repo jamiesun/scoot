@@ -125,6 +125,58 @@ zig build -Doptimize=ReleaseSafe
 zig build -Doptimize=ReleaseSmall
 ```
 
+You can also run Scoot from the published container image. Set `SCOOT_HOME` to
+an explicit mounted directory so config, state, sessions, and logs are not tied
+to the image filesystem:
+
+```sh
+mkdir -p scoot-data
+cp config.example.toml scoot-data/config.toml
+
+docker run --rm \
+  -e SCOOT_HOME=/scoot \
+  -e OPENAI_API_KEY \
+  -v "$PWD/scoot-data:/scoot" \
+  ghcr.io/jamiesun/scoot:latest \
+  --version
+```
+
+For unattended container jobs, edit the mounted `scoot-data/config.toml` and set
+`[schedule] enabled = true`. The sample config keeps scheduling disabled by
+default, so `schedule run` and `daemon run` intentionally fail closed until the
+mounted config explicitly enables them.
+
+Use `schedule run --ticks 1` when Docker, cron, CI, or Kubernetes starts a fresh
+container for each poll:
+
+```sh
+docker run --rm \
+  -e SCOOT_HOME=/scoot \
+  -e OPENAI_API_KEY \
+  -v "$PWD/scoot-data:/scoot" \
+  ghcr.io/jamiesun/scoot:latest \
+  schedule run --ticks 1
+```
+
+Use `daemon run` when the container itself should stay up and own the polling
+loop:
+
+```sh
+docker run -d --name scoot \
+  -e SCOOT_HOME=/scoot \
+  -e OPENAI_API_KEY \
+  -v "$PWD/scoot-data:/scoot" \
+  ghcr.io/jamiesun/scoot:latest \
+  daemon run
+```
+
+If the backend runs on the Docker host, set `backend.base_url` in the mounted
+config to a host-reachable address such as
+`http://host.docker.internal:11434/v1`. On Linux Docker Engine, add
+`--add-host=host.docker.internal:host-gateway` or use a real network address.
+Alpine runtime images use matching `-alpine` tags, for example
+`ghcr.io/jamiesun/scoot:latest-alpine`.
+
 ### 2. Configure
 
 The fastest way is the interactive wizard. It creates the runtime directory and
@@ -356,6 +408,11 @@ Tagged releases publish:
 Each target also publishes a `-small` variant built with `ReleaseSmall`. Every
 artifact includes a `.tar.gz` archive and a `.sha256` checksum. The release also
 publishes `install.sh`, and each archive includes a copy of the same installer.
+
+Docker releases publish multi-platform Linux images for `linux/amd64`,
+`linux/arm64`, and `linux/arm/v7`. The default tags use the minimal runtime
+image; matching Alpine runtime tags are published with an `-alpine` suffix, for
+example `latest-alpine` and `<version>-alpine`.
 
 ## Documentation Policy
 
