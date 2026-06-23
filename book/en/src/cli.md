@@ -65,6 +65,32 @@ debugging without polluting the answer. The trace emits a live progress marker
 doing while it waits, instead of the trace appearing to freeze. `--retries`
 controls retry of transient backend failures (rate limits, 5xx).
 
+### `setup`
+
+```sh
+scoot setup
+scoot --scoot-home /opt/scoot/instance-a setup
+```
+
+Interactively generates a config directory so you can provision an instance in a
+few prompts instead of hand-editing TOML. It asks for the **config directory**
+(default `~/.scoot`, or the resolved `--scoot-home` / `SCOOT_HOME`), the backend
+`base_url` and `model`, the **token source** (`env`, a `0600` file, or a
+command), `max_turns`, and the tool `policy`. It then creates the runtime tree
+(`skills/`, `logs/`, `state/sessions/`) and writes `config.toml`.
+
+The token value itself is **never written into `config.toml`** — only the source
+is recorded. If you choose the file source and paste a token, Scoot writes it to
+the token file and tightens it to `0600` so the [secret loader](configuration.md)
+accepts it. If `config.toml` already exists you are asked to confirm before it is
+overwritten. Anything the prompts do not cover can be edited in the generated
+file afterwards (see `config.example.toml`).
+
+Because each generated directory is self-contained, `setup` is the fast path for
+running **multiple isolated instances** on one host — point each at its own
+`--scoot-home` / `SCOOT_HOME`. See [Scheduling & Daemon](scheduling.md) for the
+one-daemon-per-directory rule.
+
 ### `config`
 
 ```sh
@@ -160,7 +186,9 @@ scoot daemon stop                   # send SIGTERM to a running daemon
 The foreground long-running mode for scheduled jobs. It writes
 `state/daemon.json` and `state/daemon.pid`, installs SIGTERM/SIGINT handlers, and
 preserves the unattended `readonly` safety rule. It does **not** fork into the
-background — use `systemd`, `launchd`, `tmux`, or a shell job for that. See
+background — use `systemd`, `launchd`, `tmux`, or a shell job for that. Only one
+daemon runs per runtime directory; to run several on one host, give each its own
+`--scoot-home` / `SCOOT_HOME` (use `scoot setup` to provision them). See
 [Scheduling & Daemon](scheduling.md).
 
 ## Exit Behavior & Piping

@@ -127,7 +127,18 @@ zig build -Doptimize=ReleaseSmall
 
 ### 2. Configure
 
-Scoot uses `~/.scoot` by default. Start from the sample config:
+The fastest way is the interactive wizard. It creates the runtime directory and
+writes `config.toml` for you, asking only for the backend, token source,
+`max_turns`, and policy — and it is the easiest way to provision **multiple
+isolated instances** on one host (point each at its own `--scoot-home` /
+`SCOOT_HOME`):
+
+```sh
+./zig-out/bin/scoot setup
+./zig-out/bin/scoot --scoot-home /opt/scoot/instance-a setup
+```
+
+Or start from the sample config by hand. Scoot uses `~/.scoot` by default:
 
 ```sh
 mkdir -p ~/.scoot
@@ -184,6 +195,7 @@ and `running: <tool>`.
 | `scoot` or `scoot repl` | Start the interactive REPL. |
 | `scoot -e "<goal>"` | Run one goal and exit. |
 | `scoot --trace -e "<goal>"` | Run one goal with execution trace on stderr. |
+| `scoot setup` | Interactively generate a config directory (quick / multi-instance deploy). |
 | `scoot config` | Show resolved config with secrets redacted. |
 | `scoot doctor` | Run local health checks. |
 | `scoot policy check <action> <input>` | Dry-run a tool action against a policy. |

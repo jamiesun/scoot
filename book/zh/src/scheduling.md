@@ -80,6 +80,29 @@ scoot daemon stop               # SIGTERM a running daemon
 
 `daemon run` 加载有效任务、写入生命周期状态、安装 SIGTERM/SIGINT 处理器，并运行与 `schedule run` 相同的循环。`stop` 时，守护进程跑完当前一轮、写入 stopped 状态、删除其 pid 文件。
 
+### 每个运行目录只允许一个守护进程
+
+守护进程的存活通过每个运行目录下的 `state/daemon.json` 与 `state/daemon.pid` 跟踪。当**同一**目录已有守护进程存活时再启动 `daemon run` 会被拒绝，因此两个守护进程绝不会共享同一套调度与状态目录：
+
+```text
+[scoot] refusing to start: detected daemon already running (pid=… started_at=…).
+Run `scoot daemon stop` first.
+```
+
+该守卫用信号 `0` 探测所记录的 pid；崩溃残留的过期 pid 会被视为非正常停止，并在下一次运行时恢复。
+
+要在**同一主机上运行多个守护进程**，给每个实例分配各自的运行目录，它们便完全隔离 —— 配置、任务、会话、日志与生命周期文件各自独立：
+
+```sh
+scoot --scoot-home /opt/scoot/web   setup     # 搭建实例 "web"
+scoot --scoot-home /opt/scoot/batch setup     # 搭建实例 "batch"
+
+SCOOT_HOME=/opt/scoot/web   scoot daemon run &
+SCOOT_HOME=/opt/scoot/batch scoot daemon run &
+```
+
+`scoot setup` 是搭建每个目录的最快方式。由于单守护进程守卫是按目录隔离的，不同的 home 永不冲突。
+
 ### 生命周期文件
 
 ```text

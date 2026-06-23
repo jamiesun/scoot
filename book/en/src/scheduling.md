@@ -93,6 +93,36 @@ scoot daemon stop               # SIGTERM a running daemon
 handlers, and runs the same loop as `schedule run`. On `stop`, the daemon
 finishes the current tick, writes a stopped state, and removes its pid file.
 
+### One Daemon Per Runtime Directory
+
+Daemon liveness is tracked per runtime directory through `state/daemon.json` and
+`state/daemon.pid`. Starting `daemon run` while another daemon for the **same**
+directory is still alive is refused, so two daemons can never share one schedule
+and state tree:
+
+```text
+[scoot] refusing to start: detected daemon already running (pid=… started_at=…).
+Run `scoot daemon stop` first.
+```
+
+The guard probes the recorded pid with signal `0`; a stale pid left by a crash is
+treated as an unclean stop and recovered on the next run.
+
+To run **several daemons on one host**, give each its own runtime directory and
+they stay fully isolated — separate config, jobs, sessions, logs, and lifecycle
+files:
+
+```sh
+scoot --scoot-home /opt/scoot/web   setup     # provision instance "web"
+scoot --scoot-home /opt/scoot/batch setup     # provision instance "batch"
+
+SCOOT_HOME=/opt/scoot/web   scoot daemon run &
+SCOOT_HOME=/opt/scoot/batch scoot daemon run &
+```
+
+`scoot setup` is the quickest way to provision each directory. Because the
+single-daemon guard is per directory, distinct homes never collide.
+
 ### Lifecycle Files
 
 ```text
