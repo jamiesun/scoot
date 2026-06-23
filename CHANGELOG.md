@@ -16,8 +16,14 @@ heading when cutting a release.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-23
+
 ### Added
 
+- Docker releases now publish multi-platform Linux images for `linux/amd64`,
+  `linux/arm64`, and `linux/arm/v7` to GHCR, with optional Docker Hub publishing
+  when Docker Hub credentials are configured. The default image uses a minimal
+  BusyBox/musl runtime and matching Alpine runtime tags use an `-alpine` suffix.
 - `scoot setup` interactive command generates a config directory in a few
   prompts (config dir with overwrite confirmation, backend `base_url`/`model`,
   token source via env/0600 file/command, `max_turns`, policy), creates the
@@ -165,6 +171,7 @@ First feature release since `v0.0.2` (which only carried release-workflow plumbi
 
 - Polished homepage/license metadata, infographic, bilingual user guide (#6, #19, #36)
 
-[Unreleased]: https://github.com/jamiesun/scoot/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/jamiesun/scoot/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/jamiesun/scoot/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jamiesun/scoot/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jamiesun/scoot/compare/v0.0.2...v0.1.0
