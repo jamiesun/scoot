@@ -311,7 +311,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (cmd_policy_check) |pc| {
-        try runPolicyCheck(out, arena, cfg, pc);
+        try runPolicyCheck(out, arena, io, cfg, pc);
         return;
     }
 
@@ -577,7 +577,7 @@ fn parsePolicyCommand(out: *Io.Writer, args: []const []const u8, i: *usize) Poli
     return pc;
 }
 
-fn runPolicyCheck(out: *Io.Writer, arena: std.mem.Allocator, cfg: scoot.config.Config, pc: PolicyCheckCommand) !void {
+fn runPolicyCheck(out: *Io.Writer, arena: std.mem.Allocator, io: std.Io, cfg: scoot.config.Config, pc: PolicyCheckCommand) !void {
     const mode_text = pc.mode orelse cfg.tools.policy;
     const mode = parsePolicyModeStrict(mode_text) orelse {
         try out.print("error: unknown policy mode '{s}' (expected: guarded / readonly / unrestricted)\n", .{mode_text});
@@ -587,7 +587,16 @@ fn runPolicyCheck(out: *Io.Writer, arena: std.mem.Allocator, cfg: scoot.config.C
         try out.print("error: unknown action '{s}'\n", .{pc.action});
         die(out, 2);
     };
-    const decision = policyDecisionForAction(arena, mode, action, pc.input);
+    // Reuse the runtime guard so the preview matches real enforcement exactly:
+    // write confinement, SSRF blocking, and the MCP allowlist all apply here
+    // because they are evaluated by the same `Agent.guard` path the ReACT loop
+    // uses. A second, parallel decision function would silently drift.
+    var ag = scoot.agent.Agent.initGuard(io);
+    ag.policy_mode = mode;
+    ag.confine_writes = cfg.tools.confine_writes;
+    ag.block_internal_http = cfg.tools.block_internal_http;
+    ag.mcp_servers = cfg.mcp.servers;
+    const decision = ag.guard(arena, action, pc.input);
 
     try out.print("mode={s}\n", .{@tagName(mode)});
     try out.print("action={s}\n", .{@tagName(action)});
@@ -602,132 +611,6 @@ fn parsePolicyModeStrict(s: []const u8) ?scoot.policy.Mode {
     if (eql(s, "readonly")) return .readonly;
     if (eql(s, "unrestricted") or eql(s, "yolo")) return .unrestricted;
     return null;
-}
-
-const PolicyHttpArgs = struct {
-    url: []const u8,
-    method: []const u8 = "GET",
-    body: ?[]const u8 = null,
-};
-const PolicyFileReadArgs = struct { path: []const u8 };
-const PolicyGrepArgs = struct { pattern: []const u8, path: []const u8 };
-const PolicyGlobArgs = struct { pattern: []const u8, root: []const u8 = "." };
-const PolicyParallelCallArgs = struct {
-    action: []const u8,
-    input: []const u8 = "",
-    action_input: []const u8 = "",
-};
-const PolicyParallelArgs = struct { calls: []const PolicyParallelCallArgs };
-
-fn policyDecisionForAction(
-    arena: std.mem.Allocator,
-    mode: scoot.policy.Mode,
-    action: scoot.agent.Action,
-    input: []const u8,
-) scoot.policy.Decision {
-    return switch (action) {
-        .bash => scoot.policy.evaluate(arena, input, mode),
-        .file_read => policyDecisionForReadPath(PolicyFileReadArgs, arena, mode, input, "file_read", "path"),
-        .grep => policyDecisionForReadPath(PolicyGrepArgs, arena, mode, input, "grep", "path"),
-        .glob => policyDecisionForGlob(arena, mode, input),
-        .outline => policyDecisionForReadPath(PolicyFileReadArgs, arena, mode, input, "outline", "path"),
-        .file_write, .file_edit => scoot.policy.evaluateTool(.write, mode),
-        .http_request => blk: {
-            const args = std.json.parseFromSliceLeaky(PolicyHttpArgs, arena, input, .{
-                .ignore_unknown_fields = true,
-            }) catch break :blk scoot.policy.evaluateTool(.net_write, mode);
-            const method = scoot.tools.http.methodFromString(args.method) orelse
-                break :blk scoot.policy.evaluateTool(.net_write, mode);
-            break :blk scoot.policy.evaluateTool(if (scoot.tools.http.isWrite(method)) .net_write else .net_read, mode);
-        },
-        .mcp_call => scoot.policy.evaluateTool(.net_write, mode),
-        .parallel => policyDecisionForParallel(arena, mode, input),
-        .skill => .allow, // Native read-only capability, intentionally outside policy.
-        .recall => .allow, // Current session transcript recall; native read-only capability.
-        .final => .{ .deny = "final is not an executable tool action" },
-    };
-}
-
-fn policyDecisionForParallel(
-    arena: std.mem.Allocator,
-    mode: scoot.policy.Mode,
-    input: []const u8,
-) scoot.policy.Decision {
-    const args = std.json.parseFromSliceLeaky(PolicyParallelArgs, arena, input, .{
-        .ignore_unknown_fields = true,
-    }) catch return .{ .deny = "parallel action_input must be {\"calls\":[...]} JSON" };
-    if (args.calls.len == 0) return .{ .deny = "parallel needs at least 1 call" };
-    if (args.calls.len > 4) return .{ .deny = "parallel exceeds the maximum of 4 calls" };
-    for (args.calls, 0..) |call, idx| {
-        const child = std.meta.stringToEnum(scoot.agent.Action, call.action) orelse
-            return .{ .deny = "parallel contains an unknown action" };
-        const child_input = if (call.input.len != 0) call.input else call.action_input;
-        if (child_input.len == 0) return .{ .deny = "parallel subcall is missing input" };
-        switch (child) {
-            .file_read, .grep, .glob, .outline => {},
-            .http_request => {
-                const http_args = std.json.parseFromSliceLeaky(PolicyHttpArgs, arena, child_input, .{
-                    .ignore_unknown_fields = true,
-                }) catch return .{ .deny = "parallel could not parse http_request args" };
-                const method = scoot.tools.http.methodFromString(http_args.method) orelse
-                    return .{ .deny = "parallel http_request method is unknown" };
-                if (scoot.tools.http.isWrite(method))
-                    return .{ .deny = "parallel only allows HTTP GET/HEAD, not write HTTP methods" };
-            },
-            .mcp_call => return .{ .deny = "parallel forbids mcp_call; MCP tools may have external side effects" },
-            .bash => return .{ .deny = "parallel forbids bash; use structured read-only tools" },
-            .file_write, .file_edit => return .{ .deny = "parallel forbids writing or editing files" },
-            .skill => return .{ .deny = "parallel forbids skill; use a separate skill action to read skill instructions" },
-            .recall => return .{ .deny = "parallel forbids recall; use a separate recall action to read the session transcript" },
-            .parallel => return .{ .deny = "parallel forbids nested parallel" },
-            .final => return .{ .deny = "parallel subcall cannot be final" },
-        }
-        switch (policyDecisionForAction(arena, mode, child, child_input)) {
-            .allow => {},
-            .deny => |reason| return .{
-                .deny = std.fmt.allocPrint(arena, "parallel subcall #{d} denied: {s}", .{ idx + 1, reason }) catch reason,
-            },
-        }
-    }
-    return .allow;
-}
-
-fn policyDecisionForReadPath(
-    comptime T: type,
-    arena: std.mem.Allocator,
-    mode: scoot.policy.Mode,
-    input: []const u8,
-    comptime action_name: []const u8,
-    comptime field_name: []const u8,
-) scoot.policy.Decision {
-    const base = scoot.policy.evaluateTool(.read, mode);
-    switch (base) {
-        .deny => return base,
-        .allow => {},
-    }
-    if (mode != .readonly) return .allow;
-    const args = std.json.parseFromSliceLeaky(T, arena, input, .{
-        .ignore_unknown_fields = true,
-    }) catch return .{ .deny = "readonly mode could not parse " ++ action_name ++ " path; denied" };
-    return scoot.policy.evaluateReadPath(@field(args, field_name), mode);
-}
-
-fn policyDecisionForGlob(arena: std.mem.Allocator, mode: scoot.policy.Mode, input: []const u8) scoot.policy.Decision {
-    const base = scoot.policy.evaluateTool(.read, mode);
-    switch (base) {
-        .deny => return base,
-        .allow => {},
-    }
-    if (mode != .readonly) return .allow;
-    const args = std.json.parseFromSliceLeaky(PolicyGlobArgs, arena, input, .{
-        .ignore_unknown_fields = true,
-    }) catch return .{ .deny = "readonly mode could not parse glob args; denied" };
-    const root_decision = scoot.policy.evaluateReadPath(args.root, mode);
-    switch (root_decision) {
-        .deny => return root_decision,
-        .allow => {},
-    }
-    return scoot.policy.evaluateReadPath(args.pattern, mode);
 }
 
 const Doctor = struct {
@@ -2490,63 +2373,89 @@ test "readLine: with newline/without trailing newline/empty input" {
     try std.testing.expect((try readLine(&in3)) == null);
 }
 
-test "policyDecisionForAction: reuses tool policy semantics" {
+fn testGuardDecision(
+    arena: std.mem.Allocator,
+    mode: scoot.policy.Mode,
+    action: scoot.agent.Action,
+    input: []const u8,
+) scoot.policy.Decision {
+    var ag = scoot.agent.Agent.initGuard(std.testing.io);
+    ag.policy_mode = mode;
+    return ag.guard(arena, action, input);
+}
+
+test "policy check shares the runtime guard (no decision drift)" {
     const gpa = std.testing.allocator;
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
-    switch (policyDecisionForAction(arena, .guarded, .bash, "rm -rf /")) {
+    switch (testGuardDecision(arena, .guarded, .bash, "rm -rf /")) {
         .deny => {},
         .allow => return error.ExpectedDeny,
     }
-    switch (policyDecisionForAction(arena, .readonly, .file_read, "{\"path\":\"README.md\"}")) {
+    switch (testGuardDecision(arena, .readonly, .file_read, "{\"path\":\"README.md\"}")) {
         .allow => {},
         .deny => return error.ExpectedAllow,
     }
-    switch (policyDecisionForAction(arena, .readonly, .file_read, "{\"path\":\"/etc/passwd\"}")) {
+    switch (testGuardDecision(arena, .readonly, .file_read, "{\"path\":\"/etc/passwd\"}")) {
         .deny => {},
         .allow => return error.ExpectedDeny,
     }
-    switch (policyDecisionForAction(arena, .readonly, .glob, "{\"pattern\":\"**/*.zig\",\"root\":\".\"}")) {
+    switch (testGuardDecision(arena, .readonly, .glob, "{\"pattern\":\"**/*.zig\",\"root\":\".\"}")) {
         .allow => {},
         .deny => return error.ExpectedAllow,
     }
-    switch (policyDecisionForAction(arena, .readonly, .glob, "{\"pattern\":\"**/*\",\"root\":\"..\"}")) {
+    switch (testGuardDecision(arena, .readonly, .glob, "{\"pattern\":\"**/*\",\"root\":\"..\"}")) {
         .deny => {},
         .allow => return error.ExpectedDeny,
     }
-    switch (policyDecisionForAction(arena, .readonly, .recall, "{\"query\":\"old\"}")) {
+    switch (testGuardDecision(arena, .readonly, .recall, "{\"query\":\"old\"}")) {
         .allow => {},
         .deny => return error.ExpectedAllow,
     }
-    switch (policyDecisionForAction(arena, .readonly, .file_write, "{\"path\":\"x\",\"content\":\"y\"}")) {
+    switch (testGuardDecision(arena, .readonly, .file_write, "{\"path\":\"x\",\"content\":\"y\"}")) {
         .deny => {},
         .allow => return error.ExpectedDeny,
     }
-    switch (policyDecisionForAction(arena, .readonly, .bash, "cat README.md")) {
+    switch (testGuardDecision(arena, .readonly, .bash, "cat README.md")) {
         .deny => {},
         .allow => return error.ExpectedDeny,
     }
-    switch (policyDecisionForAction(arena, .readonly, .http_request, "{\"method\":\"GET\",\"url\":\"https://example.com\"}")) {
+    switch (testGuardDecision(arena, .readonly, .http_request, "{\"method\":\"GET\",\"url\":\"https://example.com\"}")) {
         .deny => {},
         .allow => return error.ExpectedDeny,
     }
-    switch (policyDecisionForAction(arena, .readonly, .http_request, "{\"method\":\"POST\",\"url\":\"https://example.com\"}")) {
+    switch (testGuardDecision(arena, .readonly, .http_request, "{\"method\":\"POST\",\"url\":\"https://example.com\"}")) {
         .deny => {},
         .allow => return error.ExpectedDeny,
     }
-    switch (policyDecisionForAction(arena, .readonly, .parallel, "{\"calls\":[{\"action\":\"file_read\",\"input\":\"{\\\"path\\\":\\\"README.md\\\"}\"}]}")) {
+    switch (testGuardDecision(arena, .readonly, .parallel, "{\"calls\":[{\"action\":\"file_read\",\"input\":\"{\\\"path\\\":\\\"README.md\\\"}\"}]}")) {
         .allow => {},
         .deny => return error.ExpectedAllow,
     }
-    switch (policyDecisionForAction(arena, .readonly, .parallel, "{\"calls\":[{\"action\":\"http_request\",\"input\":\"{\\\"method\\\":\\\"GET\\\",\\\"url\\\":\\\"https://example.com\\\"}\"}]}")) {
+    switch (testGuardDecision(arena, .readonly, .parallel, "{\"calls\":[{\"action\":\"http_request\",\"input\":\"{\\\"method\\\":\\\"GET\\\",\\\"url\\\":\\\"https://example.com\\\"}\"}]}")) {
         .deny => {},
         .allow => return error.ExpectedDeny,
     }
-    switch (policyDecisionForAction(arena, .guarded, .parallel, "{\"calls\":[{\"action\":\"file_write\",\"input\":\"{\\\"path\\\":\\\"x\\\",\\\"content\\\":\\\"y\\\"}\"}]}")) {
+    switch (testGuardDecision(arena, .guarded, .parallel, "{\"calls\":[{\"action\":\"file_write\",\"input\":\"{\\\"path\\\":\\\"x\\\",\\\"content\\\":\\\"y\\\"}\"}]}")) {
         .deny => {},
         .allow => return error.ExpectedDeny,
+    }
+
+    // Regression: the previous CLI-only decision path allowed these in guarded
+    // mode while the runtime guard denied them. The unified path must deny.
+    switch (testGuardDecision(arena, .guarded, .file_write, "{\"path\":\"/etc/evil\",\"content\":\"x\"}")) {
+        .deny => {},
+        .allow => return error.ExpectedDeny, // confine_writes must reject out-of-root writes.
+    }
+    switch (testGuardDecision(arena, .guarded, .http_request, "{\"method\":\"GET\",\"url\":\"http://169.254.169.254/latest/meta-data/\"}")) {
+        .deny => {},
+        .allow => return error.ExpectedDeny, // block_internal_http must reject cloud metadata.
+    }
+    switch (testGuardDecision(arena, .guarded, .mcp_call, "{\"server\":\"nope\",\"tool\":\"x\",\"args\":{}}")) {
+        .deny => {},
+        .allow => return error.ExpectedDeny, // MCP allowlist must reject unknown servers.
     }
 }
 
