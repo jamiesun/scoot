@@ -52,6 +52,25 @@ zig build
 zig build test
 ```
 
+## Local CI and git hooks
+
+Mirror the GitHub Actions `zig` job locally (format check, Debug build, tests,
+ReleaseSafe build, and `--version` smoke) before opening a pull request:
+
+```sh
+make ci          # or: ./scripts/local-ci.sh
+```
+
+Enable the versioned pre-push hook once per clone so `git push` runs local CI
+first (it is not auto-installed, by git design):
+
+```sh
+make hooks       # sets core.hooksPath=.githooks
+```
+
+Bypass when needed with `git push --no-verify` or `SKIP_LOCAL_CI=1 git push`.
+`LOCAL_CI_CROSS=1` and `LOCAL_CI_DOCS=1` add the cross-compile and mdBook jobs.
+
 For documentation:
 
 ```sh
