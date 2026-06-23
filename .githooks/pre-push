@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+#
+# Pre-push hook: run the local CI mirror before code leaves the machine, so a
+# pull request opened from the pushed branch starts from a green baseline.
+#
+# Bypass options (use sparingly):
+#   git push --no-verify        Skip all pre-push hooks for one push.
+#   SKIP_LOCAL_CI=1 git push    Skip just this check.
+#
+# Enable this hook (and the rest of .githooks) with:
+#   git config core.hooksPath .githooks      # or: make hooks
+
+set -euo pipefail
+
+if [ "${SKIP_LOCAL_CI:-0}" = "1" ]; then
+  printf '\033[1;33mpre-push: SKIP_LOCAL_CI=1 set, skipping local CI\033[0m\n' >&2
+  exit 0
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
+
+printf '\033[1;34mpre-push: running local CI (set SKIP_LOCAL_CI=1 or use --no-verify to skip)\033[0m\n' >&2
+
+if ! "$repo_root/scripts/local-ci.sh"; then
+  printf '\033[1;31mpre-push: local CI failed — push aborted. Fix the issues or bypass with --no-verify.\033[0m\n' >&2
+  exit 1
+fi

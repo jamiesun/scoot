@@ -265,6 +265,25 @@ pub const Agent = struct {
         return .{ .io = client.io, .complete_ctx = client, .complete_fn = clientComplete };
     }
 
+    /// Constructs a guard-only Agent for offline policy evaluation, such as the
+    /// `scoot policy check` CLI preview. It never contacts a model, so the
+    /// completion hook fails closed if called. Callers set policy_mode,
+    /// confine_writes, block_internal_http, and mcp_servers before calling
+    /// `guard`. Sharing the real `guard` path keeps the preview from drifting
+    /// away from runtime enforcement.
+    pub fn initGuard(io: std.Io) Agent {
+        return .{ .io = io, .complete_ctx = undefined, .complete_fn = guardOnlyComplete };
+    }
+
+    fn guardOnlyComplete(
+        _: *anyopaque,
+        _: std.mem.Allocator,
+        _: []const llm.Message,
+        _: llm.ChatOptions,
+    ) anyerror!llm.Completion {
+        return error.GuardOnlyAgent;
+    }
+
     fn complete(
         self: *Agent,
         arena: std.mem.Allocator,
@@ -404,7 +423,7 @@ pub const Agent = struct {
     /// arbitrary shell execution and must be reviewed per string. Built-in tool
     /// read/write/network semantics are statically known and classified by
     /// capability. readonly local reads also apply path policy.
-    fn guard(self: *Agent, arena: std.mem.Allocator, action: Action, input: []const u8) policy.Decision {
+    pub fn guard(self: *Agent, arena: std.mem.Allocator, action: Action, input: []const u8) policy.Decision {
         return switch (action) {
             .bash => policy.evaluate(arena, input, self.policy_mode),
             .file_read, .grep, .glob, .outline => self.guardLocalRead(arena, action, input),
