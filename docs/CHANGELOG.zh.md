@@ -15,8 +15,14 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 ## [未发布]
 
+## [0.3.0] - 2026-06-23
+
 ### 新增
 
+- Docker release 现在会向 GHCR 发布面向 `linux/amd64`、`linux/arm64` 和
+  `linux/arm/v7` 的多平台 Linux 镜像；配置 Docker Hub 凭据时也会同步发布到
+  Docker Hub。默认镜像使用极简 BusyBox/musl 运行时，对应的 Alpine 运行时标签使用
+  `-alpine` 后缀。
 - 新增 `scoot setup` 交互式命令，通过几步提问生成配置目录（配置目录并带覆盖确认、
   后端 `base_url`/`model`、token 来源 env/0600 文件/命令、`max_turns`、策略），创建运行
   目录树并写出 `config.toml`，且绝不内联 token —— 是在同一台主机上搭建多个隔离实例的
@@ -150,6 +156,7 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 - 完善首页/许可证元数据、信息图与双语用户指南（#6、#19、#36）
 
-[未发布]: https://github.com/jamiesun/scoot/compare/v0.2.0...HEAD
+[未发布]: https://github.com/jamiesun/scoot/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/jamiesun/scoot/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jamiesun/scoot/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jamiesun/scoot/compare/v0.0.2...v0.1.0
