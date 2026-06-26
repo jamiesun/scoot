@@ -214,6 +214,7 @@ const Export = struct {
 };
 
 const Global = struct {
+    val_type: ValType,
     value: Value,
     mutable: bool,
 };
@@ -383,11 +384,16 @@ pub fn load(arena: std.mem.Allocator, bytes: []const u8) LoadError!Module {
     if (m.codes.len != m.func_types.len - m.imported_func_count) return error.InvalidModule;
     if (m.start) |s| {
         if (s >= m.func_types.len) return error.InvalidModule;
+        const ft = m.types[m.func_types[s]];
+        if (ft.params.len != 0 or ft.results.len != 0) return error.InvalidModule;
     }
 
-    // Precompute control-flow metadata for each defined function body.
-    for (m.codes) |*code| {
+    // Precompute control-flow metadata and run a W3 static type check for each
+    // defined function body. The validator intentionally covers the current
+    // integer/WASI host subset rather than claiming full WebAssembly parity.
+    for (m.codes, 0..) |*code, i| {
         try scanBody(arena, &m, code);
+        try validateBodyTypes(arena, &m, code, @intCast(m.imported_func_count + i));
     }
     return m;
 }
@@ -440,8 +446,12 @@ fn loadImports(
                 m.memory_type = .{ .min = min, .max = max };
             },
             3 => { // global
+                // Imported globals require storage and initialization semantics
+                // this standalone host does not implement yet.
                 _ = try valTypeFromByte(try s.byte());
-                _ = try s.byte(); // mutability
+                const mut = try s.byte();
+                if (mut != 0 and mut != 1) return error.InvalidModule;
+                return error.InvalidModule;
             },
             else => return error.InvalidModule,
         }
@@ -491,7 +501,8 @@ fn loadGlobals(arena: std.mem.Allocator, s: *Cursor) LoadError![]Global {
     for (globals) |*g| {
         const vt = try valTypeFromByte(try s.byte());
         const mut = try s.byte();
-        g.* = .{ .value = try constExpr(s, vt), .mutable = mut == 1 };
+        if (mut != 0 and mut != 1) return error.InvalidModule;
+        g.* = .{ .val_type = vt, .value = try constExpr(s, vt), .mutable = mut == 1 };
     }
     return globals;
 }
@@ -754,6 +765,530 @@ fn skipImmediates(c: *Cursor, op: u8) LoadError!void {
         0xFD, 0xFE => return error.InvalidModule, // simd / atomics: unsupported
         else => {}, // single-byte opcodes
     }
+}
+
+// ---------------------------------------------------------------------------
+// W3 static type validation for the currently supported host subset.
+// ---------------------------------------------------------------------------
+
+const BlockSig = struct {
+    params: []const ValType,
+    results: []const ValType,
+};
+
+fn blockTypeSig(arena: std.mem.Allocator, m: *const Module, s: *Cursor) LoadError!BlockSig {
+    const v = try s.sleb(i64);
+    if (v == -64) return .{ .params = &.{}, .results = &.{} }; // empty (0x40)
+    if (v < 0) {
+        if (v < -128 or v > -1) return error.InvalidModule;
+        const b: u8 = @intCast(v + 0x80);
+        const one = try arena.alloc(ValType, 1);
+        one[0] = try valTypeFromByte(b);
+        return .{ .params = &.{}, .results = one };
+    }
+    const idx: usize = @intCast(v);
+    if (idx >= m.types.len) return error.InvalidModule;
+    return .{ .params = m.types[idx].params, .results = m.types[idx].results };
+}
+
+const StackType = enum {
+    i32,
+    i64,
+    f32,
+    f64,
+    funcref,
+    externref,
+    unknown,
+
+    fn fromValType(vt: ValType) StackType {
+        return switch (vt) {
+            .i32 => .i32,
+            .i64 => .i64,
+            .f32 => .f32,
+            .f64 => .f64,
+            .funcref => .funcref,
+            .externref => .externref,
+        };
+    }
+
+    fn matches(actual: StackType, expected: ValType) bool {
+        return actual == .unknown or actual == fromValType(expected);
+    }
+};
+
+const TypeValidator = struct {
+    arena: std.mem.Allocator,
+    module: *const Module,
+    func_index: u32,
+    code: *const Code,
+    locals: []ValType,
+    stack: std.ArrayList(StackType) = .empty,
+    ctrl: std.ArrayList(Frame) = .empty,
+
+    const FrameKind = enum { function, block, loop, @"if" };
+
+    const Frame = struct {
+        kind: FrameKind,
+        height: usize,
+        start: []const ValType,
+        end: []const ValType,
+        label: []const ValType,
+        @"unreachable": bool = false,
+        seen_else: bool = false,
+    };
+
+    fn init(arena: std.mem.Allocator, module: *const Module, code: *const Code, func_index: u32) LoadError!TypeValidator {
+        const ft = module.types[module.func_types[func_index]];
+        const locals = try arena.alloc(ValType, ft.params.len + code.local_types.len);
+        @memcpy(locals[0..ft.params.len], ft.params);
+        @memcpy(locals[ft.params.len..], code.local_types);
+        return .{
+            .arena = arena,
+            .module = module,
+            .func_index = func_index,
+            .code = code,
+            .locals = locals,
+        };
+    }
+
+    fn fail(self: *TypeValidator) LoadError {
+        _ = self;
+        return error.InvalidModule;
+    }
+
+    fn current(self: *TypeValidator) *Frame {
+        return &self.ctrl.items[self.ctrl.items.len - 1];
+    }
+
+    fn pushType(self: *TypeValidator, vt: ValType) LoadError!void {
+        try self.stack.append(self.arena, StackType.fromValType(vt));
+    }
+
+    fn pushTypes(self: *TypeValidator, types: []const ValType) LoadError!void {
+        for (types) |t| try self.pushType(t);
+    }
+
+    fn popType(self: *TypeValidator, expected: ValType) LoadError!void {
+        const frame = self.current();
+        if (self.stack.items.len == frame.height and frame.@"unreachable") return;
+        if (self.stack.items.len <= frame.height) return self.fail();
+        const actual = self.stack.pop().?;
+        if (!actual.matches(expected)) return self.fail();
+    }
+
+    fn popAny(self: *TypeValidator) LoadError!StackType {
+        const frame = self.current();
+        if (self.stack.items.len == frame.height and frame.@"unreachable") return .unknown;
+        if (self.stack.items.len <= frame.height) return self.fail();
+        return self.stack.pop().?;
+    }
+
+    fn popTypes(self: *TypeValidator, types: []const ValType) LoadError!void {
+        var i = types.len;
+        while (i > 0) {
+            i -= 1;
+            try self.popType(types[i]);
+        }
+    }
+
+    fn markUnreachable(self: *TypeValidator) void {
+        const frame = self.current();
+        self.stack.shrinkRetainingCapacity(frame.height);
+        frame.@"unreachable" = true;
+    }
+
+    fn pushFrame(self: *TypeValidator, kind: FrameKind, start: []const ValType, end: []const ValType) LoadError!void {
+        const label = if (kind == .loop) start else end;
+        try self.ctrl.append(self.arena, .{
+            .kind = kind,
+            .height = self.stack.items.len,
+            .start = start,
+            .end = end,
+            .label = label,
+        });
+        try self.pushTypes(start);
+    }
+
+    fn endFrame(self: *TypeValidator) LoadError!void {
+        if (self.ctrl.items.len == 0) return self.fail();
+        const frame = self.current().*;
+        if (frame.kind == .@"if" and !frame.seen_else and frame.end.len != 0) return self.fail();
+        try self.popTypes(frame.end);
+        if (self.stack.items.len != frame.height) return self.fail();
+        self.stack.shrinkRetainingCapacity(frame.height);
+        _ = self.ctrl.pop();
+        try self.pushTypes(frame.end);
+    }
+
+    fn elseFrame(self: *TypeValidator) LoadError!void {
+        if (self.ctrl.items.len == 0) return self.fail();
+        const idx = self.ctrl.items.len - 1;
+        if (self.ctrl.items[idx].kind != .@"if" or self.ctrl.items[idx].seen_else) return self.fail();
+        const end = self.ctrl.items[idx].end;
+        const start = self.ctrl.items[idx].start;
+        const height = self.ctrl.items[idx].height;
+        try self.popTypes(end);
+        if (self.stack.items.len != height) return self.fail();
+        self.stack.shrinkRetainingCapacity(height);
+        self.ctrl.items[idx].@"unreachable" = false;
+        self.ctrl.items[idx].seen_else = true;
+        try self.pushTypes(start);
+    }
+
+    fn branch(self: *TypeValidator, depth: u32) LoadError!void {
+        if (depth >= self.ctrl.items.len) return self.fail();
+        const target = self.ctrl.items[self.ctrl.items.len - 1 - depth];
+        try self.popTypes(target.label);
+        self.markUnreachable();
+    }
+
+    fn branchIf(self: *TypeValidator, depth: u32) LoadError!void {
+        try self.popType(.i32);
+        if (depth >= self.ctrl.items.len) return self.fail();
+        const target = self.ctrl.items[self.ctrl.items.len - 1 - depth];
+        try self.popTypes(target.label);
+        try self.pushTypes(target.label);
+    }
+
+    fn branchTable(self: *TypeValidator, body: []const u8, pc: *usize) LoadError!void {
+        const n = try readU32Load(body, pc);
+        var depths = try self.arena.alloc(u32, @as(usize, n) + 1);
+        for (depths) |*d| d.* = try readU32Load(body, pc);
+        try self.popType(.i32);
+        if (depths.len == 0) return self.fail();
+        const first = try self.labelTypes(depths[0]);
+        for (depths[1..]) |d| {
+            const other = try self.labelTypes(d);
+            if (!sameValTypes(first, other)) return self.fail();
+        }
+        try self.popTypes(first);
+        self.markUnreachable();
+    }
+
+    fn labelTypes(self: *TypeValidator, depth: u32) LoadError![]const ValType {
+        if (depth >= self.ctrl.items.len) return self.fail();
+        return self.ctrl.items[self.ctrl.items.len - 1 - depth].label;
+    }
+
+    fn call(self: *TypeValidator, func_index: u32) LoadError!void {
+        if (func_index >= self.module.func_types.len) return self.fail();
+        const ft = self.module.types[self.module.func_types[func_index]];
+        try self.popTypes(ft.params);
+        try self.pushTypes(ft.results);
+    }
+
+    fn callIndirect(self: *TypeValidator, body: []const u8, pc: *usize) LoadError!void {
+        const type_index = try readU32Load(body, pc);
+        const table_index = try readU32Load(body, pc);
+        if (type_index >= self.module.types.len or table_index != 0 or self.module.table_min == null) return self.fail();
+        try self.popType(.i32);
+        const ft = self.module.types[type_index];
+        try self.popTypes(ft.params);
+        try self.pushTypes(ft.results);
+    }
+
+    fn localGet(self: *TypeValidator, idx: u32) LoadError!void {
+        if (idx >= self.locals.len) return self.fail();
+        try self.pushType(self.locals[idx]);
+    }
+
+    fn localSet(self: *TypeValidator, idx: u32, tee: bool) LoadError!void {
+        if (idx >= self.locals.len) return self.fail();
+        try self.popType(self.locals[idx]);
+        if (tee) try self.pushType(self.locals[idx]);
+    }
+
+    fn globalGet(self: *TypeValidator, idx: u32) LoadError!void {
+        if (idx >= self.module.globals.len) return self.fail();
+        try self.pushType(self.module.globals[idx].val_type);
+    }
+
+    fn globalSet(self: *TypeValidator, idx: u32) LoadError!void {
+        if (idx >= self.module.globals.len or !self.module.globals[idx].mutable) return self.fail();
+        try self.popType(self.module.globals[idx].val_type);
+    }
+
+    fn requireMemory(self: *TypeValidator) LoadError!void {
+        if (self.module.memory_type == null) return self.fail();
+    }
+
+    fn memoryAccess(self: *TypeValidator, op: u8, body: []const u8, pc: *usize) LoadError!void {
+        try self.requireMemory();
+        _ = try readU32Load(body, pc); // align
+        _ = try readU32Load(body, pc); // offset
+        switch (op) {
+            0x28, 0x2C, 0x2D, 0x2E, 0x2F => {
+                try self.popType(.i32);
+                try self.pushType(.i32);
+            },
+            0x29, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35 => {
+                try self.popType(.i32);
+                try self.pushType(.i64);
+            },
+            0x2A => {
+                try self.popType(.i32);
+                try self.pushType(.f32);
+            },
+            0x2B => {
+                try self.popType(.i32);
+                try self.pushType(.f64);
+            },
+            0x36, 0x3A, 0x3B => {
+                try self.popType(.i32);
+                try self.popType(.i32);
+            },
+            0x37, 0x3C, 0x3D, 0x3E => {
+                try self.popType(.i64);
+                try self.popType(.i32);
+            },
+            0x38 => {
+                try self.popType(.f32);
+                try self.popType(.i32);
+            },
+            0x39 => {
+                try self.popType(.f64);
+                try self.popType(.i32);
+            },
+            else => return self.fail(),
+        }
+    }
+
+    fn miscOp(self: *TypeValidator, body: []const u8, pc: *usize) LoadError!void {
+        const sub = try readU32Load(body, pc);
+        switch (sub) {
+            10 => {
+                try self.requireMemory();
+                const dst_mem = try readByteLoad(body, pc);
+                const src_mem = try readByteLoad(body, pc);
+                if (dst_mem != 0 or src_mem != 0) return self.fail();
+                try self.popType(.i32); // n
+                try self.popType(.i32); // src
+                try self.popType(.i32); // dst
+            },
+            11 => {
+                try self.requireMemory();
+                const mem = try readByteLoad(body, pc);
+                if (mem != 0) return self.fail();
+                try self.popType(.i32); // n
+                try self.popType(.i32); // value
+                try self.popType(.i32); // dst
+            },
+            else => return self.fail(),
+        }
+    }
+
+    fn numeric(self: *TypeValidator, op: u8) LoadError!void {
+        switch (op) {
+            0x45 => {
+                try self.popType(.i32);
+                try self.pushType(.i32);
+            },
+            0x46...0x4F => {
+                try self.popType(.i32);
+                try self.popType(.i32);
+                try self.pushType(.i32);
+            },
+            0x50 => {
+                try self.popType(.i64);
+                try self.pushType(.i32);
+            },
+            0x51...0x5A => {
+                try self.popType(.i64);
+                try self.popType(.i64);
+                try self.pushType(.i32);
+            },
+            0x67...0x69 => {
+                try self.popType(.i32);
+                try self.pushType(.i32);
+            },
+            0x6A...0x78 => {
+                try self.popType(.i32);
+                try self.popType(.i32);
+                try self.pushType(.i32);
+            },
+            0x79...0x7B => {
+                try self.popType(.i64);
+                try self.pushType(.i64);
+            },
+            0x7C...0x8A => {
+                try self.popType(.i64);
+                try self.popType(.i64);
+                try self.pushType(.i64);
+            },
+            0xA7 => {
+                try self.popType(.i64);
+                try self.pushType(.i32);
+            },
+            0xAC, 0xAD => {
+                try self.popType(.i32);
+                try self.pushType(.i64);
+            },
+            0xBC => {
+                try self.popType(.f32);
+                try self.pushType(.i32);
+            },
+            0xBD => {
+                try self.popType(.f64);
+                try self.pushType(.i64);
+            },
+            0xBE => {
+                try self.popType(.i32);
+                try self.pushType(.f32);
+            },
+            0xBF => {
+                try self.popType(.i64);
+                try self.pushType(.f64);
+            },
+            0xC0, 0xC1 => {
+                try self.popType(.i32);
+                try self.pushType(.i32);
+            },
+            0xC2...0xC4 => {
+                try self.popType(.i64);
+                try self.pushType(.i64);
+            },
+            else => return self.fail(),
+        }
+    }
+
+    fn validate(self: *TypeValidator) LoadError!void {
+        const ft = self.module.types[self.module.func_types[self.func_index]];
+        try self.ctrl.append(self.arena, .{
+            .kind = .function,
+            .height = 0,
+            .start = &.{},
+            .end = ft.results,
+            .label = ft.results,
+        });
+
+        const body = self.code.body;
+        var pc: usize = 0;
+        while (pc < body.len) {
+            const op = try readByteLoad(body, &pc);
+            switch (op) {
+                0x00 => self.markUnreachable(),
+                0x01 => {},
+                0x02, 0x03 => {
+                    var tmp = Cursor{ .bytes = body, .pos = pc };
+                    const sig = try blockTypeSig(self.arena, self.module, &tmp);
+                    pc = tmp.pos;
+                    try self.popTypes(sig.params);
+                    try self.pushFrame(if (op == 0x03) .loop else .block, sig.params, sig.results);
+                },
+                0x04 => {
+                    var tmp = Cursor{ .bytes = body, .pos = pc };
+                    const sig = try blockTypeSig(self.arena, self.module, &tmp);
+                    pc = tmp.pos;
+                    try self.popType(.i32);
+                    try self.popTypes(sig.params);
+                    try self.pushFrame(.@"if", sig.params, sig.results);
+                },
+                0x05 => try self.elseFrame(),
+                0x0B => {
+                    try self.endFrame();
+                    if (self.ctrl.items.len == 0 and pc != body.len) return self.fail();
+                },
+                0x0C => try self.branch(try readU32Load(body, &pc)),
+                0x0D => try self.branchIf(try readU32Load(body, &pc)),
+                0x0E => try self.branchTable(body, &pc),
+                0x0F => {
+                    if (self.ctrl.items.len == 0) return self.fail();
+                    try self.branch(@intCast(self.ctrl.items.len - 1));
+                },
+                0x10 => try self.call(try readU32Load(body, &pc)),
+                0x11 => try self.callIndirect(body, &pc),
+                0x1A => _ = try self.popAny(),
+                0x1B => {
+                    try self.popType(.i32);
+                    const b = try self.popAny();
+                    const a = try self.popAny();
+                    const out = mergeStackTypes(a, b) orelse return self.fail();
+                    try self.stack.append(self.arena, out);
+                },
+                0x20 => try self.localGet(try readU32Load(body, &pc)),
+                0x21 => try self.localSet(try readU32Load(body, &pc), false),
+                0x22 => try self.localSet(try readU32Load(body, &pc), true),
+                0x23 => try self.globalGet(try readU32Load(body, &pc)),
+                0x24 => try self.globalSet(try readU32Load(body, &pc)),
+                0x28...0x3E => try self.memoryAccess(op, body, &pc),
+                0x3F => {
+                    try self.requireMemory();
+                    if (try readByteLoad(body, &pc) != 0) return self.fail();
+                    try self.pushType(.i32);
+                },
+                0x40 => {
+                    try self.requireMemory();
+                    if (try readByteLoad(body, &pc) != 0) return self.fail();
+                    try self.popType(.i32);
+                    try self.pushType(.i32);
+                },
+                0x41 => {
+                    _ = try readI32Load(body, &pc);
+                    try self.pushType(.i32);
+                },
+                0x42 => {
+                    _ = try readI64Load(body, &pc);
+                    try self.pushType(.i64);
+                },
+                0x43 => {
+                    _ = try readU32leLoad(body, &pc);
+                    try self.pushType(.f32);
+                },
+                0x44 => {
+                    _ = try readU64leLoad(body, &pc);
+                    try self.pushType(.f64);
+                },
+                0x45...0xC4 => try self.numeric(op),
+                0xFC => try self.miscOp(body, &pc),
+                else => return self.fail(),
+            }
+        }
+        if (self.ctrl.items.len != 0) return self.fail();
+    }
+};
+
+fn validateBodyTypes(arena: std.mem.Allocator, m: *const Module, code: *const Code, func_index: u32) LoadError!void {
+    var v = try TypeValidator.init(arena, m, code, func_index);
+    try v.validate();
+}
+
+fn sameValTypes(a: []const ValType, b: []const ValType) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| {
+        if (x != y) return false;
+    }
+    return true;
+}
+
+fn mergeStackTypes(a: StackType, b: StackType) ?StackType {
+    if (a == .unknown) return b;
+    if (b == .unknown) return a;
+    if (a == b) return a;
+    return null;
+}
+
+fn readByteLoad(body: []const u8, pc: *usize) LoadError!u8 {
+    return readByte(body, pc) catch error.InvalidModule;
+}
+
+fn readU32Load(body: []const u8, pc: *usize) LoadError!u32 {
+    return readU32(body, pc) catch error.InvalidModule;
+}
+
+fn readI32Load(body: []const u8, pc: *usize) LoadError!i32 {
+    return readI32(body, pc) catch error.InvalidModule;
+}
+
+fn readI64Load(body: []const u8, pc: *usize) LoadError!i64 {
+    return readI64(body, pc) catch error.InvalidModule;
+}
+
+fn readU32leLoad(body: []const u8, pc: *usize) LoadError!u32 {
+    return readU32le(body, pc) catch error.InvalidModule;
+}
+
+fn readU64leLoad(body: []const u8, pc: *usize) LoadError!u64 {
+    return readU64le(body, pc) catch error.InvalidModule;
 }
 
 // ---------------------------------------------------------------------------
@@ -2474,7 +3009,7 @@ fn expectLoadError(outcome: RunOutcome) !void {
     }
 }
 
-test "trap: local index out of range does not panic" {
+test "load error: local index out of range is rejected before execution" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -2485,7 +3020,7 @@ test "trap: local index out of range does not panic" {
         .body = &.{ 0x00, 0x20, 0x05, 0x0B },
     };
     const bytes = try b.module();
-    try expectTrap(runExport(a, bytes, "f", &.{}, .{}));
+    try expectLoadError(runExport(a, bytes, "f", &.{}, .{}));
 }
 
 test "load error: start function index out of range" {
@@ -2501,7 +3036,21 @@ test "load error: start function index out of range" {
     try expectLoadError(runExport(a, bytes, "f", &.{}, .{}));
 }
 
-test "trap: block consuming missing param does not panic" {
+test "load error: start function must not require params or return results" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // start points to a function typed (i32) -> i32, which cannot be invoked
+    // by a module start section.
+    const type_sec = try sec(a, 1, &.{ 0x01, 0x60, 0x01, 0x7F, 0x01, 0x7F });
+    const func_sec = try sec(a, 3, &.{ 0x01, 0x00 });
+    const start_sec = try sec(a, 8, &.{0x00});
+    const code_sec = try sec(a, 10, &.{ 0x01, 0x04, 0x00, 0x20, 0x00, 0x0B });
+    const bytes = try std.mem.concat(a, u8, &.{ header, type_sec, func_sec, start_sec, code_sec });
+    try expectLoadError(runExport(a, bytes, "f", &.{}, .{}));
+}
+
+test "load error: block consuming missing param is rejected before execution" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -2518,7 +3067,36 @@ test "trap: block consuming missing param does not panic" {
     // body: (block (type 1) ... end)(end) with empty stack -> param underflow.
     const code_sec = try sec(a, 10, &.{ 0x01, 0x05, 0x00, 0x02, 0x01, 0x0B, 0x0B });
     const bytes = try std.mem.concat(a, u8, &.{ header, type_sec, func_sec, export_sec, code_sec });
-    try expectTrap(runExport(a, bytes, "f", &.{}, .{}));
+    try expectLoadError(runExport(a, bytes, "f", &.{}, .{}));
+}
+
+test "load error: static validator rejects operand type mismatch" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const b = Builder{
+        .a = a,
+        .results = &.{0x7F},
+        // i64.const 1; i32.const 2; i32.add; end -> add needs two i32 values.
+        .body = &.{ 0x00, 0x42, 0x01, 0x41, 0x02, 0x6A, 0x0B },
+    };
+    const bytes = try b.module();
+    try expectLoadError(runExport(a, bytes, "f", &.{}, .{}));
+}
+
+test "load error: static validator rejects immutable global.set" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const type_sec = try sec(a, 1, &.{ 0x01, 0x60, 0x00, 0x00 });
+    const func_sec = try sec(a, 3, &.{ 0x01, 0x00 });
+    const global_sec = try sec(a, 6, &.{ 0x01, 0x7F, 0x00, 0x41, 0x01, 0x0B });
+    var ex: std.ArrayList(u8) = .empty;
+    try ex.appendSlice(a, &.{ 0x01, 0x01, 'f', 0x00, 0x00 });
+    const export_sec = try sec(a, 7, ex.items);
+    const code_sec = try sec(a, 10, &.{ 0x01, 0x06, 0x00, 0x41, 0x02, 0x24, 0x00, 0x0B });
+    const bytes = try std.mem.concat(a, u8, &.{ header, type_sec, func_sec, global_sec, export_sec, code_sec });
+    try expectLoadError(runExport(a, bytes, "f", &.{}, .{}));
 }
 
 // ---------------------------------------------------------------------------

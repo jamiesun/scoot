@@ -1,6 +1,6 @@
 # Wasm 工具包
 
-状态：核心仍只定义边界并做静态校验；独立的 `scoot-wasm` host 现已能执行整数 Wasm 函数（W1），并能在最小 WASI preview1 子集上运行 `wasm32-wasi` 命令模块（W2）。核心 `scoot` 二进制依旧从不加载或执行 Wasm。
+状态：核心仍只定义边界并做静态校验；独立的 `scoot-wasm` host 现已能执行整数 Wasm 函数（W1），能在最小 WASI preview1 子集上运行 `wasm32-wasi` 命令模块（W2），并会在执行前对当前 host 子集做静态类型验证（W3）。核心 `scoot` 二进制依旧从不加载或执行 Wasm。
 
 Scoot 的 Wasm 工具包格式刻意比 Wassette 或 MCP 更小。目标是在引入运行时之前，先给第三方工具建立一个本地、可审查的边界。
 
@@ -49,6 +49,11 @@ W1 引擎是一个零依赖的纯 Zig 解释器，覆盖：结构化控制流（
 任何故障都返回结构化 trap 而非崩溃（unreachable、除零、整数溢出、内存/表越界、
 未定义元素、间接调用类型不匹配），并由 fuel、调用深度、操作数栈与内存页上限兜底。
 
+在 `run` 或 `wasi` 执行模块前，W3 验证会检查当前支持的函数体子集：operand/control
+stack 形状、block/loop/if 签名、分支 label 的 arity/type、直接与间接调用签名、
+local/global 访问、memory/table 是否存在，以及不可变 global 写入。类型/索引错误会在模块
+加载阶段失败，而不是进入解释器后才暴露。
+
 ### WASI 命令模块（`scoot-wasm wasi`，W2）
 
 `scoot-wasm wasi <module.wasm> [参数...]` 运行一个 `wasm32-wasi` 命令模块：实例化模块，
@@ -70,8 +75,8 @@ import 一旦被调用即 trap；越界的 guest 指针返回 `EFAULT` 而非破
 描述符返回 `EBADF`。资源使用受与 `run` 相同的 fuel / 调用深度 / 内存页上限约束，核心还会
 为该子进程套一层硬性墙钟超时。
 
-尚未实现（后续阶段）：完整符合 spec 的类型验证器、浮点一致性，以及更大的 WASI 表面
-（文件、套接字、realtime/monotonic 之外的时钟）。
+尚未实现（后续阶段）：超出当前 host 子集的完整 spec 一致验证、浮点一致性，以及更大的
+WASI 表面（文件、套接字、realtime/monotonic 之外的时钟）。
 
 ## Manifest
 

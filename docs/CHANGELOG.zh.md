@@ -17,6 +17,11 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 ### 新增
 
+- `scoot-wasm` 现在会在执行前对当前 host 子集做 W3 函数体静态类型验证。该验证会检查
+  operand/control stack 形状、block/loop/if 签名、分支 label、直接与间接调用签名、
+  local/global 访问、memory/table 是否存在，以及不可变 global 写入，使畸形类型/索引错误
+  在模块加载阶段失败，而不是进入解释器后才暴露。超出当前支持子集的完整 spec 一致验证仍
+  留待后续阶段（#100）。
 - `scoot-wasm` 现已能在最小 WASI preview1 子集上运行 `wasm32-wasi` 命令模块（W2）：
   `scoot-wasm wasi <module.wasm> [参数...]` 实例化模块、执行 `_start`、把本进程的
   stdin 作为 fd 0 读入、转发模块的 stdout/stderr，并以其 `proc_exit` 状态退出。暴露的
@@ -32,7 +37,7 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
   （unreachable、除零、整数溢出、内存/表越界、间接调用类型不匹配），并由 fuel、
   调用深度与内存页上限兜底。用 `scoot-wasm run <module.wasm> <export> [整数参数...]`
   调用。引擎仅编译进独立的 `scoot-wasm` 二进制（`-Dwasm-host=true`），零依赖核心
-  从不链接它。WASI、完整类型验证器与浮点运算留待后续阶段（#100）。
+  从不链接它。超出当前支持子集的完整 spec 一致验证与浮点运算留待后续阶段（#100）。
 
 ## [0.4.0] - 2026-06-26
 

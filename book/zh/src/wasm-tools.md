@@ -1,6 +1,8 @@
 # Wasm 工具包
 
-**状态：仅设计边界与静态校验。** Scoot 暂**不**执行 Wasm 工具。完整参考见 [`docs/WASM_TOOLS.md`](https://github.com/jamiesun/scoot/blob/main/docs/WASM_TOOLS.md)；本页是概览。
+**状态：核心静态校验 + 独立 host。** 核心 `scoot` 二进制依旧**不**加载或执行 Wasm；可选的
+`scoot-wasm` 二进制在使用 `-Dwasm-host=true` 构建后，可以执行当前的整数/WASI host 子集。
+完整参考见 [`docs/WASM_TOOLS.md`](https://github.com/jamiesun/scoot/blob/main/docs/WASM_TOOLS.md)；本页是概览。
 
 目标是为第三方工具提供一个小巧、本地、**可审查**的边界 —— 刻意比 MCP 或 Wassette 更小 —— 使一个包在引入任何运行时*之前*就能被检视、其请求的权限被理解。
 
@@ -16,7 +18,7 @@ tool/
     output.json
 ```
 
-校验一个包 —— 只读，绝不加载或运行 Wasm：
+校验一个包 —— 只读，绝不运行 Wasm：
 
 ```sh
 scoot wasm-tools check path/to/tool
@@ -25,6 +27,19 @@ scoot wasm-tools check path/to/tool
 该校验解析元数据与 schema、核验被引用文件存在、拒绝不安全路径（绝对路径、`..`、隐藏段、盘符前缀、空段），
 并校验 `component.wasm` 的字节码结构（magic、version、section、LEB128 长度与基础索引/数量一致性）；
 不会执行 Wasm。
+
+需要执行时显式构建独立 host：
+
+```sh
+zig build -Dwasm-host=true
+scoot-wasm check path/to/module.wasm
+scoot-wasm run path/to/module.wasm add 2 40
+scoot-wasm wasi path/to/module.wasm [args...]
+```
+
+在 `run` 或 `wasi` 执行模块前，host 会验证当前支持的函数体子集：operand/control stack
+形状、block/loop/if 签名、分支 label、调用签名、local/global 访问、memory/table 是否存在，
+以及不可变 global 写入。
 
 ## Manifest 与 Policy
 
@@ -50,7 +65,9 @@ capabilities = ["compute"]
 capabilities = ["compute"]
 ```
 
-能力名：`compute`（纯 CPU，无 I/O）、`read`、`write`、`net_read`、`net_write`。首个迭代只预期 `compute`，且**当前没有任何能力授予运行时权限**，因为执行尚未实现。
+能力名：`compute`（纯 CPU，无 I/O）、`read`、`write`、`net_read`、`net_write`。独立 host
+当前只暴露最小 WASI preview1 的 stdio/args/environ/clock/random/proc-exit 子集；文件与网络权限
+尚未实现。
 
 ## Schema
 
