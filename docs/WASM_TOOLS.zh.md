@@ -75,14 +75,23 @@ import 一旦被调用即 trap；越界的 guest 指针返回 `EFAULT` 而非破
 描述符返回 `EBADF`。资源使用受与 `run` 相同的 fuel / 调用深度 / 内存页上限约束，核心还会
 为该子进程套一层硬性墙钟超时。
 
-仓库内置了一个可运行的压缩插件包：`examples/wasm-compressor`。构建与验证：
+仓库内置了可运行的压缩插件包和一个可复制模板：
 
 ```sh
-zig build wasm-compressor-example
+zig build wasm-compressor-example wasm-plugin-template wasm-redactor-compressor
 ./zig-out/bin/scoot wasm-tools check examples/wasm-compressor
+./zig-out/bin/scoot wasm-tools check examples/wasm-plugin-template
+./zig-out/bin/scoot wasm-tools check examples/wasm-redactor-compressor
 printf '%s\n' '{"version":1,"kind":"compressor","keep_recent":2,"elided_count":3,"elided_bytes":1200,"messages":[]}' \
   | ./zig-out/bin/scoot-wasm wasi examples/wasm-compressor/component.wasm
+./zig-out/bin/scoot-wasm wasi examples/wasm-redactor-compressor/component.wasm \
+  < examples/wasm-redactor-compressor/fixtures/request.json
 ```
+
+新增插件时优先从 `examples/wasm-plugin-template` 复制。`examples/wasm-redactor-compressor`
+是第二个确定性示例：它扫描被省略消息里的类密钥提示，但不会把消息内容写回输出。
+`scripts/check-wasm-examples.sh` 会构建 host 和全部示例 component，校验包边界，并运行
+template / redactor smoke checks。
 
 尚未实现（后续阶段）：超出当前 host 子集的完整 spec 一致验证、浮点一致性，以及更大的
 WASI 表面（文件、套接字、realtime/monotonic 之外的时钟）。

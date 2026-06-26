@@ -1,0 +1,8 @@
+kind = "compressor"
+name = "wasm-plugin-template"
+description = "Copyable Scoot compressor plugin template for wasm32-wasi command modules"
+entry = "_start"
+component = "component.wasm"
+input_schema = "schema/input.json"
+output_schema = "schema/output.json"
+capabilities = ["compute"]

@@ -18,6 +18,9 @@ heading when cutting a release.
 
 ### Added
 
+- Added a copyable Wasm compressor plugin template, a deterministic redactor
+  compressor example, and `scripts/check-wasm-examples.sh` to build, validate,
+  and smoke-test the example packages.
 - `scoot-wasm` now performs a W3 static function-body type validation pass for
   the current host subset before execution. It checks operand/control stack
   shapes, block/loop/if signatures, branch labels, direct and indirect call

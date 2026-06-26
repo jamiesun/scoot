@@ -1,0 +1,1 @@
+{"version":1,"kind":"compressor","keep_recent":2,"elided_count":2,"elided_bytes":456,"messages":[{"role":"user","content":"password=abc token=def"},{"role":"assistant","content":"not retained"}]}

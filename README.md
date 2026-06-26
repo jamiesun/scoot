@@ -264,6 +264,7 @@ Examples:
 ./zig-out/bin/scoot skills check docs/examples/skills/minimal
 ./zig-out/bin/scoot skills pack docs/examples/skills/minimal minimal.scoot-skill.tar
 ./zig-out/bin/scoot wasm-tools check path/to/tool
+./scripts/check-wasm-examples.sh
 printf '%s\n' '{"id":"1","method":"session.list","params":{}}' | ./zig-out/bin/scoot serve
 ./zig-out/bin/scoot daemon run --ticks 1
 ```

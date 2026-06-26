@@ -41,14 +41,21 @@ scoot-wasm wasi path/to/module.wasm [args...]
 形状、block/loop/if 签名、分支 label、调用签名、local/global 访问、memory/table 是否存在，
 以及不可变 global 写入。
 
-仓库内置了一个完整压缩插件示例：`examples/wasm-compressor`：
+仓库内置了一个完整压缩插件示例、一个可复制模板，以及第二个确定性的 redactor compressor：
 
 ```sh
-zig build wasm-compressor-example
+zig build wasm-compressor-example wasm-plugin-template wasm-redactor-compressor
 scoot wasm-tools check examples/wasm-compressor
+scoot wasm-tools check examples/wasm-plugin-template
+scoot wasm-tools check examples/wasm-redactor-compressor
 printf '%s\n' '{"version":1,"kind":"compressor","keep_recent":2,"elided_count":3,"elided_bytes":1200,"messages":[]}' \
   | scoot-wasm wasi examples/wasm-compressor/component.wasm
+scoot-wasm wasi examples/wasm-redactor-compressor/component.wasm \
+  < examples/wasm-redactor-compressor/fixtures/request.json
 ```
+
+新增 compressor 包时优先从 `examples/wasm-plugin-template` 复制。`scripts/check-wasm-examples.sh`
+会构建 host 与示例、校验包边界，并运行代表性的 WASI 执行 smoke check。
 
 ## Manifest 与 Policy
 

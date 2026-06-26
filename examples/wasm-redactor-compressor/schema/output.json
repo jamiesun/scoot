@@ -1,0 +1,7 @@
+{
+  "type": "object",
+  "required": ["marker"],
+  "properties": {
+    "marker": { "type": "string", "minLength": 1 }
+  }
+}
