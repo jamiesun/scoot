@@ -1,7 +1,9 @@
 # Wasm Tool Packages
 
-**Status: design boundary and static validation only.** Scoot does **not**
-execute Wasm tools yet. The full reference is
+**Status: core static validation plus a standalone host.** The core `scoot`
+binary still does **not** load or execute Wasm, but the optional
+`scoot-wasm` binary can execute the current integer/WASI host subset when built
+with `-Dwasm-host=true`. The full reference is
 [`docs/WASM_TOOLS.md`](https://github.com/jamiesun/scoot/blob/main/docs/WASM_TOOLS.md); this is the overview.
 
 The goal is a small, local, **reviewable** boundary for third-party tools —
@@ -20,7 +22,7 @@ tool/
     output.json
 ```
 
-Validate a package — read-only, never loads or runs the Wasm:
+Validate a package — read-only, never runs the Wasm:
 
 ```sh
 scoot wasm-tools check path/to/tool
@@ -30,6 +32,20 @@ The check parses metadata and schemas, verifies referenced files exist, rejects
 unsafe paths (absolute, `..`, hidden segments, drive prefixes, empty segments),
 and validates `component.wasm` binary structure (magic, version, sections,
 LEB128 lengths, and basic index/count consistency). It never executes Wasm.
+
+Build the standalone host when you explicitly want execution:
+
+```sh
+zig build -Dwasm-host=true
+scoot-wasm check path/to/module.wasm
+scoot-wasm run path/to/module.wasm add 2 40
+scoot-wasm wasi path/to/module.wasm [args...]
+```
+
+Before `run` or `wasi` executes a module, the host validates the supported
+function-body subset: operand/control stack shapes, block/loop/if signatures,
+branch labels, call signatures, local/global access, memory/table presence, and
+immutable globals.
 
 ## Manifest & Policy
 
@@ -60,9 +76,9 @@ capabilities = ["compute"]
 ```
 
 Capability names: `compute` (CPU-only, no I/O), `read`, `write`, `net_read`,
-`net_write`. For the first iteration `compute` is the only one expected, and
-**no capability currently grants runtime authority** because execution isn't
-implemented.
+`net_write`. The standalone host currently exposes only a minimal WASI preview1
+stdio/args/environ/clock/random/proc-exit subset; filesystem and network
+authority are not implemented.
 
 ## Schemas
 

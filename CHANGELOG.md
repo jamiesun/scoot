@@ -18,6 +18,13 @@ heading when cutting a release.
 
 ### Added
 
+- `scoot-wasm` now performs a W3 static function-body type validation pass for
+  the current host subset before execution. It checks operand/control stack
+  shapes, block/loop/if signatures, branch labels, direct and indirect call
+  signatures, local/global access, memory/table presence, and immutable globals,
+  so malformed type/index errors fail module loading instead of reaching the
+  interpreter. Full spec-conformant validation beyond the supported subset is
+  still a later phase (#100).
 - `scoot-wasm` now runs `wasm32-wasi` command modules over a minimal WASI
   preview1 subset (W2): `scoot-wasm wasi <module.wasm> [args...]` instantiates
   the module, runs `_start`, pipes this process's stdin to fd 0, forwards the
@@ -38,8 +45,9 @@ heading when cutting a release.
   indirect-call type mismatch) bounded by fuel, call-depth, and memory-page
   limits. Invoke with `scoot-wasm run <module.wasm> <export> [int args...]`.
   The engine is compiled only into the standalone `scoot-wasm` binary
-  (`-Dwasm-host=true`); the zero-dependency core never links it. WASI, a full
-  type validator, and floating-point arithmetic remain later phases (#100).
+  (`-Dwasm-host=true`); the zero-dependency core never links it. Full
+  spec-conformant validation beyond the supported subset and floating-point
+  arithmetic remain later phases (#100).
 
 ## [0.4.0] - 2026-06-26
 

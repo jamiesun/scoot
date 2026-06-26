@@ -2,8 +2,9 @@
 
 Status: design boundary and static validation in the core; the standalone
 `scoot-wasm` host now executes integer Wasm functions (W1) and runs
-`wasm32-wasi` command modules over a minimal WASI preview1 subset (W2). The core
-`scoot` binary still never loads or executes Wasm.
+`wasm32-wasi` command modules over a minimal WASI preview1 subset (W2), with a
+static type validation pass for the current host subset before execution (W3).
+The core `scoot` binary still never loads or executes Wasm.
 
 Scoot's Wasm tool package format is intentionally smaller than Wassette or MCP.
 The goal is a local, reviewable boundary for third-party tools before any
@@ -60,6 +61,12 @@ segments. Every fault returns a structured trap instead of panicking
 undefined element, indirect-call type mismatch), bounded by fuel,
 call-depth, value-stack, and memory-page limits.
 
+Before `run` or `wasi` executes a module, W3 validation checks the supported
+function-body subset: operand/control stack shapes, block/loop/if signatures,
+branch label arity/types, direct and indirect call signatures, local/global
+access, memory/table presence, and immutable globals. Type/index mistakes fail
+module loading instead of reaching the interpreter.
+
 ### WASI command modules (`scoot-wasm wasi`, W2)
 
 `scoot-wasm wasi <module.wasm> [args...]` runs a `wasm32-wasi` command module:
@@ -86,9 +93,9 @@ than corrupting host memory. Bad file descriptors return `EBADF`. Resource use
 stays bounded by the same fuel / call-depth / memory-page caps as `run`, and the
 core additionally wraps the subprocess with a hard wall-clock timeout.
 
-Not yet implemented (later phases): a full spec-conformant type validator,
-floating-point conformance, and the broader WASI surface (files, sockets,
-clocks beyond realtime/monotonic).
+Not yet implemented (later phases): full spec-conformant validation beyond the
+current host subset, floating-point conformance, and the broader WASI surface
+(files, sockets, clocks beyond realtime/monotonic).
 
 ## Manifest
 
