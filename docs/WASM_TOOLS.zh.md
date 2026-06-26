@@ -22,7 +22,9 @@ tool/
 scoot wasm-tools check path/to/tool
 ```
 
-这个检查是只读的。它会解析元数据和 schema，检查引用文件，并拒绝不安全路径；不会加载或执行 `component.wasm`。
+这个检查是只读的。它会解析元数据和 schema、检查引用文件、拒绝不安全路径，并校验
+`component.wasm` 的字节码结构（magic、version、section、LEB128 长度与基础索引/数量一致性）；
+不会执行 Wasm。
 
 ## Manifest
 

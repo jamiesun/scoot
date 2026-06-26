@@ -3,6 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const build_wasm_host = b.option(bool, "wasm-host", "构建默认关闭的独立 scoot-wasm Wasm host") orelse false;
 
     // `scoot` 库模块：面向外部嵌入者的稳定公共 API。
     const mod = b.addModule("scoot", .{
@@ -46,6 +47,18 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_cmd.addArgs(args);
     const run_step = b.step("run", "构建并运行 scoot");
     run_step.dependOn(&run_cmd.step);
+
+    if (build_wasm_host) {
+        const wasm_host = b.addExecutable(.{
+            .name = "scoot-wasm",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/wasm_host.zig"),
+                .target = target,
+                .optimize = optimize,
+            }),
+        });
+        b.installArtifact(wasm_host);
+    }
 
     const embed_example = b.addExecutable(.{
         .name = "scoot-embed-minimal",

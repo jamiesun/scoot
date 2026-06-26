@@ -22,7 +22,9 @@ tool/
 scoot wasm-tools check path/to/tool
 ```
 
-该校验解析元数据与 schema、核验被引用文件存在、并拒绝不安全路径（绝对路径、`..`、隐藏段、盘符前缀、空段）。
+该校验解析元数据与 schema、核验被引用文件存在、拒绝不安全路径（绝对路径、`..`、隐藏段、盘符前缀、空段），
+并校验 `component.wasm` 的字节码结构（magic、version、section、LEB128 长度与基础索引/数量一致性）；
+不会执行 Wasm。
 
 ## Manifest 与 Policy
 

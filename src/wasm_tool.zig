@@ -7,10 +7,12 @@ const std = @import("std");
 const toml = @import("toml.zig");
 const skill = @import("skill.zig");
 const pathsafe = @import("paths.zig");
+const wasm_bytecode = @import("wasm_bytecode.zig");
 
 const manifest_read_limit: std.Io.Limit = .limited(64 * 1024);
 const policy_read_limit: std.Io.Limit = .limited(64 * 1024);
 const schema_read_limit: std.Io.Limit = .limited(256 * 1024);
+const component_read_limit: std.Io.Limit = .limited(16 * 1024 * 1024);
 
 pub const Manifest = struct {
     kind: []const u8 = "tool",
@@ -37,6 +39,7 @@ pub const Summary = struct {
     output_schema: []const u8,
     capabilities: []const []const u8,
     policy_capabilities: []const []const u8,
+    component_bytecode: wasm_bytecode.Summary,
 };
 
 pub const Validation = union(enum) {
@@ -81,7 +84,10 @@ pub fn validatePackage(arena: std.mem.Allocator, io: std.Io, dir: []const u8) !V
     if (validatePolicy(arena, manifest, policy)) |msg| return .{ .invalid = msg };
 
     const component_path = try std.fs.path.join(arena, &.{ dir, manifest.component });
-    if (validateComponent(arena, io, dir, component_path)) |msg| return .{ .invalid = msg };
+    const component_bytecode = switch (validateComponent(arena, io, dir, component_path)) {
+        .valid => |s| s,
+        .invalid => |msg| return .{ .invalid = msg },
+    };
 
     if (validateJsonSchema(arena, io, dir, manifest.input_schema, "input schema")) |msg| return .{ .invalid = msg };
     if (validateJsonSchema(arena, io, dir, manifest.output_schema, "output schema")) |msg| return .{ .invalid = msg };
@@ -96,6 +102,7 @@ pub fn validatePackage(arena: std.mem.Allocator, io: std.Io, dir: []const u8) !V
         .output_schema = manifest.output_schema,
         .capabilities = manifest.capabilities,
         .policy_capabilities = policy.capabilities,
+        .component_bytecode = component_bytecode,
     } };
 }
 
@@ -154,35 +161,31 @@ fn validateJsonSchema(
     return null;
 }
 
-fn validateComponent(arena: std.mem.Allocator, io: std.Io, dir: []const u8, path: []const u8) ?[]const u8 {
+fn validateComponent(arena: std.mem.Allocator, io: std.Io, dir: []const u8, path: []const u8) wasm_bytecode.Validation {
     const cwd = std.Io.Dir.cwd();
     // Symlink escape guard (issue #54): component paths may pass lexical
     // isSafeRelativePath checks, but statFile/openFile follow symlinks. For
     // existing targets, realpath confirms they still live under the package.
     if (pathsafe.realPathEscapes(io, arena, dir, path))
-        return "component wasm file resolves outside the package directory (symlink escape)";
+        return .{ .invalid = "component wasm file resolves outside the package directory (symlink escape)" };
     const component_stat = cwd.statFile(io, path, .{}) catch |err| switch (err) {
-        error.FileNotFound, error.NotDir => return "component wasm file is missing",
-        else => return std.fmt.allocPrint(arena, "cannot stat component wasm file: {s}", .{@errorName(err)}) catch "cannot stat component wasm file",
+        error.FileNotFound, error.NotDir => return .{ .invalid = "component wasm file is missing" },
+        else => return .{ .invalid = std.fmt.allocPrint(arena, "cannot stat component wasm file: {s}", .{@errorName(err)}) catch "cannot stat component wasm file" },
     };
-    if (component_stat.size == 0) return "component wasm file is empty";
-    if (component_stat.size < 4) return "component wasm file is too small";
+    if (component_stat.size == 0) return .{ .invalid = "component wasm file is empty" };
 
-    var file = cwd.openFile(io, path, .{}) catch |err| switch (err) {
-        error.FileNotFound, error.NotDir => return "component wasm file is missing",
-        else => return std.fmt.allocPrint(arena, "cannot open component wasm file: {s}", .{@errorName(err)}) catch "cannot open component wasm file",
+    const bytes = cwd.readFileAlloc(io, path, arena, component_read_limit) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return .{ .invalid = "component wasm file is missing" },
+        error.FileTooBig => return .{ .invalid = "component wasm file exceeds 16 MiB" },
+        else => return .{ .invalid = std.fmt.allocPrint(arena, "cannot read component wasm file: {s}", .{@errorName(err)}) catch "cannot read component wasm file" },
     };
-    defer file.close(io);
-
-    var magic: [4]u8 = undefined;
-    const read = file.readPositionalAll(io, &magic, 0) catch |err| return std.fmt.allocPrint(
-        arena,
-        "cannot read component wasm file: {s}",
-        .{@errorName(err)},
-    ) catch "cannot read component wasm file";
-    if (read != magic.len) return "component wasm file is too small";
-    if (!std.mem.eql(u8, &magic, "\x00asm")) return "component wasm file must start with wasm magic bytes";
-    return null;
+    const validation = wasm_bytecode.validateModuleBytes(arena, bytes) catch return .{
+        .invalid = "cannot validate component wasm bytecode",
+    };
+    return switch (validation) {
+        .valid => |summary| .{ .valid = summary },
+        .invalid => |msg| .{ .invalid = std.fmt.allocPrint(arena, "component wasm bytecode invalid: {s}", .{msg}) catch "component wasm bytecode invalid" },
+    };
 }
 
 fn validateCapabilityList(arena: std.mem.Allocator, caps: []const []const u8, label: []const u8) ?[]const u8 {
@@ -260,7 +263,7 @@ test "validatePackage: accepts minimal static wasm tool package" {
         .sub_path = root ++ "/policy.toml",
         .data = "capabilities = [\"compute\"]\n",
     });
-    try cwd.writeFile(io, .{ .sub_path = root ++ "/component.wasm", .data = "\x00asm" });
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/component.wasm", .data = "\x00asm\x01\x00\x00\x00" });
     try cwd.writeFile(io, .{ .sub_path = root ++ "/schema/input.json", .data = "{\"type\":\"object\"}\n" });
     try cwd.writeFile(io, .{ .sub_path = root ++ "/schema/output.json", .data = "{\"type\":\"object\"}\n" });
 
@@ -274,6 +277,7 @@ test "validatePackage: accepts minimal static wasm tool package" {
     try std.testing.expectEqualStrings("calculator", summary.name);
     try std.testing.expectEqualStrings("component.wasm", summary.component);
     try std.testing.expectEqual(@as(usize, 1), summary.policy_capabilities.len);
+    try std.testing.expectEqual(@as(u32, 0), summary.component_bytecode.sections);
 }
 
 test "validatePackage: rejects missing files and unsafe manifest paths" {
@@ -347,7 +351,7 @@ test "validatePackage: rejects symlink that escapes the package directory (issue
         .sub_path = root ++ "/pkg/policy.toml",
         .data = "capabilities = [\"compute\"]\n",
     });
-    try cwd.writeFile(io, .{ .sub_path = root ++ "/pkg/component.wasm", .data = "\x00asm" });
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/pkg/component.wasm", .data = "\x00asm\x01\x00\x00\x00" });
     try cwd.writeFile(io, .{ .sub_path = root ++ "/pkg/schema/output.json", .data = "{\"type\":\"object\"}\n" });
     // input.json is a symlink to the outside secret file while staying lexically safe.
     cwd.symLink(io, root ++ "/outside/secret.json", root ++ "/pkg/schema/input.json", .{}) catch |e| {
@@ -386,7 +390,7 @@ test "validatePackage: rejects unsupported or undeclared policy capabilities" {
         \\
         ,
     });
-    try cwd.writeFile(io, .{ .sub_path = root ++ "/component.wasm", .data = "\x00asm" });
+    try cwd.writeFile(io, .{ .sub_path = root ++ "/component.wasm", .data = "\x00asm\x01\x00\x00\x00" });
     try cwd.writeFile(io, .{ .sub_path = root ++ "/schema/input.json", .data = "{\"type\":\"object\"}\n" });
     try cwd.writeFile(io, .{ .sub_path = root ++ "/schema/output.json", .data = "{\"type\":\"object\"}\n" });
 

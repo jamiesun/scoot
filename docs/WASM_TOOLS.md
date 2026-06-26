@@ -26,7 +26,9 @@ scoot wasm-tools check path/to/tool
 ```
 
 The check is read-only. It parses metadata and schemas, checks referenced files,
-and rejects unsafe paths. It never loads or executes `component.wasm`.
+rejects unsafe paths, and validates `component.wasm` binary structure (magic,
+version, sections, LEB128 lengths, and basic index/count consistency). It never
+executes Wasm.
 
 ## Manifest
 

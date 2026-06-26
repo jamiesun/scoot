@@ -1415,6 +1415,15 @@ fn checkWasmToolPackage(
             try out.print("OK {s} name={s} entry={s}\n", .{ dir, summary.name, summary.entry });
             try out.print("description={s}\n", .{summary.description});
             try out.print("component={s}\n", .{summary.component});
+            try out.print("component_bytecode sections={d} types={d} imports={d} functions={d} codes={d} exports={d} data={d}\n", .{
+                summary.component_bytecode.sections,
+                summary.component_bytecode.types,
+                summary.component_bytecode.imported_functions,
+                summary.component_bytecode.functions,
+                summary.component_bytecode.codes,
+                summary.component_bytecode.exports,
+                summary.component_bytecode.data_segments,
+            });
             try out.print("input_schema={s}\n", .{summary.input_schema});
             try out.print("output_schema={s}\n", .{summary.output_schema});
             try out.writeAll("capabilities=");

@@ -813,7 +813,7 @@ fn writeCompressorPackage(
         .sub_path = policy_path,
         .data = try std.fmt.allocPrint(arena, "capabilities = {s}\n", .{try tomlStringArray(arena, policy_caps)}),
     });
-    try cwd.writeFile(io, .{ .sub_path = component_path, .data = "\x00asm" });
+    try cwd.writeFile(io, .{ .sub_path = component_path, .data = "\x00asm\x01\x00\x00\x00" });
     try cwd.writeFile(io, .{ .sub_path = input_schema_path, .data = "{\"type\":\"object\"}\n" });
     try cwd.writeFile(io, .{ .sub_path = output_schema_path, .data = "{\"type\":\"object\"}\n" });
     try cwd.writeFile(io, .{ .sub_path = host_path, .data = host_script });
