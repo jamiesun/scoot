@@ -25,6 +25,10 @@ const usage =
     \\                       validate and export a skill tarball with a .scoot-skill.json review manifest
     \\  wasm-tools check <dir>
     \\                       validate local Wasm tool package boundaries (manifest / policy / schema; does not execute Wasm)
+    \\  sessions list        list local persisted sessions
+    \\  session show <id>    print one local session transcript as JSONL
+    \\  audit show <session-id>
+    \\                       print audit events for one session as JSONL
     \\  schedule [list|run]  list / run scheduled jobs (unattended, forced readonly safety mode)
     \\  daemon [run|status|stop]
     \\                       run scheduled jobs as a foreground daemon, recording pid/state and supporting SIGTERM stop
@@ -70,6 +74,9 @@ pub fn main(init: std.process.Init) !void {
     var cmd_policy_check: ?PolicyCheckCommand = null;
     var cmd_skills: ?SkillsCommand = null;
     var cmd_wasm_tools: ?WasmToolsCommand = null;
+    var cmd_sessions: ?SessionsCommand = null;
+    var cmd_session: ?SessionCommand = null;
+    var cmd_audit: ?AuditCommand = null;
     var cmd_schedule: ?[]const u8 = null; // null means not requested; otherwise list/run.
     var cmd_daemon: ?[]const u8 = null; // null means not requested; otherwise run/status/stop.
     var schedule_ticks: usize = 0; // 0 means run continuously.
@@ -174,6 +181,29 @@ pub fn main(init: std.process.Init) !void {
                 try out.print("error: unknown wasm-tools subcommand '{s}' (available: check)\n", .{args[i]});
                 die(out, 2);
             }
+        } else if (eql(arg, "sessions")) {
+            if (i + 1 < args.len and !std.mem.startsWith(u8, args[i + 1], "-")) {
+                i += 1;
+                if (!eql(args[i], "list")) {
+                    try out.print("error: unknown sessions subcommand '{s}' (available: list)\n", .{args[i]});
+                    die(out, 2);
+                }
+            }
+            cmd_sessions = .list;
+        } else if (eql(arg, "session")) {
+            if (i + 2 >= args.len or !eql(args[i + 1], "show")) {
+                try out.writeAll("error: session only supports subcommand: show <id>\n");
+                die(out, 2);
+            }
+            i += 2;
+            cmd_session = .{ .show = args[i] };
+        } else if (eql(arg, "audit")) {
+            if (i + 2 >= args.len or !eql(args[i + 1], "show")) {
+                try out.writeAll("error: audit only supports subcommand: show <session-id>\n");
+                die(out, 2);
+            }
+            i += 2;
+            cmd_audit = .{ .show = args[i] };
         } else if (eql(arg, "schedule")) {
             // Optional subaction; default is list, which is read-only. Do not
             // consume the next token if it is an option.
@@ -204,7 +234,9 @@ pub fn main(init: std.process.Init) !void {
     // doing nothing.
     const non_agent_cmd = cmd_config or cmd_doctor or cmd_setup or
         (cmd_policy_check != null) or (cmd_skills != null) or
-        (cmd_wasm_tools != null) or (cmd_schedule != null) or (cmd_daemon != null);
+        (cmd_wasm_tools != null) or (cmd_sessions != null) or
+        (cmd_session != null) or (cmd_audit != null) or
+        (cmd_schedule != null) or (cmd_daemon != null);
     if (trace and non_agent_cmd) {
         try out.writeAll("error: --trace is only for -e/--eval or interactive REPL mode\n");
         die(out, 2);
@@ -327,6 +359,27 @@ pub fn main(init: std.process.Init) !void {
     if (cmd_wasm_tools) |cmd| {
         switch (cmd) {
             .check => |dir| try checkWasmToolPackage(out, arena, io, dir),
+        }
+        return;
+    }
+
+    if (cmd_sessions) |cmd| {
+        switch (cmd) {
+            .list => try printSessionList(out, arena, io, cfg),
+        }
+        return;
+    }
+
+    if (cmd_session) |cmd| {
+        switch (cmd) {
+            .show => |id| try printSessionShow(out, arena, io, cfg, id),
+        }
+        return;
+    }
+
+    if (cmd_audit) |cmd| {
+        switch (cmd) {
+            .show => |session_id| try printAuditShow(out, arena, io, cfg, session_id),
         }
         return;
     }
@@ -543,6 +596,18 @@ const SkillPackCommand = struct {
 
 const WasmToolsCommand = union(enum) {
     check: []const u8,
+};
+
+const SessionsCommand = enum {
+    list,
+};
+
+const SessionCommand = union(enum) {
+    show: []const u8,
+};
+
+const AuditCommand = union(enum) {
+    show: []const u8,
 };
 
 fn parsePolicyCommand(out: *Io.Writer, args: []const []const u8, i: *usize) PolicyCheckCommand {
@@ -1353,6 +1418,63 @@ fn checkWasmToolPackage(
             die(out, 1);
         },
     }
+}
+
+fn printSessionList(
+    out: *Io.Writer,
+    arena: std.mem.Allocator,
+    io: std.Io,
+    cfg: scoot.config.Config,
+) !void {
+    const sessions = try scoot.session.list(arena, io, cfg.dirs.sessions_dir);
+    try out.print("Sessions: {d} ({s})\n", .{ sessions.len, cfg.dirs.sessions_dir });
+    for (sessions) |s| {
+        try out.print("  - {s}  mtime_ms={d}  messages={d}", .{ s.id, s.mtime_ms, s.message_count });
+        if (s.first_user_summary.len != 0) try out.print("  first_user={s}", .{s.first_user_summary});
+        try out.writeByte('\n');
+    }
+}
+
+fn printSessionShow(
+    out: *Io.Writer,
+    arena: std.mem.Allocator,
+    io: std.Io,
+    cfg: scoot.config.Config,
+    id: []const u8,
+) !void {
+    const loaded = scoot.session.loadById(arena, io, cfg.dirs.sessions_dir, id) catch |err| switch (err) {
+        error.InvalidSessionId => {
+            try out.print("error: invalid session id '{s}'\n", .{id});
+            die(out, 2);
+        },
+        error.SessionNotFound => {
+            try out.print("error: session not found: {s}\n", .{id});
+            die(out, 1);
+        },
+        error.InvalidSessionLog => {
+            try out.print("error: session log is not valid JSONL: {s}\n", .{id});
+            die(out, 1);
+        },
+        else => return err,
+    };
+    try scoot.session.writeMessagesJsonl(out, loaded.messages);
+}
+
+fn printAuditShow(
+    out: *Io.Writer,
+    arena: std.mem.Allocator,
+    io: std.Io,
+    cfg: scoot.config.Config,
+    session_id: []const u8,
+) !void {
+    const events = scoot.audit.querySession(arena, io, cfg.dirs.logs_dir, session_id) catch |err| switch (err) {
+        error.InvalidAuditLog => {
+            try out.print("error: audit log is not valid JSONL: {s}/audit.jsonl\n", .{cfg.dirs.logs_dir});
+            die(out, 1);
+        },
+        else => return err,
+    };
+    for (events) |ev| try scoot.audit.writeEventJsonl(out, ev);
 }
 
 fn printList(out: *Io.Writer, items: []const []const u8) !void {

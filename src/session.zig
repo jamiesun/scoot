@@ -30,6 +30,21 @@ const llm = @import("llm.zig");
 const jsonio = @import("jsonio.zig");
 const audit = @import("audit.zig");
 
+pub const max_session_jsonl_bytes: usize = 10 * 1024 * 1024;
+const jsonl_line_buffer_bytes: usize = (1 << 20) + 4096;
+
+pub const Summary = struct {
+    id: []const u8,
+    mtime_ms: i64,
+    message_count: usize,
+    first_user_summary: []const u8,
+};
+
+pub const Loaded = struct {
+    id: []const u8,
+    messages: []llm.Message,
+};
+
 /// One session. `messages` is the active context sent to the model; `archive` is
 /// the complete execution log for recall and persistence. Compaction only changes
 /// `messages` and must not lose `archive`. Model-side response storage and
@@ -106,10 +121,7 @@ pub const Session = struct {
     /// Writes the full session as JSONL, one message per line. Plaintext,
     /// appendable, and replayable.
     pub fn writeJsonl(self: *const Session, w: *std.Io.Writer) !void {
-        for (self.archiveItems()) |m| {
-            try writeMessageJson(w, m);
-            try w.writeByte('\n');
-        }
+        try writeMessagesJsonl(w, self.archiveItems());
     }
 
     /// Appends the session to `<sessions_dir>/<id>.jsonl`, creating the file if
@@ -136,6 +148,69 @@ pub const Session = struct {
     }
 };
 
+pub fn list(arena: std.mem.Allocator, io: std.Io, sessions_dir: []const u8) ![]Summary {
+    var summaries: std.ArrayList(Summary) = .empty;
+    const cwd = std.Io.Dir.cwd();
+    var dir = cwd.openDir(io, sessions_dir, .{ .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return summaries.items,
+        else => return err,
+    };
+    defer dir.close(io);
+
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (!std.mem.endsWith(u8, entry.name, ".jsonl")) continue;
+        const is_file = switch (entry.kind) {
+            .file => true,
+            .unknown => blk: {
+                const st = dir.statFile(io, entry.name, .{ .follow_symlinks = false }) catch break :blk false;
+                break :blk st.kind == .file;
+            },
+            else => false,
+        };
+        if (!is_file) continue;
+
+        const id_part = entry.name[0 .. entry.name.len - ".jsonl".len];
+        if (!isSafeSessionId(id_part)) continue;
+        const full = try std.fs.path.join(arena, &.{ sessions_dir, entry.name });
+        const st = cwd.statFile(io, full, .{}) catch continue;
+        const summary = summarizeFile(arena, io, full, id_part, st.mtime.toMilliseconds()) catch continue;
+        try summaries.append(arena, summary);
+    }
+
+    std.mem.sort(Summary, summaries.items, {}, summaryRecentFirst);
+    return summaries.items;
+}
+
+pub fn loadById(arena: std.mem.Allocator, io: std.Io, sessions_dir: []const u8, id: []const u8) !Loaded {
+    if (!isSafeSessionId(id)) return error.InvalidSessionId;
+    const path = try std.fmt.allocPrint(arena, "{s}/{s}.jsonl", .{ sessions_dir, id });
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, arena, .limited(max_session_jsonl_bytes)) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return error.SessionNotFound,
+        else => return err,
+    };
+
+    var messages: std.ArrayList(llm.Message) = .empty;
+    var it = std.mem.tokenizeScalar(u8, bytes, '\n');
+    while (it.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r\n");
+        if (line.len == 0) continue;
+        try messages.append(arena, try parseMessageLine(arena, line));
+    }
+
+    return .{
+        .id = try arena.dupe(u8, id),
+        .messages = messages.items,
+    };
+}
+
+pub fn writeMessagesJsonl(w: *std.Io.Writer, messages: []const llm.Message) !void {
+    for (messages) |m| {
+        try writeMessageJson(w, m);
+        try w.writeByte('\n');
+    }
+}
+
 /// Writes one message as a single-line JSON object.
 fn writeMessageJson(w: *std.Io.Writer, m: llm.Message) !void {
     try w.writeAll("{\"role\":\"");
@@ -143,6 +218,100 @@ fn writeMessageJson(w: *std.Io.Writer, m: llm.Message) !void {
     try w.writeAll("\",\"content\":");
     try jsonio.writeString(w, m.content);
     try w.writeByte('}');
+}
+
+fn summarizeFile(arena: std.mem.Allocator, io: std.Io, path: []const u8, id: []const u8, mtime_ms: i64) !Summary {
+    var file = try std.Io.Dir.cwd().openFile(io, path, .{});
+    defer file.close(io);
+    const buf = try arena.alloc(u8, jsonl_line_buffer_bytes);
+    var fr = file.reader(io, buf);
+
+    var count: usize = 0;
+    var first_user_summary: []const u8 = "";
+    while (try readJsonLine(&fr.interface)) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r\n");
+        if (line.len == 0) continue;
+        const msg = try parseMessageLineView(arena, line);
+        count += 1;
+        if (first_user_summary.len == 0 and msg.role == .user) {
+            first_user_summary = try summarizeContent(arena, msg.content);
+        }
+    }
+    return .{
+        .id = try arena.dupe(u8, id),
+        .mtime_ms = mtime_ms,
+        .message_count = count,
+        .first_user_summary = first_user_summary,
+    };
+}
+
+fn parseMessageLine(arena: std.mem.Allocator, line: []const u8) !llm.Message {
+    const msg = try parseMessageLineView(arena, line);
+    return .{
+        .role = msg.role,
+        .content = try arena.dupe(u8, msg.content),
+    };
+}
+
+fn parseMessageLineView(arena: std.mem.Allocator, line: []const u8) !llm.Message {
+    const Raw = struct {
+        role: []const u8,
+        content: []const u8,
+    };
+    const parsed = std.json.parseFromSlice(Raw, arena, line, .{ .ignore_unknown_fields = true }) catch return error.InvalidSessionLog;
+    const role = std.meta.stringToEnum(llm.Role, parsed.value.role) orelse return error.InvalidSessionLog;
+    return .{
+        .role = role,
+        .content = parsed.value.content,
+    };
+}
+
+fn summarizeContent(arena: std.mem.Allocator, content: []const u8) ![]const u8 {
+    const max_bytes = 120;
+    var out: std.ArrayList(u8) = .empty;
+    var last_space = false;
+    for (content) |c| {
+        const is_space = c == ' ' or c == '\t' or c == '\r' or c == '\n';
+        if (is_space) {
+            if (out.items.len == 0 or last_space) continue;
+            try out.append(arena, ' ');
+            last_space = true;
+        } else {
+            try out.append(arena, c);
+            last_space = false;
+        }
+        if (out.items.len >= max_bytes) {
+            try out.appendSlice(arena, "...");
+            break;
+        }
+    }
+    if (out.items.len > 0 and out.items[out.items.len - 1] == ' ') {
+        _ = out.pop();
+    }
+    return out.items;
+}
+
+fn isSafeSessionId(id: []const u8) bool {
+    if (id.len == 0) return false;
+    if (std.mem.eql(u8, id, ".") or std.mem.eql(u8, id, "..")) return false;
+    return std.mem.indexOfAny(u8, id, "/\\") == null;
+}
+
+fn readJsonLine(in: *std.Io.Reader) !?[]const u8 {
+    const line = in.takeDelimiterInclusive('\n') catch |err| switch (err) {
+        error.EndOfStream => {
+            const rest = in.take(in.bufferedLen()) catch return null;
+            if (rest.len == 0) return null;
+            return rest;
+        },
+        else => return err,
+    };
+    return std.mem.trimEnd(u8, line, "\r\n");
+}
+
+fn summaryRecentFirst(_: void, a: Summary, b: Summary) bool {
+    if (a.mtime_ms == b.mtime_ms) return std.mem.lessThan(u8, a.id, b.id);
+    return a.mtime_ms > b.mtime_ms;
 }
 
 test "append copies content independent of source buffer" {
@@ -218,6 +387,56 @@ test "persist appends JSONL to <dir>/<id>.jsonl and can read back" {
 
     const st = try cwd.statFile(io, dir ++ "/conv1.jsonl", .{});
     try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), st.permissions.toMode() & 0o777);
+}
+
+test "list and loadById read local session JSONL without server state" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const dir = "/tmp/scoot_session_read_model_test";
+    cwd.deleteTree(io, dir) catch {};
+    defer cwd.deleteTree(io, dir) catch {};
+    try cwd.createDirPath(io, dir);
+
+    try cwd.writeFile(io, .{
+        .sub_path = dir ++ "/alpha.jsonl",
+        .data =
+        \\{"role":"system","content":"sys","ignored":true}
+        \\{"role":"user","content":"hello\nworld"}
+        \\{"role":"assistant","content":"done"}
+        \\
+        ,
+    });
+    try cwd.writeFile(io, .{
+        .sub_path = dir ++ "/broken.jsonl",
+        .data = "{not json}\n",
+    });
+    try cwd.writeFile(io, .{
+        .sub_path = dir ++ "/not-a-session.txt",
+        .data = "ignore\n",
+    });
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const summaries = try list(arena, io, dir);
+    try std.testing.expectEqual(@as(usize, 1), summaries.len);
+    try std.testing.expectEqualStrings("alpha", summaries[0].id);
+    try std.testing.expectEqual(@as(usize, 3), summaries[0].message_count);
+    try std.testing.expectEqualStrings("hello world", summaries[0].first_user_summary);
+
+    const loaded = try loadById(arena, io, dir, "alpha");
+    try std.testing.expectEqualStrings("alpha", loaded.id);
+    try std.testing.expectEqual(@as(usize, 3), loaded.messages.len);
+    try std.testing.expectEqual(llm.Role.user, loaded.messages[1].role);
+    try std.testing.expectEqualStrings("hello\nworld", loaded.messages[1].content);
+    try std.testing.expectError(error.InvalidSessionId, loadById(arena, io, dir, "../alpha"));
+    try std.testing.expectError(error.SessionNotFound, loadById(arena, io, dir, "missing"));
+    try std.testing.expectError(error.InvalidSessionLog, loadById(arena, io, dir, "broken"));
+
+    const empty = try list(arena, io, dir ++ "/missing");
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
 }
 
 test "context separation: execution log survives model-context compaction; transport state lives in llm.ModelContext" {
