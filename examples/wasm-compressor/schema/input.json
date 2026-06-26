@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "required": ["version", "kind", "messages"],
+  "properties": {
+    "version": { "type": "integer" },
+    "kind": { "const": "compressor" },
+    "keep_recent": { "type": "integer" },
+    "elided_count": { "type": "integer" },
+    "elided_bytes": { "type": "integer" },
+    "messages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["role", "content"],
+        "properties": {
+          "role": { "type": "string" },
+          "content": { "type": "string" }
+        }
+      }
+    }
+  }
+}

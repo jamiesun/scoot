@@ -41,6 +41,15 @@ scoot-wasm wasi path/to/module.wasm [args...]
 形状、block/loop/if 签名、分支 label、调用签名、local/global 访问、memory/table 是否存在，
 以及不可变 global 写入。
 
+仓库内置了一个完整压缩插件示例：`examples/wasm-compressor`：
+
+```sh
+zig build wasm-compressor-example
+scoot wasm-tools check examples/wasm-compressor
+printf '%s\n' '{"version":1,"kind":"compressor","keep_recent":2,"elided_count":3,"elided_bytes":1200,"messages":[]}' \
+  | scoot-wasm wasi examples/wasm-compressor/component.wasm
+```
+
 ## Manifest 与 Policy
 
 `manifest.toml` 声明身份、入口、schema 和**请求的**能力：

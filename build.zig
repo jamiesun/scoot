@@ -60,6 +60,29 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(wasm_host);
     }
 
+    const wasm32_wasi = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .wasi,
+    });
+    const wasm_compressor_example = b.addExecutable(.{
+        .name = "component",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/wasm-compressor/src/main.zig"),
+            .target = wasm32_wasi,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    wasm_compressor_example.entry = .disabled;
+    wasm_compressor_example.rdynamic = true;
+
+    const update_wasm_compressor_example = b.addUpdateSourceFiles();
+    update_wasm_compressor_example.addCopyFileToSource(
+        wasm_compressor_example.getEmittedBin(),
+        "examples/wasm-compressor/component.wasm",
+    );
+    const wasm_compressor_example_step = b.step("wasm-compressor-example", "Build examples/wasm-compressor/component.wasm");
+    wasm_compressor_example_step.dependOn(&update_wasm_compressor_example.step);
+
     // The standalone Wasm engine lives outside the core `scoot` binary so the
     // zero-dependency core never embeds a runtime. Its tests are compiled as a
     // separate artifact (not linked into core) and always run under `zig build
