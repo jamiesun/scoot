@@ -16,6 +16,24 @@ heading when cutting a release.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-26
+
+### Added
+
+- Embedded runs now emit session-correlated audit events and write per-session
+  JSONL state, making API-driven runs replayable and easier to inspect (#140).
+- Added read-only session and audit commands: `scoot sessions list`,
+  `scoot session show <id>`, and `scoot audit show <session-id>` (#141).
+- Added the foreground `scoot serve` stdio NDJSON protocol with `run`,
+  `session.list`, `session.get`, and `audit.query` methods for local app-server
+  integrations (#142).
+
+### Changed
+
+- Hardened the serve and daemon lifecycle: stdio `run` uses request-scoped
+  result allocation and default retry semantics, and `daemon stop` only signals
+  a process when the pid matches the recorded running daemon state (#143).
+
 ## [0.3.0] - 2026-06-23
 
 ### Added
@@ -171,7 +189,8 @@ First feature release since `v0.0.2` (which only carried release-workflow plumbi
 
 - Polished homepage/license metadata, infographic, bilingual user guide (#6, #19, #36)
 
-[Unreleased]: https://github.com/jamiesun/scoot/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/jamiesun/scoot/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/jamiesun/scoot/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jamiesun/scoot/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jamiesun/scoot/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jamiesun/scoot/compare/v0.0.2...v0.1.0
