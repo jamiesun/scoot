@@ -75,6 +75,15 @@ import 一旦被调用即 trap；越界的 guest 指针返回 `EFAULT` 而非破
 描述符返回 `EBADF`。资源使用受与 `run` 相同的 fuel / 调用深度 / 内存页上限约束，核心还会
 为该子进程套一层硬性墙钟超时。
 
+仓库内置了一个可运行的压缩插件包：`examples/wasm-compressor`。构建与验证：
+
+```sh
+zig build wasm-compressor-example
+./zig-out/bin/scoot wasm-tools check examples/wasm-compressor
+printf '%s\n' '{"version":1,"kind":"compressor","keep_recent":2,"elided_count":3,"elided_bytes":1200,"messages":[]}' \
+  | ./zig-out/bin/scoot-wasm wasi examples/wasm-compressor/component.wasm
+```
+
 尚未实现（后续阶段）：超出当前 host 子集的完整 spec 一致验证、浮点一致性，以及更大的
 WASI 表面（文件、套接字、realtime/monotonic 之外的时钟）。
 
@@ -118,7 +127,9 @@ policy 能力必须是 manifest 能力的子集，避免工具包静默获得自
 - `net_read`：外向只读网络访问。
 - `net_write`：外向写类网络访问。
 
-第一阶段纯工具应主要使用 `compute`。因为执行能力尚未实现，当前任何 capability 都不会授予运行时权限。
+第一阶段纯工具应主要使用 `compute`。package capability 仍只是准入元数据：独立 host
+当前只暴露 stdio/args/environ/clock/random/proc-exit，不会把 `read`、`write`、
+`net_read` 或 `net_write` 映射成文件、环境变量或网络权限。
 
 ## Schemas
 

@@ -196,13 +196,16 @@ context_budget_bytes = 80000      # 0 表示关闭；按后端窗口调小
 | `stdout_limit` | usize? | `1048576` | 接受的最大 stdout 字节数。 |
 | `stderr_limit` | usize? | `262144` | 接受的最大 stderr 字节数。 |
 
+如果可选的独立 host 已安装在 `PATH` 上，可直接使用 `scoot-wasm wasi {component}`
+（否则把 `scoot-wasm` 换成绝对路径）：
+
 ```toml
 [agent]
 compactor = "plugin:tiny"
 
 [agent.compactor_plugin.tiny]
 package = "/opt/scoot/compressors/tiny"
-host = ["/usr/bin/env", "tiny-compressor-host", "{package}", "{component}"]
+host = ["scoot-wasm", "wasi", "{component}"]
 timeout_ms = 30000
 stdout_limit = 1048576
 stderr_limit = 262144

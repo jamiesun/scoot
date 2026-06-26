@@ -218,13 +218,16 @@ falls through to the built-in fallback chain.
 | `stdout_limit` | usize? | `1048576` | Maximum stdout bytes accepted from the plugin. |
 | `stderr_limit` | usize? | `262144` | Maximum stderr bytes accepted from the plugin. |
 
+Use `scoot-wasm wasi {component}` when the optional standalone host is installed
+on `PATH` (or replace `scoot-wasm` with its absolute path):
+
 ```toml
 [agent]
 compactor = "plugin:tiny"
 
 [agent.compactor_plugin.tiny]
 package = "/opt/scoot/compressors/tiny"
-host = ["/usr/bin/env", "tiny-compressor-host", "{package}", "{component}"]
+host = ["scoot-wasm", "wasi", "{component}"]
 timeout_ms = 30000
 stdout_limit = 1048576
 stderr_limit = 262144

@@ -93,6 +93,16 @@ than corrupting host memory. Bad file descriptors return `EBADF`. Resource use
 stays bounded by the same fuel / call-depth / memory-page caps as `run`, and the
 core additionally wraps the subprocess with a hard wall-clock timeout.
 
+The repository includes a runnable compressor package under
+`examples/wasm-compressor`. Build it with:
+
+```sh
+zig build wasm-compressor-example
+./zig-out/bin/scoot wasm-tools check examples/wasm-compressor
+printf '%s\n' '{"version":1,"kind":"compressor","keep_recent":2,"elided_count":3,"elided_bytes":1200,"messages":[]}' \
+  | ./zig-out/bin/scoot-wasm wasi examples/wasm-compressor/component.wasm
+```
+
 Not yet implemented (later phases): full spec-conformant validation beyond the
 current host subset, floating-point conformance, and the broader WASI surface
 (files, sockets, clocks beyond realtime/monotonic).
@@ -147,8 +157,10 @@ Supported capability names:
 - `net_write`: outbound write-style network access.
 
 `compute` is the only capability expected for pure tools in the first iteration.
-No capability currently grants runtime authority because execution is not
-implemented.
+Package capabilities are still admission metadata: the standalone host currently
+exposes only stdio/args/environ/clock/random/proc-exit, and it does not map
+`read`, `write`, `net_read`, or `net_write` to filesystem, environment, or
+network authority.
 
 ## Schemas
 
