@@ -16,6 +16,20 @@ heading when cutting a release.
 
 ## [Unreleased]
 
+### Added
+
+- `scoot-wasm` now executes integer Wasm functions (W1): a dependency-free Zig
+  stack machine with structured control flow (block/loop/if/else/br/br_if/
+  br_table/return/call/call_indirect), i32/i64 arithmetic, a bounds-checked
+  64 KiB-page linear memory (load/store, memory.size/grow), globals, a funcref
+  table, and active data/element segments. Every fault is a structured trap
+  (unreachable, divide-by-zero, integer overflow, out-of-bounds memory/table,
+  indirect-call type mismatch) bounded by fuel, call-depth, and memory-page
+  limits. Invoke with `scoot-wasm run <module.wasm> <export> [int args...]`.
+  The engine is compiled only into the standalone `scoot-wasm` binary
+  (`-Dwasm-host=true`); the zero-dependency core never links it. WASI, a full
+  type validator, and floating-point arithmetic remain later phases (#100).
+
 ## [0.4.0] - 2026-06-26
 
 ### Added

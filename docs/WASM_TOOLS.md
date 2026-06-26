@@ -1,7 +1,8 @@
 # Wasm Tool Packages
 
-Status: design boundary and static validation only. Scoot does not execute Wasm
-tools yet.
+Status: design boundary and static validation in the core; the standalone
+`scoot-wasm` host now executes integer Wasm functions (W1). The core `scoot`
+binary still never loads or executes Wasm.
 
 Scoot's Wasm tool package format is intentionally smaller than Wassette or MCP.
 The goal is a local, reviewable boundary for third-party tools before any
@@ -29,6 +30,37 @@ The check is read-only. It parses metadata and schemas, checks referenced files,
 rejects unsafe paths, and validates `component.wasm` binary structure (magic,
 version, sections, LEB128 lengths, and basic index/count consistency). It never
 executes Wasm.
+
+## Standalone host (`scoot-wasm`)
+
+Execution lives in a separate binary, built only with `-Dwasm-host=true`, so the
+zero-dependency core never embeds a runtime:
+
+```sh
+zig build -Dwasm-host=true
+scoot-wasm check path/to/module.wasm        # structural validation (W0)
+scoot-wasm run path/to/module.wasm add 2 40 # execute an exported function (W1)
+```
+
+`scoot-wasm run <module.wasm> <export> [int args...]` invokes an exported
+function with the W1 stack machine and prints its integer result(s), or a
+structured `TRAP ...` line on fault. Arguments are parsed as integers and
+coerced to the function's declared parameter types.
+
+The W1 engine is a dependency-free Zig interpreter covering: structured control
+flow (`block`/`loop`/`if`/`else`/`br`/`br_if`/`br_table`/`return`/`call`/
+`call_indirect`), i32/i64 arithmetic, comparisons, bit/shift/rotate ops and
+`wrap`/`extend` conversions, a bounds-checked 64 KiB-page linear memory
+(`load`/`store` plus 8/16/32-bit variants, `memory.size`/`memory.grow`,
+`memory.copy`/`memory.fill`), globals, a funcref table, and active data/element
+segments. Every fault returns a structured trap instead of panicking
+(unreachable, divide-by-zero, integer overflow, out-of-bounds memory/table,
+undefined element, indirect-call type mismatch), bounded by fuel,
+call-depth, value-stack, and memory-page limits.
+
+Not yet implemented (later phases): WASI host functions (so a module that
+imports host functions traps), a full spec-conformant type validator, and
+floating-point arithmetic.
 
 ## Manifest
 

@@ -15,6 +15,17 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 ## [未发布]
 
+### 新增
+
+- `scoot-wasm` 现已能执行整数 Wasm 函数（W1）：一个零依赖的纯 Zig 栈机，支持结构化
+  控制流（block/loop/if/else/br/br_if/br_table/return/call/call_indirect）、
+  i32/i64 算术、带边界检查的 64 KiB 页线性内存（load/store、memory.size/grow）、
+  全局变量、funcref 表，以及 active data/element 段。任何故障都是结构化 trap
+  （unreachable、除零、整数溢出、内存/表越界、间接调用类型不匹配），并由 fuel、
+  调用深度与内存页上限兜底。用 `scoot-wasm run <module.wasm> <export> [整数参数...]`
+  调用。引擎仅编译进独立的 `scoot-wasm` 二进制（`-Dwasm-host=true`），零依赖核心
+  从不链接它。WASI、完整类型验证器与浮点运算留待后续阶段（#100）。
+
 ## [0.4.0] - 2026-06-26
 
 ### 新增
