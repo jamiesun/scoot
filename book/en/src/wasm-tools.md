@@ -26,9 +26,10 @@ Validate a package — read-only, never loads or runs the Wasm:
 scoot wasm-tools check path/to/tool
 ```
 
-The check parses metadata and schemas, verifies referenced files exist, and
-rejects unsafe paths (absolute, `..`, hidden segments, drive prefixes, empty
-segments).
+The check parses metadata and schemas, verifies referenced files exist, rejects
+unsafe paths (absolute, `..`, hidden segments, drive prefixes, empty segments),
+and validates `component.wasm` binary structure (magic, version, sections,
+LEB128 lengths, and basic index/count consistency). It never executes Wasm.
 
 ## Manifest & Policy
 
