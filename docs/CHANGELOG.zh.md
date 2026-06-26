@@ -15,6 +15,22 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 ## [未发布]
 
+## [0.4.0] - 2026-06-26
+
+### 新增
+
+- 嵌入式运行现在会写入带 session 关联的审计事件，并生成每个 session
+  自己的 JSONL 状态，便于回放和检查 API 驱动的运行（#140）。
+- 新增只读 session 与 audit 命令：`scoot sessions list`、
+  `scoot session show <id>`、`scoot audit show <session-id>`（#141）。
+- 新增前台 `scoot serve` stdio NDJSON 协议，支持 `run`、`session.list`、
+  `session.get`、`audit.query` 方法，用于本地 app-server 集成（#142）。
+
+### 变更
+
+- 加固 serve 与 daemon 生命周期：stdio `run` 使用请求级结果分配并继承默认重试语义；
+  `daemon stop` 只有在 pid 与记录中的 running daemon 状态一致时才发送信号（#143）。
+
 ## [0.3.0] - 2026-06-23
 
 ### 新增
@@ -156,7 +172,8 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 - 完善首页/许可证元数据、信息图与双语用户指南（#6、#19、#36）
 
-[未发布]: https://github.com/jamiesun/scoot/compare/v0.3.0...HEAD
+[未发布]: https://github.com/jamiesun/scoot/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/jamiesun/scoot/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jamiesun/scoot/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jamiesun/scoot/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jamiesun/scoot/compare/v0.0.2...v0.1.0
