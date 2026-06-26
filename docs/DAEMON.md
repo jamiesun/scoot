@@ -26,10 +26,12 @@ handlers, and runs the same unattended schedule loop as `schedule run`.
 `daemon status` prints the last recorded daemon state, reports Scoot's own state
 file and pid file, and probes the recorded pid when one is available.
 
-`daemon stop` reads `state/daemon.pid` and sends SIGTERM. The running daemon
-finishes the current tick, writes a stopped state, and removes the pid file. If a
-job is already executing, the signal is recorded and the loop exits after that
-job returns.
+`daemon stop` reads `state/daemon.pid` and sends SIGTERM only when
+`state/daemon.json` also says the daemon is `running` with the same pid. A
+missing or mismatched state file is treated as a stale pid file and is cleaned up
+without signaling. The running daemon finishes the current tick, writes a stopped
+state, and removes the pid file. If a job is already executing, the signal is
+recorded and the loop exits after that job returns.
 
 ## Runtime Files
 

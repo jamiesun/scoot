@@ -20,7 +20,7 @@ scoot daemon stop
 
 `daemon status` 打印最近一次记录的 daemon 状态，报告 Scoot 自己写入的 state 文件和 pid 文件，并在有 pid 可用时探测进程是否仍然存活。
 
-`daemon stop` 读取 `state/daemon.pid` 并发送 SIGTERM。运行中的 daemon 会完成当前 tick，写入 stopped 状态，并删除 pid 文件。如果已经有 job 正在执行，信号会被记录，循环会在该 job 返回后退出。
+`daemon stop` 读取 `state/daemon.pid`，但只有 `state/daemon.json` 同时显示 daemon 处于 `running` 且 pid 一致时才发送 SIGTERM。state 缺失或 pid 不一致会被视为陈旧 pid 文件，只清理不发信号。运行中的 daemon 会完成当前 tick，写入 stopped 状态，并删除 pid 文件。如果已经有 job 正在执行，信号会被记录，循环会在该 job 返回后退出。
 
 ## 运行时文件
 

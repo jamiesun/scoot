@@ -205,7 +205,7 @@ safety. Requires `schedule.enabled = true` to run. See
 scoot daemon status                 # print last recorded daemon state
 scoot daemon run                    # foreground long-running scheduler
 scoot daemon run --ticks 3          # run three poll cycles then exit
-scoot daemon stop                   # send SIGTERM to a running daemon
+scoot daemon stop                   # send SIGTERM only when state/pid agree
 ```
 
 The foreground long-running mode for scheduled jobs. It writes

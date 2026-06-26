@@ -130,7 +130,7 @@ Implemented triggers:
 
 ### Daemon Lifecycle
 
-`scoot daemon run` is the foreground long-running mode for scheduled jobs. It records `state/daemon.json` and `state/daemon.pid`, handles SIGTERM/SIGINT, and treats a stale `running` state on restart as evidence of an unclean previous stop. `daemon status` reports Scoot's last recorded lifecycle state, and `daemon stop` sends SIGTERM to the recorded pid.
+`scoot daemon run` is the foreground long-running mode for scheduled jobs. It records `state/daemon.json` and `state/daemon.pid`, handles SIGTERM/SIGINT, and treats a stale `running` state on restart as evidence of an unclean previous stop. `daemon status` reports Scoot's last recorded lifecycle state, and `daemon stop` sends SIGTERM only when the pid file and running state agree.
 
 ### Sessions And Audit
 

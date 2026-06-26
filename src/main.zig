@@ -1563,8 +1563,11 @@ fn handleServeLine(
             try writeServeError(out, id, "invalid_params", "run requires params.goal string");
             return;
         };
-        const result = scoot.api.runDetailed(rt, goal) catch |err| {
-            try writeServeError(out, id, "run_failed", @errorName(err));
+        const result = scoot.api.runDetailedWithOptions(rt, goal, .{
+            .result_allocator = arena,
+            .max_retries = default_eval_retries,
+        }) catch |err| {
+            try writeServeRunError(out, id, rt, err);
             return;
         };
         try writeServeRunResult(out, id, result);
@@ -1691,6 +1694,23 @@ fn writeServeError(out: *Io.Writer, id: ?std.json.Value, code: []const u8, messa
     try scoot.jsonio.writeString(out, code);
     try out.writeAll(",\"message\":");
     try scoot.jsonio.writeString(out, message);
+    try out.writeAll("}}\n");
+}
+
+fn writeServeRunError(out: *Io.Writer, id: ?std.json.Value, rt: *scoot.api.Runtime, err: anyerror) !void {
+    try out.writeAll("{\"id\":");
+    try writeServeId(out, id);
+    try out.writeAll(",\"ok\":false,\"error\":{\"code\":\"run_failed\",\"message\":");
+    try scoot.jsonio.writeString(out, @errorName(err));
+    const status = scoot.api.lastBackendStatus(rt);
+    if (status != 0) try out.print(",\"backend_status\":{d}", .{status});
+    const detail = scoot.api.lastBackendErrorBody(rt);
+    if (detail.len != 0) {
+        try out.writeAll(",\"backend_detail\":");
+        try scoot.jsonio.writeString(out, detail);
+        if (scoot.api.lastBackendErrorTruncated(rt))
+            try out.writeAll(",\"backend_detail_truncated\":true");
+    }
     try out.writeAll("}}\n");
 }
 
@@ -2244,6 +2264,19 @@ fn stopDaemon(
     if (pid <= 0) {
         try out.print("[scoot] invalid daemon pid: {d}\n", .{pid});
         die(out, 1);
+    }
+    const state = (try scoot.daemon.readState(arena, io, cfg.dirs.state_dir)) orelse {
+        try out.print("[scoot] refusing to signal pid={d}: daemon state is missing; treating pid file as stale.\n", .{pid});
+        scoot.daemon.clearPid(arena, io, cfg.dirs.state_dir);
+        return;
+    };
+    if (!std.mem.eql(u8, state.status, "running") or state.pid != pid) {
+        try out.print(
+            "[scoot] refusing to signal pid={d}: daemon state says status={s} pid={d}; treating pid file as stale.\n",
+            .{ pid, state.status, state.pid },
+        );
+        scoot.daemon.clearPid(arena, io, cfg.dirs.state_dir);
+        return;
     }
     // issue #53: probe before SIGTERM. If already dead, clear pid file and
     // reconcile state instead of signaling a stale pid. This narrows the PID

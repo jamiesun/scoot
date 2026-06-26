@@ -37,6 +37,16 @@ pub const RunResult = struct {
     reply: []const u8,
 };
 
+pub const RunOptions = struct {
+    /// Where returned session_id/reply should be copied. Null keeps the legacy
+    /// embedding contract: results live until stop().
+    result_allocator: ?std.mem.Allocator = null,
+    /// Retry transient backend failures within the same local session.
+    max_retries: u32 = 0,
+    retry_base_delay_ns: u64 = 2 * std.time.ns_per_s,
+    retry_max_delay_ns: u64 = 10 * std.time.ns_per_s,
+};
+
 const RuntimeState = struct {
     gpa: std.mem.Allocator,
     arena_state: std.heap.ArenaAllocator,
@@ -120,8 +130,22 @@ pub fn run(rt: *Runtime, goal: []const u8) ![]const u8 {
 ///
 /// Returned slices are owned by the runtime and remain valid until `stop`.
 pub fn runDetailed(rt: *Runtime, goal: []const u8) !RunResult {
+    return runDetailedWithOptions(rt, goal, .{});
+}
+
+/// Run one goal and copy the result into the caller-provided allocator.
+///
+/// This is intended for protocol adapters such as `scoot serve` that write a
+/// response immediately and must not retain every reply until runtime shutdown.
+pub fn runDetailedAlloc(rt: *Runtime, result_allocator: std.mem.Allocator, goal: []const u8) !RunResult {
+    return runDetailedWithOptions(rt, goal, .{ .result_allocator = result_allocator });
+}
+
+/// Run one goal with internal knobs for protocol adapters.
+pub fn runDetailedWithOptions(rt: *Runtime, goal: []const u8, options: RunOptions) !RunResult {
     const state: *RuntimeState = @ptrCast(@alignCast(rt));
     const runtime_arena = state.arena_state.allocator();
+    const result_allocator = options.result_allocator orelse runtime_arena;
     var run_arena_state = std.heap.ArenaAllocator.init(state.gpa);
     defer run_arena_state.deinit();
     const arena = run_arena_state.allocator();
@@ -141,18 +165,45 @@ pub fn runDetailed(rt: *Runtime, goal: []const u8) !RunResult {
 
     try sess.append(arena, .user, goal);
     if (ag.audit) |lg| lg.log(.run, goal) catch {};
-    const reply = ag.run(arena, &sess) catch |err| {
-        if (ag.audit) |lg| lg.log(.system_error, @errorName(err)) catch {};
-        sess.persist(state.io, state.dirs.sessions_dir) catch {};
-        return err;
+    var retries_done: u32 = 0;
+    const reply = while (true) {
+        const attempt = ag.run(arena, &sess) catch |err| {
+            if (shouldRetryRunError(err, &state.client, retries_done, options.max_retries)) {
+                retries_done += 1;
+                if (ag.audit) |lg| lg.log(.system_error, @errorName(err)) catch {};
+                const delay_ns = retryDelayNs(retries_done, options.retry_base_delay_ns, options.retry_max_delay_ns);
+                state.io.sleep(std.Io.Duration.fromNanoseconds(@intCast(delay_ns)), .awake) catch {};
+                continue;
+            }
+            if (ag.audit) |lg| lg.log(.system_error, @errorName(err)) catch {};
+            sess.persist(state.io, state.dirs.sessions_dir) catch {};
+            return err;
+        };
+        break attempt;
     };
-    const owned_reply = try runtime_arena.dupe(u8, reply);
-    const owned_session_id = try runtime_arena.dupe(u8, sess.id);
+    const owned_reply = try result_allocator.dupe(u8, reply);
+    errdefer result_allocator.free(owned_reply);
+    const owned_session_id = try result_allocator.dupe(u8, sess.id);
     sess.persist(state.io, state.dirs.sessions_dir) catch {};
     return .{
         .session_id = owned_session_id,
         .reply = owned_reply,
     };
+}
+
+pub fn lastBackendStatus(rt: *Runtime) u16 {
+    const state: *RuntimeState = @ptrCast(@alignCast(rt));
+    return state.client.last_error_status;
+}
+
+pub fn lastBackendErrorBody(rt: *Runtime) []const u8 {
+    const state: *RuntimeState = @ptrCast(@alignCast(rt));
+    return state.client.lastErrorBody();
+}
+
+pub fn lastBackendErrorTruncated(rt: *Runtime) bool {
+    const state: *RuntimeState = @ptrCast(@alignCast(rt));
+    return state.client.last_error_body_truncated;
 }
 
 /// Stop the runtime and release all memory owned by it.
@@ -166,6 +217,47 @@ pub fn stop(rt: *Runtime) void {
 fn runtimeSessionId(arena: std.mem.Allocator, io: std.Io, seq: usize) ![]const u8 {
     const ts_ms = std.Io.Timestamp.now(io, .real).toMilliseconds();
     return std.fmt.allocPrint(arena, "embed-{d}-{d}", .{ ts_ms, seq });
+}
+
+fn shouldRetryRunError(err: anyerror, client: *const llm.Client, retries_done: u32, max_retries: u32) bool {
+    if (retries_done >= max_retries) return false;
+
+    if (err == error.BackendError) {
+        const status = client.last_error_status;
+        return status == 0 or isRetryableBackendStatus(status);
+    }
+
+    return isRetryableTransportError(err);
+}
+
+fn isRetryableBackendStatus(status: u16) bool {
+    return status == 408 or status == 409 or status == 425 or status == 429 or
+        status == 500 or status == 502 or status == 503 or status == 504;
+}
+
+fn isRetryableTransportError(err: anyerror) bool {
+    const name = @errorName(err);
+    const retryable = [_][]const u8{
+        "ConnectionRefused",
+        "ConnectionResetByPeer",
+        "ConnectionTimedOut",
+        "HttpConnectionClosing",
+        "NetworkUnreachable",
+        "TemporaryNameServerFailure",
+        "TlsInitializationFailed",
+    };
+    for (retryable) |candidate| {
+        if (std.mem.eql(u8, name, candidate)) return true;
+    }
+    return false;
+}
+
+fn retryDelayNs(retry_index: u32, base_ns: u64, max_ns: u64) u64 {
+    if (base_ns == 0 or max_ns == 0) return 0;
+    const zero_based = if (retry_index == 0) 0 else retry_index - 1;
+    const shift: u6 = @intCast(@min(zero_based, 4));
+    const delay = base_ns << shift;
+    return @min(delay, max_ns);
 }
 
 fn injectSkills(arena: std.mem.Allocator, io: std.Io, search_paths: []const []const u8, sess: *session.Session) []const agent.SkillRef {
@@ -229,6 +321,26 @@ fn scriptedComplete(
     const content = self.steps[self.idx];
     self.idx += 1;
     return .{ .content = try arena.dupe(u8, content), .finish_reason = "stop" };
+}
+
+const RetryBrain = struct {
+    failures_left: usize,
+};
+
+fn retryThenComplete(
+    ctx: *anyopaque,
+    arena: std.mem.Allocator,
+    messages: []const llm.Message,
+    opts: llm.ChatOptions,
+) anyerror!llm.Completion {
+    _ = messages;
+    _ = opts;
+    const self: *RetryBrain = @ptrCast(@alignCast(ctx));
+    if (self.failures_left > 0) {
+        self.failures_left -= 1;
+        return error.ConnectionRefused;
+    }
+    return .{ .content = try arena.dupe(u8, "{\"thought\":\"retry-ok\",\"action\":\"final\",\"action_input\":\"served\"}"), .finish_reason = "stop" };
 }
 
 test "embedded run writes session-correlated audit and keeps replies valid until stop" {
@@ -320,6 +432,43 @@ test "embedded run writes session-correlated audit and keeps replies valid until
     defer gpa.free(second_session);
     try std.testing.expect(fileExists(io, first_session));
     try std.testing.expect(fileExists(io, second_session));
+}
+
+test "embedded runDetailedWithOptions retries transient errors and can return caller-owned result" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const home = "/tmp/scoot_api_embed_retry_test";
+    cwd.deleteTree(io, home) catch {};
+    defer cwd.deleteTree(io, home) catch {};
+
+    var env: std.process.Environ.Map = .init(gpa);
+    defer env.deinit();
+
+    const rt = try start(gpa, io, .{ .env = &env, .scoot_home = home });
+    defer stop(rt);
+
+    var brain = RetryBrain{ .failures_left = 1 };
+    const state: *RuntimeState = @ptrCast(@alignCast(rt));
+    state.agent_template.complete_ctx = &brain;
+    state.agent_template.complete_fn = retryThenComplete;
+    state.agent_template.max_turns = 2;
+    state.skill_paths = &.{};
+
+    const result = try runDetailedWithOptions(rt, "retry goal", .{
+        .result_allocator = gpa,
+        .max_retries = 1,
+        .retry_base_delay_ns = 0,
+        .retry_max_delay_ns = 0,
+    });
+    defer gpa.free(result.session_id);
+    defer gpa.free(result.reply);
+
+    try std.testing.expectEqualStrings("served", result.reply);
+    try std.testing.expectEqual(@as(usize, 0), brain.failures_left);
+    const session_path = try std.fmt.allocPrint(gpa, "{s}/state/sessions/{s}.jsonl", .{ home, result.session_id });
+    defer gpa.free(session_path);
+    try std.testing.expect(fileExists(io, session_path));
 }
 
 fn fileExists(io: std.Io, path: []const u8) bool {
