@@ -72,6 +72,14 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_wasm_engine_tests = b.addRunArtifact(wasm_engine_tests);
+    const wasm_host_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/wasm_host.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_wasm_host_tests = b.addRunArtifact(wasm_host_tests);
 
     const embed_example = b.addExecutable(.{
         .name = "scoot-embed-minimal",
@@ -108,5 +116,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_internal_tests.step);
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_wasm_engine_tests.step);
+    test_step.dependOn(&run_wasm_host_tests.step);
     test_step.dependOn(&embed_example.step);
 }

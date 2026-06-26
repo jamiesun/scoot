@@ -100,6 +100,22 @@ fn die(out: *std.Io.Writer, code: u8) noreturn {
     std.process.exit(code);
 }
 
+fn preflightModuleBytes(
+    arena: std.mem.Allocator,
+    out: *std.Io.Writer,
+    path: []const u8,
+    bytes: []const u8,
+) !bool {
+    const validation = try wasm_bytecode.validateModuleBytes(arena, bytes);
+    switch (validation) {
+        .valid => return true,
+        .invalid => |msg| {
+            try out.print("FAIL {s}: {s}\n", .{ path, msg });
+            return false;
+        },
+    }
+}
+
 fn runCommand(
     arena: std.mem.Allocator,
     io: std.Io,
@@ -136,6 +152,8 @@ fn runCommand(
             die(out, 1);
         },
     };
+
+    if (!try preflightModuleBytes(arena, out, path, bytes)) die(out, 1);
 
     const outcome = wasm_engine.runExport(arena, bytes, export_name, call_args.items, .{});
     switch (outcome) {
@@ -199,6 +217,7 @@ fn wasiCommand(
     defer errw.flush() catch {};
 
     const bytes = readModule(arena, io, errw, path);
+    if (!try preflightModuleBytes(arena, errw, path, bytes)) die(errw, 1);
 
     // Read the entire stdin into a buffer presented to the module on fd 0.
     var in_buf: [1 << 16]u8 = undefined;
@@ -246,4 +265,37 @@ fn wasiCommand(
         },
         .load_error => |msg| failErr(errw, path, msg),
     }
+}
+
+test "run preflight reports W0 truncated section errors" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+
+    const malformed_section = "\x00asm\x01\x00\x00\x00\x01\x01";
+    const ok = try preflightModuleBytes(arena_state.allocator(), &out.writer, "bad-section.wasm", malformed_section);
+
+    try std.testing.expect(!ok);
+    try std.testing.expectEqualStrings(
+        "FAIL bad-section.wasm: section type payload truncated\n",
+        out.writer.buffered(),
+    );
+}
+
+test "wasi preflight reports W0 malformed LEB128 errors" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+
+    const malformed_leb = "\x00asm\x01\x00\x00\x00\x01\x80\x80\x80\x80\x80\x00";
+    const ok = try preflightModuleBytes(arena_state.allocator(), &out.writer, "bad-leb.wasm", malformed_leb);
+
+    try std.testing.expect(!ok);
+    const written = out.writer.buffered();
+    try std.testing.expect(std.mem.startsWith(u8, written, "FAIL bad-leb.wasm: "));
+    try std.testing.expect(std.mem.indexOf(u8, written, "LEB128") != null);
 }
