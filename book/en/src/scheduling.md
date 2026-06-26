@@ -86,12 +86,14 @@ a shell job for background ownership.
 scoot daemon run                # foreground; requires schedule.enabled = true
 scoot daemon run --ticks 3      # run three poll cycles then exit
 scoot daemon status             # print the last recorded daemon state
-scoot daemon stop               # SIGTERM a running daemon
+scoot daemon stop               # SIGTERM only when running state and pid agree
 ```
 
 `daemon run` loads valid jobs, writes lifecycle state, installs SIGTERM/SIGINT
-handlers, and runs the same loop as `schedule run`. On `stop`, the daemon
-finishes the current tick, writes a stopped state, and removes its pid file.
+handlers, and runs the same loop as `schedule run`. On `stop`, Scoot only signals
+when `state/daemon.json` says `running` and matches `state/daemon.pid`; otherwise
+the pid file is treated as stale. A running daemon finishes the current tick,
+writes a stopped state, and removes its pid file.
 
 ### One Daemon Per Runtime Directory
 

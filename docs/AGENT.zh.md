@@ -17,7 +17,7 @@
 
 ## 一句话项目定位
 
-Scoot 是用**纯 Zig（0.16.0+）**手搓的轻量级 AI Agent 守护进程（Daemon / CLI）。基调：轻量、无冗余、本地优先、防御性编程。**当前已落地北极星五大支柱**（均有测试守护，`zig build test` 全绿 112 项）：`scoot -e` 单次执行与默认 REPL 多轮交互跑完整 ReACT 闭环（结构化步骤 + 执行护栏 + 审计落盘）；**内建工具集自包含**（bash + file_read/write/edit + grep/glob + http_request，全部进程内实现、零外部命令依赖，可在裁剪/嵌入式 Linux 运行）；Skill 渐进式披露；Schedule 无人值守自主调度（强制 readonly 安全档）；密钥三来源安全管理。`grep -rn NotImplemented src` 现已无实现桩——新增能力时这是「扩展」而非「填空」。
+Scoot 是用**纯 Zig（0.16.0+）**手搓的轻量级 AI Agent 守护进程（Daemon / CLI）。基调：轻量、无冗余、本地优先、防御性编程。**当前已落地北极星五大支柱**（均有测试守护，`zig build test` 应保持全绿）：`scoot -e` 单次执行与默认 REPL 多轮交互跑完整 ReACT 闭环（结构化步骤 + 执行护栏 + 审计落盘）；**内建工具集自包含**（bash + file_read/write/edit + grep/glob + http_request，全部进程内实现、零外部命令依赖，可在裁剪/嵌入式 Linux 运行）；Skill 渐进式披露；Schedule 无人值守自主调度（强制 readonly 安全档）；密钥三来源安全管理。`grep -rn NotImplemented src` 现已无实现桩——新增能力时这是「扩展」而非「填空」。
 
 ## 常用命令
 
@@ -31,7 +31,7 @@ zig build -Doptimize=ReleaseSafe    # 嵌入式 / 生产部署推荐档（见下
 
 改动任何 `.zig` 后，至少跑通 `zig build` 与 `zig build test` 再交付。
 
-**部署优化档（安全决策，非纯性能）**：嵌入式 / 生产部署推荐 **`ReleaseSafe`**——它保留整数溢出、越界、`unreachable` 等 safety check，触发时是**可被审计捕获的 panic**（与铁律 #4「绝不 panic」配套：结构性不可达一旦被破坏能立刻暴露，而非静默走错）。`ReleaseFast` 会把这些变成**静默未定义行为**，最危险的生产场景反而最不安全，**不推荐用于部署**。`ReleaseSafe` 档同样 112/112 测试通过。
+**部署优化档（安全决策，非纯性能）**：嵌入式 / 生产部署推荐 **`ReleaseSafe`**——它保留整数溢出、越界、`unreachable` 等 safety check，触发时是**可被审计捕获的 panic**（与铁律 #4「绝不 panic」配套：结构性不可达一旦被破坏能立刻暴露，而非静默走错）。`ReleaseFast` 会把这些变成**静默未定义行为**，最危险的生产场景反而最不安全，**不推荐用于部署**。交付前应确认 `ReleaseSafe` 构建和测试套件同样通过。
 
 ## 代码地图
 

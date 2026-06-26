@@ -75,10 +75,10 @@ scoot schedule run --ticks 1    # run exactly one poll cycle, then exit
 scoot daemon run                # foreground; requires schedule.enabled = true
 scoot daemon run --ticks 3      # run three poll cycles then exit
 scoot daemon status             # print the last recorded daemon state
-scoot daemon stop               # SIGTERM a running daemon
+scoot daemon stop               # running state 与 pid 一致时才 SIGTERM
 ```
 
-`daemon run` 加载有效任务、写入生命周期状态、安装 SIGTERM/SIGINT 处理器，并运行与 `schedule run` 相同的循环。`stop` 时，守护进程跑完当前一轮、写入 stopped 状态、删除其 pid 文件。
+`daemon run` 加载有效任务、写入生命周期状态、安装 SIGTERM/SIGINT 处理器，并运行与 `schedule run` 相同的循环。`stop` 时，Scoot 只有在 `state/daemon.json` 显示 `running` 且匹配 `state/daemon.pid` 时才发信号；否则把 pid 文件视为陈旧文件。运行中的守护进程会跑完当前一轮、写入 stopped 状态、删除其 pid 文件。
 
 ### 每个运行目录只允许一个守护进程
 
