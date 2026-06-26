@@ -40,6 +40,109 @@ pub const Value = union(enum) {
     }
 };
 
+// ---------------------------------------------------------------------------
+// W2: minimal WASI preview1 subset.
+// ---------------------------------------------------------------------------
+
+/// The WASI preview1 function imports this host understands. Anything else
+/// (including the entire filesystem / network surface) is `unsupported`: it
+/// traps when called, so a hostile module gets no capability by construction.
+pub const WasiFn = enum {
+    unsupported,
+    args_sizes_get,
+    args_get,
+    environ_sizes_get,
+    environ_get,
+    clock_time_get,
+    random_get,
+    fd_write,
+    fd_read,
+    fd_close,
+    fd_seek,
+    fd_fdstat_get,
+    proc_exit,
+};
+
+/// Resolves an `(module, field)` import pair to a `WasiFn`. Both the modern
+/// `wasi_snapshot_preview1` and the legacy `wasi_unstable` module names map to
+/// the same subset.
+fn resolveWasiFn(module_name: []const u8, field: []const u8) WasiFn {
+    const is_wasi = std.mem.eql(u8, module_name, "wasi_snapshot_preview1") or
+        std.mem.eql(u8, module_name, "wasi_unstable");
+    if (!is_wasi) return .unsupported;
+    const table = [_]struct { name: []const u8, fnc: WasiFn }{
+        .{ .name = "args_sizes_get", .fnc = .args_sizes_get },
+        .{ .name = "args_get", .fnc = .args_get },
+        .{ .name = "environ_sizes_get", .fnc = .environ_sizes_get },
+        .{ .name = "environ_get", .fnc = .environ_get },
+        .{ .name = "clock_time_get", .fnc = .clock_time_get },
+        .{ .name = "random_get", .fnc = .random_get },
+        .{ .name = "fd_write", .fnc = .fd_write },
+        .{ .name = "fd_read", .fnc = .fd_read },
+        .{ .name = "fd_close", .fnc = .fd_close },
+        .{ .name = "fd_seek", .fnc = .fd_seek },
+        .{ .name = "fd_fdstat_get", .fnc = .fd_fdstat_get },
+        .{ .name = "proc_exit", .fnc = .proc_exit },
+    };
+    for (table) |e| {
+        if (std.mem.eql(u8, field, e.name)) return e.fnc;
+    }
+    return .unsupported;
+}
+
+/// Subset of WASI preview1 `errno` values returned by the host functions.
+const Errno = enum(i32) {
+    success = 0,
+    badf = 8,
+    fault = 21,
+    inval = 28,
+    nosys = 52,
+    spipe = 70,
+
+    fn code(self: Errno) i32 {
+        return @intFromEnum(self);
+    }
+};
+
+/// A fault while touching guest linear memory; surfaced to the module as
+/// `EFAULT` rather than killing it.
+const MemFault = error{Fault};
+
+/// Standard preopened WASI file descriptors.
+const fd_stdin: u32 = 0;
+const fd_stdout: u32 = 1;
+const fd_stderr: u32 = 2;
+
+/// Host-side WASI state shared with the running instance. The engine never
+/// performs real IO itself: stdin is a fixed buffer and stdout/stderr are
+/// in-memory sinks the caller (the `scoot-wasm` host) drains afterwards. Time
+/// and randomness are seeded by the caller so runs stay deterministic and
+/// dependency-free.
+pub const Wasi = struct {
+    stdin: []const u8 = &.{},
+    stdin_pos: usize = 0,
+    stdout: *std.ArrayList(u8),
+    stderr: *std.ArrayList(u8),
+    /// Each entry is a NUL-free argument; argv[0] is the program name.
+    args: []const []const u8 = &.{},
+    /// Each entry is a `KEY=VALUE` string (no NUL).
+    env: []const []const u8 = &.{},
+    alloc: std.mem.Allocator,
+    exit_code: u32 = 0,
+    clock_realtime_ns: u64 = 0,
+    clock_monotonic_ns: u64 = 0,
+    rng: u64 = 0x2545F4914F6CDD1D,
+
+    /// splitmix64; deterministic given the seed, no OS entropy.
+    fn nextRandom(self: *Wasi) u64 {
+        self.rng +%= 0x9E3779B97F4A7C15;
+        var z = self.rng;
+        z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9;
+        z = (z ^ (z >> 27)) *% 0x94D049BB133111EB;
+        return z ^ (z >> 31);
+    }
+};
+
 pub const Limits = struct {
     /// Maximum number of executed instructions before trapping.
     fuel: u64 = 200_000_000,
@@ -74,6 +177,8 @@ pub const Trap = error{
     GrowFailed,
     MalformedBody,
     OutOfMemory,
+    /// Clean WASI `proc_exit`: not a fault, unwound to the entry point.
+    Exit,
 };
 
 const page_size: u32 = 64 * 1024;
@@ -124,6 +229,9 @@ pub const Module = struct {
     /// type index per function (imports first, then defined).
     func_types: []u32 = &.{},
     imported_func_count: u32 = 0,
+    /// WASI mapping per imported function, parallel to the first
+    /// `imported_func_count` entries of `func_types`.
+    import_fns: []WasiFn = &.{},
     codes: []Code = &.{},
     exports: []Export = &.{},
     globals: []Global = &.{},
@@ -150,6 +258,8 @@ const ActiveData = struct {
 pub const InvokeResult = union(enum) {
     values: []Value,
     trap: []const u8,
+    /// WASI `proc_exit` was called with this status code.
+    exited: u32,
 };
 
 // ---------------------------------------------------------------------------
@@ -233,6 +343,7 @@ pub fn load(arena: std.mem.Allocator, bytes: []const u8) LoadError!Module {
     if (!std.mem.eql(u8, try c.take(wasm.version.len), &wasm.version)) return error.InvalidModule;
 
     var func_type_indices: std.ArrayList(u32) = .empty;
+    var import_fns: std.ArrayList(WasiFn) = .empty;
     var defined_codes: std.ArrayList(Code) = .empty;
 
     while (!c.atEnd()) {
@@ -243,7 +354,7 @@ pub fn load(arena: std.mem.Allocator, bytes: []const u8) LoadError!Module {
         switch (id) {
             0 => {}, // custom: ignore
             1 => m.types = try loadTypes(arena, &s),
-            2 => try loadImports(arena, &s, &m, &func_type_indices),
+            2 => try loadImports(arena, &s, &m, &func_type_indices, &import_fns),
             3 => {
                 const n = try s.uleb(u32);
                 var i: u32 = 0;
@@ -267,6 +378,7 @@ pub fn load(arena: std.mem.Allocator, bytes: []const u8) LoadError!Module {
     }
 
     m.func_types = func_type_indices.items;
+    m.import_fns = import_fns.items;
     m.codes = defined_codes.items;
     if (m.codes.len != m.func_types.len - m.imported_func_count) return error.InvalidModule;
     if (m.start) |s| {
@@ -301,18 +413,20 @@ fn loadImports(
     s: *Cursor,
     m: *Module,
     func_type_indices: *std.ArrayList(u32),
+    import_fns: *std.ArrayList(WasiFn),
 ) LoadError!void {
     const n = try s.uleb(u32);
     var i: u32 = 0;
     while (i < n) : (i += 1) {
-        _ = try s.name();
-        _ = try s.name();
+        const mod_name = try s.name();
+        const field_name = try s.name();
         const kind = try s.byte();
         switch (kind) {
             0 => {
                 const t = try s.uleb(u32);
                 if (t >= m.types.len) return error.InvalidModule;
                 try func_type_indices.append(arena, t);
+                try import_fns.append(arena, resolveWasiFn(mod_name, field_name));
                 m.imported_func_count += 1;
             },
             1 => { // table
@@ -661,6 +775,10 @@ pub const Instance = struct {
     control: []Label = &.{},
     csp: usize = 0,
     trap_msg: ?[]const u8 = null,
+    /// Optional WASI host. When null, calls to imported functions trap.
+    wasi: ?*Wasi = null,
+    /// Set when WASI `proc_exit` requested a clean shutdown.
+    exited: bool = false,
 
     const Label = struct {
         is_loop: bool,
@@ -729,12 +847,16 @@ pub const Instance = struct {
     }
 
     /// Runs the module start function (if any). Returns a trap message on fault.
+    /// A clean WASI `proc_exit` is not a fault and leaves `self.exited` set.
     pub fn runStart(self: *Instance) ?[]const u8 {
         const idx = self.module.start orelse return null;
         self.vsp = 0;
         self.csp = 0;
         self.depth = 0;
-        self.callFunction(idx) catch return self.trapMessage();
+        self.callFunction(idx) catch |err| {
+            if (err == error.Exit) return null;
+            return self.trapMessage();
+        };
         return null;
     }
 
@@ -755,7 +877,10 @@ pub const Instance = struct {
         for (args, 0..) |a, i| self.values[i] = coerce(a, ft.params[i]);
         self.vsp = args.len;
 
-        self.callFunction(func_index) catch {
+        self.callFunction(func_index) catch |err| {
+            if (err == error.Exit) {
+                return .{ .exited = if (self.wasi) |w| w.exit_code else 0 };
+            }
             return .{ .trap = self.trapMessage() };
         };
 
@@ -838,8 +963,7 @@ pub const Instance = struct {
             return error.MalformedBody;
         }
         if (func_index < self.module.imported_func_count) {
-            self.setTrap("call to imported function (WASI is W2, not implemented)");
-            return error.Unsupported;
+            return self.callImport(func_index);
         }
         self.depth += 1;
         defer self.depth -= 1;
@@ -878,6 +1002,238 @@ pub const Instance = struct {
         const result_count = ft.results.len;
         try self.moveTop(locals_base, result_count);
         self.csp = control_base;
+    }
+
+    // ---- WASI host imports (W2) ----
+
+    /// Dispatches a call to an imported function. Without a configured WASI
+    /// host, or for an import outside the supported subset, this traps so a
+    /// module gains no capability by construction.
+    fn callImport(self: *Instance, func_index: u32) Trap!void {
+        const w = self.wasi orelse {
+            self.setTrap("call to imported function (no WASI host configured)");
+            return error.Unsupported;
+        };
+        const which: WasiFn = if (func_index < self.module.import_fns.len)
+            self.module.import_fns[func_index]
+        else
+            .unsupported;
+        switch (which) {
+            .unsupported => {
+                self.setTrap("call to unsupported host import");
+                return error.Unsupported;
+            },
+            .proc_exit => {
+                const code = try self.popU32();
+                w.exit_code = code;
+                self.exited = true;
+                return error.Exit;
+            },
+            .args_sizes_get => try self.push(.{ .i32 = try self.wasiArgsSizesGet(w) }),
+            .args_get => try self.push(.{ .i32 = try self.wasiArgsGet(w) }),
+            .environ_sizes_get => try self.push(.{ .i32 = try self.wasiEnvironSizesGet(w) }),
+            .environ_get => try self.push(.{ .i32 = try self.wasiEnvironGet(w) }),
+            .clock_time_get => try self.push(.{ .i32 = try self.wasiClockTimeGet(w) }),
+            .random_get => try self.push(.{ .i32 = try self.wasiRandomGet(w) }),
+            .fd_write => try self.push(.{ .i32 = try self.wasiFdWrite(w) }),
+            .fd_read => try self.push(.{ .i32 = try self.wasiFdRead(w) }),
+            .fd_close => try self.push(.{ .i32 = try self.wasiFdClose() }),
+            .fd_seek => try self.push(.{ .i32 = try self.wasiFdSeek() }),
+            .fd_fdstat_get => try self.push(.{ .i32 = try self.wasiFdFdstatGet() }),
+        }
+    }
+
+    fn popU32(self: *Instance) Trap!u32 {
+        return @bitCast(try self.popI32());
+    }
+
+    fn memSliceMut(self: *Instance, addr: u64, len: u64) MemFault![]u8 {
+        const end = addr + len;
+        if (end > self.memory.len) return error.Fault;
+        return self.memory[@intCast(addr)..@intCast(end)];
+    }
+
+    fn memReadU32(self: *Instance, addr: u64) MemFault!u32 {
+        const s = try self.memSliceMut(addr, 4);
+        return std.mem.readInt(u32, s[0..4], .little);
+    }
+
+    fn memWriteU32(self: *Instance, addr: u64, v: u32) MemFault!void {
+        const s = try self.memSliceMut(addr, 4);
+        std.mem.writeInt(u32, s[0..4], v, .little);
+    }
+
+    fn memWriteU64(self: *Instance, addr: u64, v: u64) MemFault!void {
+        const s = try self.memSliceMut(addr, 8);
+        std.mem.writeInt(u64, s[0..8], v, .little);
+    }
+
+    /// Writes `argc`/`environc` and the total NUL-terminated buffer size.
+    fn writeVecSizes(self: *Instance, items: []const []const u8, count_ptr: u32, buf_size_ptr: u32) Trap!i32 {
+        var buf_size: u64 = 0;
+        for (items) |it| buf_size += @as(u64, it.len) + 1;
+        if (buf_size > std.math.maxInt(u32) or items.len > std.math.maxInt(u32)) {
+            return Errno.inval.code();
+        }
+        self.memWriteU32(count_ptr, @intCast(items.len)) catch return Errno.fault.code();
+        self.memWriteU32(buf_size_ptr, @intCast(buf_size)) catch return Errno.fault.code();
+        return Errno.success.code();
+    }
+
+    /// Writes a pointer array plus a packed buffer of NUL-terminated strings.
+    fn writeStringVec(self: *Instance, items: []const []const u8, vec_ptr: u32, buf_ptr: u32) Trap!i32 {
+        var ptr: u64 = buf_ptr;
+        var vp: u64 = vec_ptr;
+        for (items) |it| {
+            const dst = self.memSliceMut(ptr, @as(u64, it.len) + 1) catch return Errno.fault.code();
+            self.memWriteU32(vp, @intCast(ptr)) catch return Errno.fault.code();
+            @memcpy(dst[0..it.len], it);
+            dst[it.len] = 0;
+            ptr += @as(u64, it.len) + 1;
+            vp += 4;
+        }
+        return Errno.success.code();
+    }
+
+    fn wasiArgsSizesGet(self: *Instance, w: *Wasi) Trap!i32 {
+        const buf_size_ptr = try self.popU32();
+        const argc_ptr = try self.popU32();
+        return self.writeVecSizes(w.args, argc_ptr, buf_size_ptr);
+    }
+
+    fn wasiArgsGet(self: *Instance, w: *Wasi) Trap!i32 {
+        const buf_ptr = try self.popU32();
+        const vec_ptr = try self.popU32();
+        return self.writeStringVec(w.args, vec_ptr, buf_ptr);
+    }
+
+    fn wasiEnvironSizesGet(self: *Instance, w: *Wasi) Trap!i32 {
+        const buf_size_ptr = try self.popU32();
+        const count_ptr = try self.popU32();
+        return self.writeVecSizes(w.env, count_ptr, buf_size_ptr);
+    }
+
+    fn wasiEnvironGet(self: *Instance, w: *Wasi) Trap!i32 {
+        const buf_ptr = try self.popU32();
+        const vec_ptr = try self.popU32();
+        return self.writeStringVec(w.env, vec_ptr, buf_ptr);
+    }
+
+    fn wasiClockTimeGet(self: *Instance, w: *Wasi) Trap!i32 {
+        const time_ptr = try self.popU32();
+        _ = try self.popI64(); // precision (ignored)
+        const clock_id = try self.popU32();
+        const ns: u64 = switch (clock_id) {
+            0 => w.clock_realtime_ns, // realtime
+            1 => w.clock_monotonic_ns, // monotonic
+            else => return Errno.inval.code(),
+        };
+        self.memWriteU64(time_ptr, ns) catch return Errno.fault.code();
+        return Errno.success.code();
+    }
+
+    fn wasiRandomGet(self: *Instance, w: *Wasi) Trap!i32 {
+        const buf_len = try self.popU32();
+        const buf = try self.popU32();
+        const dst = self.memSliceMut(buf, buf_len) catch return Errno.fault.code();
+        var i: usize = 0;
+        while (i < dst.len) {
+            const r = w.nextRandom();
+            var shift: u6 = 0;
+            while (i < dst.len) : (i += 1) {
+                dst[i] = @truncate(r >> shift);
+                if (shift == 56) {
+                    i += 1;
+                    break;
+                }
+                shift += 8;
+            }
+        }
+        return Errno.success.code();
+    }
+
+    fn wasiFdWrite(self: *Instance, w: *Wasi) Trap!i32 {
+        const nwritten_ptr = try self.popU32();
+        const iovs_len = try self.popU32();
+        const iovs_ptr = try self.popU32();
+        const fd = try self.popU32();
+        const sink: *std.ArrayList(u8) = switch (fd) {
+            fd_stdout => w.stdout,
+            fd_stderr => w.stderr,
+            else => return Errno.badf.code(),
+        };
+        var total: u64 = 0;
+        var i: u32 = 0;
+        while (i < iovs_len) : (i += 1) {
+            const rec = @as(u64, iovs_ptr) + @as(u64, i) * 8;
+            const ptr = self.memReadU32(rec) catch return Errno.fault.code();
+            const len = self.memReadU32(rec + 4) catch return Errno.fault.code();
+            const chunk = self.memSliceMut(ptr, len) catch return Errno.fault.code();
+            sink.appendSlice(w.alloc, chunk) catch return error.OutOfMemory;
+            total += len;
+        }
+        if (total > std.math.maxInt(u32)) return Errno.inval.code();
+        self.memWriteU32(nwritten_ptr, @intCast(total)) catch return Errno.fault.code();
+        return Errno.success.code();
+    }
+
+    fn wasiFdRead(self: *Instance, w: *Wasi) Trap!i32 {
+        const nread_ptr = try self.popU32();
+        const iovs_len = try self.popU32();
+        const iovs_ptr = try self.popU32();
+        const fd = try self.popU32();
+        if (fd != fd_stdin) return Errno.badf.code();
+        var total: u64 = 0;
+        var i: u32 = 0;
+        outer: while (i < iovs_len) : (i += 1) {
+            const rec = @as(u64, iovs_ptr) + @as(u64, i) * 8;
+            const ptr = self.memReadU32(rec) catch return Errno.fault.code();
+            const len = self.memReadU32(rec + 4) catch return Errno.fault.code();
+            const dst = self.memSliceMut(ptr, len) catch return Errno.fault.code();
+            const remaining = w.stdin.len - w.stdin_pos;
+            if (remaining == 0) break;
+            const n = @min(dst.len, remaining);
+            @memcpy(dst[0..n], w.stdin[w.stdin_pos..][0..n]);
+            w.stdin_pos += n;
+            total += n;
+            if (n < dst.len) break :outer; // stdin exhausted mid-iovec
+        }
+        self.memWriteU32(nread_ptr, @intCast(total)) catch return Errno.fault.code();
+        return Errno.success.code();
+    }
+
+    fn wasiFdClose(self: *Instance) Trap!i32 {
+        const fd = try self.popU32();
+        return switch (fd) {
+            fd_stdin, fd_stdout, fd_stderr => Errno.success.code(),
+            else => Errno.badf.code(),
+        };
+    }
+
+    fn wasiFdSeek(self: *Instance) Trap!i32 {
+        _ = try self.popU32(); // newoffset_ptr
+        _ = try self.popU32(); // whence
+        _ = try self.popI64(); // offset
+        const fd = try self.popU32();
+        // stdio streams are not seekable.
+        return switch (fd) {
+            fd_stdin, fd_stdout, fd_stderr => Errno.spipe.code(),
+            else => Errno.badf.code(),
+        };
+    }
+
+    fn wasiFdFdstatGet(self: *Instance) Trap!i32 {
+        const stat_ptr = try self.popU32();
+        const fd = try self.popU32();
+        switch (fd) {
+            fd_stdin, fd_stdout, fd_stderr => {},
+            else => return Errno.badf.code(),
+        }
+        // fdstat is 24 bytes; fs_filetype is the first byte.
+        const buf = self.memSliceMut(stat_ptr, 24) catch return Errno.fault.code();
+        @memset(buf, 0);
+        buf[0] = 2; // __WASI_FILETYPE_CHARACTER_DEVICE
+        return Errno.success.code();
     }
 
     fn pushLabel(self: *Instance, label: Label) Trap!void {
@@ -1600,6 +1956,77 @@ pub fn runExport(
     return switch (result) {
         .values => |v| .{ .ok = v },
         .trap => |m| .{ .trap = m },
+        .exited => .{ .trap = "module called proc_exit without a WASI host" },
+    };
+}
+
+// ---------------------------------------------------------------------------
+// W2: WASI entry point used by the `scoot-wasm wasi` subcommand.
+// ---------------------------------------------------------------------------
+
+pub const WasiConfig = struct {
+    /// Bytes presented to the module on fd 0 (stdin).
+    stdin: []const u8 = &.{},
+    /// argv; argv[0] is the program name.
+    args: []const []const u8 = &.{},
+    /// environ; each entry is `KEY=VALUE`.
+    env: []const []const u8 = &.{},
+    /// Value returned by `clock_time_get(realtime)` in nanoseconds.
+    clock_realtime_ns: u64 = 0,
+    /// Value returned by `clock_time_get(monotonic)` in nanoseconds.
+    clock_monotonic_ns: u64 = 0,
+    /// Seed for the deterministic `random_get` generator.
+    random_seed: u64 = 0x2545F4914F6CDD1D,
+    /// Exported entry point to run (WASI command modules use `_start`).
+    entry: []const u8 = "_start",
+    limits: Limits = .{},
+};
+
+pub const WasiResult = union(enum) {
+    /// Clean exit (explicit `proc_exit` or normal return from the entry).
+    exited: u32,
+    trap: []const u8,
+    load_error: []const u8,
+};
+
+/// Loads and runs a `wasm32-wasi` command module: instantiates it, exposes the
+/// minimal WASI subset, runs the start section and then the `_start` export.
+/// stdout/stderr are appended to the caller-provided sinks. Never panics.
+pub fn runWasi(
+    arena: std.mem.Allocator,
+    bytes: []const u8,
+    stdout: *std.ArrayList(u8),
+    stderr: *std.ArrayList(u8),
+    cfg: WasiConfig,
+) WasiResult {
+    const module = arena.create(Module) catch return .{ .load_error = "out of memory" };
+    module.* = load(arena, bytes) catch |err| return .{ .load_error = @errorName(err) };
+
+    var instance = Instance.init(arena, module, cfg.limits) catch |err| return .{ .load_error = @errorName(err) };
+
+    var wasi = Wasi{
+        .stdin = cfg.stdin,
+        .stdout = stdout,
+        .stderr = stderr,
+        .args = cfg.args,
+        .env = cfg.env,
+        .alloc = arena,
+        .clock_realtime_ns = cfg.clock_realtime_ns,
+        .clock_monotonic_ns = cfg.clock_monotonic_ns,
+        .rng = cfg.random_seed,
+    };
+    instance.wasi = &wasi;
+
+    if (instance.runStart()) |msg| return .{ .trap = msg };
+    if (instance.exited) return .{ .exited = wasi.exit_code };
+
+    const result = instance.invokeExport(cfg.entry, &.{}) catch |err| {
+        return .{ .trap = @errorName(err) };
+    };
+    return switch (result) {
+        .exited => |code| .{ .exited = code },
+        .values => .{ .exited = 0 }, // normal return == exit 0
+        .trap => |m| .{ .trap = m },
     };
 }
 
@@ -2092,4 +2519,638 @@ test "trap: block consuming missing param does not panic" {
     const code_sec = try sec(a, 10, &.{ 0x01, 0x05, 0x00, 0x02, 0x01, 0x0B, 0x0B });
     const bytes = try std.mem.concat(a, u8, &.{ header, type_sec, func_sec, export_sec, code_sec });
     try expectTrap(runExport(a, bytes, "f", &.{}, .{}));
+}
+
+// ---------------------------------------------------------------------------
+// W2 tests: WASI preview1 subset, hand-built command modules.
+// ---------------------------------------------------------------------------
+
+const wasi_module = "wasi_snapshot_preview1";
+
+const Sig = struct { params: []const u8 = &.{}, results: []const u8 = &.{} };
+const ImportDesc = struct { field: []const u8, type_idx: u8 };
+const ExportDesc = struct { name: []const u8, kind: u8 = 0x00, index: u8 };
+const DataDesc = struct { offset: u8, bytes: []const u8 };
+
+fn encUleb(a: std.mem.Allocator, value: u64) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    var v = value;
+    while (true) {
+        var byte: u8 = @intCast(v & 0x7f);
+        v >>= 7;
+        if (v != 0) byte |= 0x80;
+        try out.append(a, byte);
+        if (v == 0) break;
+    }
+    return out.items;
+}
+
+fn encSection(a: std.mem.Allocator, id: u8, payload: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.append(a, id);
+    try out.appendSlice(a, try encUleb(a, payload.len));
+    try out.appendSlice(a, payload);
+    return out.items;
+}
+
+fn encName(a: std.mem.Allocator, s: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(a, try encUleb(a, s.len));
+    try out.appendSlice(a, s);
+    return out.items;
+}
+
+/// Builds a single-memory WASI command module from high-level section
+/// descriptions. `bodies` is parallel to `defined_func_types`.
+fn buildWasiModule(
+    a: std.mem.Allocator,
+    sigs: []const Sig,
+    imports: []const ImportDesc,
+    defined_func_types: []const u8,
+    memory_min: u8,
+    exports: []const ExportDesc,
+    bodies: []const []const u8,
+    data: ?DataDesc,
+) ![]u8 {
+    // Type section.
+    var tp: std.ArrayList(u8) = .empty;
+    try tp.appendSlice(a, try encUleb(a, sigs.len));
+    for (sigs) |sg| {
+        try tp.append(a, 0x60);
+        try tp.appendSlice(a, try encUleb(a, sg.params.len));
+        try tp.appendSlice(a, sg.params);
+        try tp.appendSlice(a, try encUleb(a, sg.results.len));
+        try tp.appendSlice(a, sg.results);
+    }
+
+    // Import section.
+    var im: std.ArrayList(u8) = .empty;
+    try im.appendSlice(a, try encUleb(a, imports.len));
+    for (imports) |imp| {
+        try im.appendSlice(a, try encName(a, wasi_module));
+        try im.appendSlice(a, try encName(a, imp.field));
+        try im.append(a, 0x00); // function import
+        try im.appendSlice(a, try encUleb(a, imp.type_idx));
+    }
+
+    // Function section.
+    var fn_sec: std.ArrayList(u8) = .empty;
+    try fn_sec.appendSlice(a, try encUleb(a, defined_func_types.len));
+    for (defined_func_types) |t| try fn_sec.appendSlice(a, try encUleb(a, t));
+
+    // Memory section (single memory, min pages).
+    const mem_payload = [_]u8{ 0x01, 0x00, memory_min };
+
+    // Export section.
+    var ex: std.ArrayList(u8) = .empty;
+    try ex.appendSlice(a, try encUleb(a, exports.len));
+    for (exports) |e| {
+        try ex.appendSlice(a, try encName(a, e.name));
+        try ex.append(a, e.kind);
+        try ex.appendSlice(a, try encUleb(a, e.index));
+    }
+
+    // Code section.
+    var cd: std.ArrayList(u8) = .empty;
+    try cd.appendSlice(a, try encUleb(a, bodies.len));
+    for (bodies) |body| {
+        try cd.appendSlice(a, try encUleb(a, body.len));
+        try cd.appendSlice(a, body);
+    }
+
+    var parts: std.ArrayList([]const u8) = .empty;
+    try parts.append(a, header);
+    try parts.append(a, try encSection(a, 1, tp.items));
+    if (imports.len != 0) try parts.append(a, try encSection(a, 2, im.items));
+    try parts.append(a, try encSection(a, 3, fn_sec.items));
+    try parts.append(a, try encSection(a, 5, &mem_payload));
+    try parts.append(a, try encSection(a, 7, ex.items));
+    try parts.append(a, try encSection(a, 10, cd.items));
+    if (data) |d| {
+        var ds: std.ArrayList(u8) = .empty;
+        try ds.append(a, 0x01); // 1 segment
+        try ds.append(a, 0x00); // active, memory 0
+        try ds.appendSlice(a, &.{ 0x41, d.offset, 0x0B }); // i32.const offset; end
+        try ds.appendSlice(a, try encUleb(a, d.bytes.len));
+        try ds.appendSlice(a, d.bytes);
+        try parts.append(a, try encSection(a, 11, ds.items));
+    }
+    return std.mem.concat(a, u8, parts.items);
+}
+
+const sig_unit = Sig{}; // () -> ()
+const sig_i32_i32 = Sig{ .params = &.{ 0x7F, 0x7F }, .results = &.{0x7F} };
+const sig_i32x4 = Sig{ .params = &.{ 0x7F, 0x7F, 0x7F, 0x7F }, .results = &.{0x7F} };
+const sig_proc_exit = Sig{ .params = &.{0x7F} };
+const sig_clock = Sig{ .params = &.{ 0x7F, 0x7E, 0x7F }, .results = &.{0x7F} };
+
+const WasiRun = struct {
+    result: WasiResult,
+    stdout: []const u8,
+    stderr: []const u8,
+};
+
+fn runWasiTest(
+    a: std.mem.Allocator,
+    bytes: []const u8,
+    stdin: []const u8,
+    args: []const []const u8,
+    env: []const []const u8,
+) WasiRun {
+    const so = a.create(std.ArrayList(u8)) catch unreachable;
+    const se = a.create(std.ArrayList(u8)) catch unreachable;
+    so.* = .empty;
+    se.* = .empty;
+    const r = runWasi(a, bytes, so, se, .{
+        .stdin = stdin,
+        .args = args,
+        .env = env,
+        .clock_realtime_ns = 0x0102030405060708,
+        .clock_monotonic_ns = 0x1112131415161718,
+        .random_seed = 42,
+    });
+    return .{ .result = r, .stdout = so.items, .stderr = se.items };
+}
+
+test "wasi: echo stdin to stdout via fd_read/fd_write" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // imports: 0 fd_read, 1 fd_write, 2 proc_exit ; defined _start = func 3.
+    const body = [_]u8{
+        0x00, // 0 locals
+        // iovec.buf = 1024 at addr 0
+        0x41,
+        0x00,
+        0x41,
+        0x80,
+        0x08,
+        0x36,
+        0x02,
+        0x00,
+        // iovec.buf_len = 1024 at addr 4
+        0x41,
+        0x04,
+        0x41,
+        0x80,
+        0x08,
+        0x36,
+        0x02,
+        0x00,
+        // fd_read(0, iovs=0, len=1, nread=8); drop errno
+        0x41,
+        0x00,
+        0x41,
+        0x00,
+        0x41,
+        0x01,
+        0x41,
+        0x08,
+        0x10,
+        0x00,
+        0x1A,
+        // ciovec.buf = 1024 at addr 16
+        0x41,
+        0x10,
+        0x41,
+        0x80,
+        0x08,
+        0x36,
+        0x02,
+        0x00,
+        // ciovec.buf_len = *nread at addr 20
+        0x41,
+        0x14,
+        0x41,
+        0x08,
+        0x28,
+        0x02,
+        0x00,
+        0x36,
+        0x02,
+        0x00,
+        // fd_write(1, iovs=16, len=1, nwritten=24); drop errno
+        0x41,
+        0x01,
+        0x41,
+        0x10,
+        0x41,
+        0x01,
+        0x41,
+        0x18,
+        0x10,
+        0x01,
+        0x1A,
+        // proc_exit(0)
+        0x41,
+        0x00,
+        0x10,
+        0x02,
+        0x0B,
+    };
+    const bytes = try buildWasiModule(
+        a,
+        &.{ sig_unit, sig_i32x4, sig_proc_exit },
+        &.{
+            .{ .field = "fd_read", .type_idx = 1 },
+            .{ .field = "fd_write", .type_idx = 1 },
+            .{ .field = "proc_exit", .type_idx = 2 },
+        },
+        &.{0}, // _start: type0 () -> ()
+        1,
+        &.{.{ .name = "_start", .index = 3 }},
+        &.{&body},
+        null,
+    );
+    const run = runWasiTest(a, bytes, "hello world", &.{"prog"}, &.{});
+    try testing.expect(run.result == .exited);
+    try testing.expectEqual(@as(u32, 0), run.result.exited);
+    try testing.expectEqualStrings("hello world", run.stdout);
+}
+
+test "wasi: proc_exit sets exit code" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const body = [_]u8{ 0x00, 0x41, 0x07, 0x10, 0x00, 0x0B }; // proc_exit(7); end
+    const bytes = try buildWasiModule(
+        a,
+        &.{ sig_unit, sig_proc_exit },
+        &.{.{ .field = "proc_exit", .type_idx = 1 }},
+        &.{0},
+        1,
+        &.{.{ .name = "_start", .index = 1 }},
+        &.{&body},
+        null,
+    );
+    const run = runWasiTest(a, bytes, "", &.{"prog"}, &.{});
+    try testing.expect(run.result == .exited);
+    try testing.expectEqual(@as(u32, 7), run.result.exited);
+}
+
+test "wasi: normal return from _start exits 0" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const body = [_]u8{ 0x00, 0x0B }; // just end
+    const bytes = try buildWasiModule(
+        a,
+        &.{sig_unit},
+        &.{},
+        &.{0},
+        1,
+        &.{.{ .name = "_start", .index = 0 }},
+        &.{&body},
+        null,
+    );
+    const run = runWasiTest(a, bytes, "", &.{"prog"}, &.{});
+    try testing.expect(run.result == .exited);
+    try testing.expectEqual(@as(u32, 0), run.result.exited);
+}
+
+test "wasi: args round-trip via args_sizes_get/args_get" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // imports: 0 args_get, 1 fd_write, 2 proc_exit ; _start = func 3.
+    // Layout: argv pointer array at 256, argv buffer at 512. argv[1] points
+    // into the buffer; we echo the whole packed buffer's first arg.
+    // Simpler: write argv buffer, then fd_write argv[0] string.
+    const body = [_]u8{
+        0x00,
+        // args_get(argv=256, argv_buf=512); drop
+        0x41, 0x80, 0x02, // i32.const 256
+        0x41, 0x80, 0x04, // i32.const 512
+        0x10, 0x00, 0x1A,
+        // ciovec at 0: buf = *argv[1] (load argv ptr at 256+4=260), len = 3
+        0x41, 0x00, // addr 0
+        0x41, 0x84, 0x02, 0x28, 0x02, 0x00, // i32.const 260; i32.load -> argv[1] ptr
+        0x36, 0x02, 0x00, // store ciovec.buf
+        0x41, 0x04, 0x41, 0x03, 0x36, 0x02, 0x00, // ciovec.buf_len = 3 at addr 4
+        // fd_write(1, iovs=0, len=1, nwritten=8); drop
+        0x41, 0x01, 0x41, 0x00, 0x41, 0x01, 0x41,
+        0x08, 0x10, 0x01, 0x1A,
+        0x41, 0x00, 0x10, 0x02, // proc_exit(0)
+        0x0B,
+    };
+    const bytes = try buildWasiModule(
+        a,
+        &.{ sig_unit, sig_i32_i32, sig_i32x4, sig_proc_exit },
+        &.{
+            .{ .field = "args_get", .type_idx = 1 },
+            .{ .field = "fd_write", .type_idx = 2 },
+            .{ .field = "proc_exit", .type_idx = 3 },
+        },
+        &.{0},
+        1,
+        &.{.{ .name = "_start", .index = 3 }},
+        &.{&body},
+        null,
+    );
+    // argv[1] == "abc"
+    const run = runWasiTest(a, bytes, "", &.{ "prog", "abc" }, &.{});
+    try testing.expect(run.result == .exited);
+    try testing.expectEqualStrings("abc", run.stdout);
+}
+
+test "wasi: environ round-trip" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // imports: 0 environ_get, 1 fd_write, 2 proc_exit ; _start = func 3.
+    const body = [_]u8{
+        0x00,
+        // environ_get(environ=256, buf=512); drop
+        0x41,
+        0x80,
+        0x02,
+        0x41,
+        0x80,
+        0x04,
+        0x10,
+        0x00,
+        0x1A,
+        // ciovec.buf = *environ[0] (ptr at 256), len = 7 ("FOO=bar")
+        0x41,
+        0x00,
+        0x41, 0x80, 0x02, 0x28, 0x02, 0x00, // load environ[0] ptr
+        0x36, 0x02, 0x00, 0x41, 0x04, 0x41,
+        0x07, 0x36, 0x02, 0x00, 0x41, 0x01,
+        0x41, 0x00, 0x41, 0x01, 0x41, 0x08,
+        0x10, 0x01, 0x1A, 0x41, 0x00, 0x10,
+        0x02, 0x0B,
+    };
+    const bytes = try buildWasiModule(
+        a,
+        &.{ sig_unit, sig_i32_i32, sig_i32x4, sig_proc_exit },
+        &.{
+            .{ .field = "environ_get", .type_idx = 1 },
+            .{ .field = "fd_write", .type_idx = 2 },
+            .{ .field = "proc_exit", .type_idx = 3 },
+        },
+        &.{0},
+        1,
+        &.{.{ .name = "_start", .index = 3 }},
+        &.{&body},
+        null,
+    );
+    const run = runWasiTest(a, bytes, "", &.{"prog"}, &.{"FOO=bar"});
+    try testing.expect(run.result == .exited);
+    try testing.expectEqualStrings("FOO=bar", run.stdout);
+}
+
+test "wasi: clock_time_get writes realtime nanoseconds" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // imports: 0 clock_time_get, 1 fd_write, 2 proc_exit ; _start = func 3.
+    const body = [_]u8{
+        0x00,
+        // clock_time_get(id=0, precision=0, time_ptr=16); drop
+        0x41, 0x00, // id
+        0x42, 0x00, // i64.const 0 (precision)
+        0x41, 0x10, // time_ptr 16
+        0x10, 0x00,
+        0x1A,
+        // ciovec.buf = 16, len = 8 at addr 0
+        0x41,
+        0x00, 0x41,
+        0x10, 0x36,
+        0x02, 0x00,
+        0x41, 0x04,
+        0x41, 0x08,
+        0x36, 0x02,
+        0x00, 0x41,
+        0x01, 0x41,
+        0x00, 0x41,
+        0x01, 0x41,
+        0x28, 0x10,
+        0x01, 0x1A,
+        0x41, 0x00,
+        0x10, 0x02,
+        0x0B,
+    };
+    const bytes = try buildWasiModule(
+        a,
+        &.{ sig_unit, sig_clock, sig_i32x4, sig_proc_exit },
+        &.{
+            .{ .field = "clock_time_get", .type_idx = 1 },
+            .{ .field = "fd_write", .type_idx = 2 },
+            .{ .field = "proc_exit", .type_idx = 3 },
+        },
+        &.{0},
+        1,
+        &.{.{ .name = "_start", .index = 3 }},
+        &.{&body},
+        null,
+    );
+    const run = runWasiTest(a, bytes, "", &.{"prog"}, &.{});
+    try testing.expect(run.result == .exited);
+    var expected: [8]u8 = undefined;
+    std.mem.writeInt(u64, &expected, 0x0102030405060708, .little);
+    try testing.expectEqualSlices(u8, &expected, run.stdout);
+}
+
+test "wasi: random_get is deterministic for a fixed seed" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // imports: 0 random_get, 1 fd_write, 2 proc_exit ; _start = func 3.
+    const body = [_]u8{
+        0x00,
+        // random_get(buf=16, len=8); drop
+        0x41,
+        0x10,
+        0x41,
+        0x08,
+        0x10,
+        0x00,
+        0x1A,
+        // ciovec.buf = 16, len = 8
+        0x41,
+        0x00,
+        0x41,
+        0x10,
+        0x36,
+        0x02,
+        0x00,
+        0x41,
+        0x04,
+        0x41,
+        0x08,
+        0x36,
+        0x02,
+        0x00,
+        0x41,
+        0x01,
+        0x41,
+        0x00,
+        0x41,
+        0x01,
+        0x41,
+        0x28,
+        0x10,
+        0x01,
+        0x1A,
+        0x41,
+        0x00,
+        0x10,
+        0x02,
+        0x0B,
+    };
+    const bytes = try buildWasiModule(
+        a,
+        &.{ sig_unit, sig_i32_i32, sig_i32x4, sig_proc_exit },
+        &.{
+            .{ .field = "random_get", .type_idx = 1 },
+            .{ .field = "fd_write", .type_idx = 2 },
+            .{ .field = "proc_exit", .type_idx = 3 },
+        },
+        &.{0},
+        1,
+        &.{.{ .name = "_start", .index = 3 }},
+        &.{&body},
+        null,
+    );
+    const r1 = runWasiTest(a, bytes, "", &.{"prog"}, &.{});
+    const r2 = runWasiTest(a, bytes, "", &.{"prog"}, &.{});
+    try testing.expect(r1.result == .exited);
+    try testing.expectEqual(@as(usize, 8), r1.stdout.len);
+    try testing.expectEqualSlices(u8, r1.stdout, r2.stdout);
+}
+
+test "wasi: bad fd returns errno observable in output" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // imports: 0 fd_close (i32)->i32, 1 fd_write, 2 proc_exit ; _start = func 3.
+    const sig_i32_to_i32 = Sig{ .params = &.{0x7F}, .results = &.{0x7F} };
+    const body = [_]u8{
+        0x00,
+        // errno = fd_close(5); store at addr 32 (fd 5 is not stdio -> EBADF)
+        0x41, 0x20, // addr 32
+        0x41, 0x05, 0x10, 0x00, // fd_close(5) -> errno
+        0x36, 0x02, 0x00, // store errno at 32
+        // ciovec.buf = 32, len = 4
+        0x41, 0x00, 0x41,
+        0x20, 0x36, 0x02,
+        0x00, 0x41, 0x04,
+        0x41, 0x04, 0x36,
+        0x02, 0x00, 0x41,
+        0x01, 0x41, 0x00,
+        0x41, 0x01, 0x41,
+        0x08, 0x10, 0x01,
+        0x1A, 0x41, 0x00,
+        0x10, 0x02, 0x0B,
+    };
+    const bytes = try buildWasiModule(
+        a,
+        &.{ sig_unit, sig_proc_exit, sig_i32x4, sig_i32_to_i32 },
+        &.{
+            .{ .field = "fd_close", .type_idx = 3 },
+            .{ .field = "fd_write", .type_idx = 2 },
+            .{ .field = "proc_exit", .type_idx = 1 },
+        },
+        &.{0},
+        1,
+        &.{.{ .name = "_start", .index = 3 }},
+        &.{&body},
+        null,
+    );
+    const run = runWasiTest(a, bytes, "", &.{"prog"}, &.{});
+    try testing.expect(run.result == .exited);
+    var expected: [4]u8 = undefined;
+    std.mem.writeInt(u32, &expected, 8, .little); // EBADF
+    try testing.expectEqualSlices(u8, &expected, run.stdout);
+}
+
+test "wasi: out-of-bounds pointer yields EFAULT" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // imports: 0 fd_write, 1 proc_exit ; _start = func 2.
+    // errno = fd_write(1, iovs=0x7fffffff, len=1, nwritten=0) -> EFAULT(21)
+    const body = [_]u8{
+        0x00,
+        0x41, 0x20, // addr 32 to store errno
+        0x41, 0x01, // fd 1
+        0x41, 0xFF, 0xFF, 0xFF, 0xFF, 0x07, // i32.const 0x7fffffff (iovs ptr)
+        0x41, 0x01, // len 1
+        0x41, 0x00, // nwritten 0
+        0x10, 0x00, // fd_write -> errno
+        0x36, 0x02, 0x00, // store errno at 32
+        // ciovec.buf = 32, len = 4
+        0x41, 0x00, 0x41,
+        0x20, 0x36, 0x02,
+        0x00, 0x41, 0x04,
+        0x41, 0x04, 0x36,
+        0x02, 0x00, 0x41,
+        0x01, 0x41, 0x00,
+        0x41, 0x01, 0x41,
+        0x08, 0x10, 0x00,
+        0x1A, 0x41, 0x00,
+        0x10, 0x01, 0x0B,
+    };
+    const bytes = try buildWasiModule(
+        a,
+        &.{ sig_unit, sig_i32x4, sig_proc_exit },
+        &.{
+            .{ .field = "fd_write", .type_idx = 1 },
+            .{ .field = "proc_exit", .type_idx = 2 },
+        },
+        &.{0},
+        1,
+        &.{.{ .name = "_start", .index = 2 }},
+        &.{&body},
+        null,
+    );
+    const run = runWasiTest(a, bytes, "", &.{"prog"}, &.{});
+    try testing.expect(run.result == .exited);
+    var expected: [4]u8 = undefined;
+    std.mem.writeInt(u32, &expected, 21, .little); // EFAULT
+    try testing.expectEqualSlices(u8, &expected, run.stdout);
+}
+
+test "wasi: unknown import traps when called" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // imports: 0 path_open (unsupported) ; _start = func 1 calls it.
+    const sig_path_open = Sig{ .params = &.{ 0x7F, 0x7F }, .results = &.{0x7F} };
+    const body = [_]u8{
+        0x00,
+        0x41, 0x00, 0x41, 0x00, 0x10, 0x00, 0x1A, // path_open(0,0); drop
+        0x0B,
+    };
+    const bytes = try buildWasiModule(
+        a,
+        &.{ sig_unit, sig_path_open },
+        &.{.{ .field = "path_open", .type_idx = 1 }},
+        &.{0},
+        1,
+        &.{.{ .name = "_start", .index = 1 }},
+        &.{&body},
+        null,
+    );
+    const run = runWasiTest(a, bytes, "", &.{"prog"}, &.{});
+    try testing.expect(run.result == .trap);
+}
+
+test "wasi: imported call without host traps via runExport" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // _start calls proc_exit but runExport configures no WASI host.
+    const body = [_]u8{ 0x00, 0x41, 0x00, 0x10, 0x00, 0x0B };
+    const bytes = try buildWasiModule(
+        a,
+        &.{ sig_unit, sig_proc_exit },
+        &.{.{ .field = "proc_exit", .type_idx = 1 }},
+        &.{0},
+        1,
+        &.{.{ .name = "_start", .index = 1 }},
+        &.{&body},
+        null,
+    );
+    try expectTrap(runExport(a, bytes, "_start", &.{}, .{}));
 }

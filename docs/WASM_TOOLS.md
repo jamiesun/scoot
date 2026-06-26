@@ -1,8 +1,9 @@
 # Wasm Tool Packages
 
 Status: design boundary and static validation in the core; the standalone
-`scoot-wasm` host now executes integer Wasm functions (W1). The core `scoot`
-binary still never loads or executes Wasm.
+`scoot-wasm` host now executes integer Wasm functions (W1) and runs
+`wasm32-wasi` command modules over a minimal WASI preview1 subset (W2). The core
+`scoot` binary still never loads or executes Wasm.
 
 Scoot's Wasm tool package format is intentionally smaller than Wassette or MCP.
 The goal is a local, reviewable boundary for third-party tools before any
@@ -38,8 +39,9 @@ zero-dependency core never embeds a runtime:
 
 ```sh
 zig build -Dwasm-host=true
-scoot-wasm check path/to/module.wasm        # structural validation (W0)
-scoot-wasm run path/to/module.wasm add 2 40 # execute an exported function (W1)
+scoot-wasm check path/to/module.wasm         # structural validation (W0)
+scoot-wasm run path/to/module.wasm add 2 40  # execute an exported function (W1)
+scoot-wasm wasi path/to/module.wasm [args..] # run a wasm32-wasi command (W2)
 ```
 
 `scoot-wasm run <module.wasm> <export> [int args...]` invokes an exported
@@ -58,9 +60,35 @@ segments. Every fault returns a structured trap instead of panicking
 undefined element, indirect-call type mismatch), bounded by fuel,
 call-depth, value-stack, and memory-page limits.
 
-Not yet implemented (later phases): WASI host functions (so a module that
-imports host functions traps), a full spec-conformant type validator, and
-floating-point arithmetic.
+### WASI command modules (`scoot-wasm wasi`, W2)
+
+`scoot-wasm wasi <module.wasm> [args...]` runs a `wasm32-wasi` command module:
+it instantiates the module, runs its start section and `_start` export, reads
+this process's stdin as fd 0, forwards the module's stdout/stderr, and exits
+with the module's `proc_exit` status (a normal `_start` return exits 0). This is
+the intended subprocess host for external compression plugins: the core invokes
+`scoot-wasm wasi <component>` and speaks the JSON-in/JSON-out plugin protocol
+over stdio.
+
+Only a deliberately small WASI preview1 surface is exposed, so a module gains no
+ambient authority by construction:
+
+- `args_sizes_get` / `args_get`, `environ_sizes_get` / `environ_get`
+- `fd_read` (fd 0 only), `fd_write` (fd 1/2 only), `fd_close`, `fd_seek`
+  (stdio is not seekable → `ESPIPE`), `fd_fdstat_get` (stdio character device)
+- `clock_time_get` (realtime/monotonic), `random_get` (seeded, deterministic)
+- `proc_exit`
+
+The host does **not** expose its own environment (environ is empty by default)
+and implements **no** filesystem or network functions: any other WASI import
+traps when called, and an out-of-bounds guest pointer returns `EFAULT` rather
+than corrupting host memory. Bad file descriptors return `EBADF`. Resource use
+stays bounded by the same fuel / call-depth / memory-page caps as `run`, and the
+core additionally wraps the subprocess with a hard wall-clock timeout.
+
+Not yet implemented (later phases): a full spec-conformant type validator,
+floating-point conformance, and the broader WASI surface (files, sockets,
+clocks beyond realtime/monotonic).
 
 ## Manifest
 
