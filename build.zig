@@ -60,6 +60,19 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(wasm_host);
     }
 
+    // The standalone Wasm engine lives outside the core `scoot` binary so the
+    // zero-dependency core never embeds a runtime. Its tests are compiled as a
+    // separate artifact (not linked into core) and always run under `zig build
+    // test`.
+    const wasm_engine_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/wasm_engine.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_wasm_engine_tests = b.addRunArtifact(wasm_engine_tests);
+
     const embed_example = b.addExecutable(.{
         .name = "scoot-embed-minimal",
         .root_module = b.createModule(.{
@@ -94,5 +107,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_internal_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+    test_step.dependOn(&run_wasm_engine_tests.step);
     test_step.dependOn(&embed_example.step);
 }
