@@ -1,6 +1,6 @@
 # Wasm 工具包
 
-状态：核心仍只定义边界并做静态校验；独立的 `scoot-wasm` host 现已能执行整数 Wasm 函数（W1）。核心 `scoot` 二进制依旧从不加载或执行 Wasm。
+状态：核心仍只定义边界并做静态校验；独立的 `scoot-wasm` host 现已能执行整数 Wasm 函数（W1），并能在最小 WASI preview1 子集上运行 `wasm32-wasi` 命令模块（W2）。核心 `scoot` 二进制依旧从不加载或执行 Wasm。
 
 Scoot 的 Wasm 工具包格式刻意比 Wassette 或 MCP 更小。目标是在引入运行时之前，先给第三方工具建立一个本地、可审查的边界。
 
@@ -32,8 +32,9 @@ scoot wasm-tools check path/to/tool
 
 ```sh
 zig build -Dwasm-host=true
-scoot-wasm check path/to/module.wasm        # 字节码结构校验（W0）
-scoot-wasm run path/to/module.wasm add 2 40 # 执行导出函数（W1）
+scoot-wasm check path/to/module.wasm         # 字节码结构校验（W0）
+scoot-wasm run path/to/module.wasm add 2 40  # 执行导出函数（W1）
+scoot-wasm wasi path/to/module.wasm [参数..] # 运行 wasm32-wasi 命令模块（W2）
 ```
 
 `scoot-wasm run <module.wasm> <export> [整数参数...]` 用 W1 栈机调用导出函数，
@@ -48,8 +49,29 @@ W1 引擎是一个零依赖的纯 Zig 解释器，覆盖：结构化控制流（
 任何故障都返回结构化 trap 而非崩溃（unreachable、除零、整数溢出、内存/表越界、
 未定义元素、间接调用类型不匹配），并由 fuel、调用深度、操作数栈与内存页上限兜底。
 
-尚未实现（后续阶段）：WASI host 函数（因此 import host 函数的模块会 trap）、
-完整符合 spec 的类型验证器，以及浮点运算。
+### WASI 命令模块（`scoot-wasm wasi`，W2）
+
+`scoot-wasm wasi <module.wasm> [参数...]` 运行一个 `wasm32-wasi` 命令模块：实例化模块，
+执行 start section 与 `_start` 导出，把本进程的 stdin 作为 fd 0 读入，转发模块的
+stdout/stderr，并以模块的 `proc_exit` 状态退出（`_start` 正常返回则退出码为 0）。这正是
+外部压缩插件的子进程 host：核心通过 `scoot-wasm wasi <component>` 调用，并在 stdio 上走
+JSON 进 / JSON 出的插件协议。
+
+仅暴露一个刻意收窄的 WASI preview1 表面，使模块按构造无法获得环境权限：
+
+- `args_sizes_get` / `args_get`、`environ_sizes_get` / `environ_get`
+- `fd_read`（仅 fd 0）、`fd_write`（仅 fd 1/2）、`fd_close`、`fd_seek`
+  （stdio 不可 seek → `ESPIPE`）、`fd_fdstat_get`（stdio 字符设备）
+- `clock_time_get`（realtime/monotonic）、`random_get`（带种子、确定性）
+- `proc_exit`
+
+host 不暴露自身环境变量（environ 默认为空），也不实现任何文件 / 网络函数：其余 WASI
+import 一旦被调用即 trap；越界的 guest 指针返回 `EFAULT` 而非破坏 host 内存；非法文件
+描述符返回 `EBADF`。资源使用受与 `run` 相同的 fuel / 调用深度 / 内存页上限约束，核心还会
+为该子进程套一层硬性墙钟超时。
+
+尚未实现（后续阶段）：完整符合 spec 的类型验证器、浮点一致性，以及更大的 WASI 表面
+（文件、套接字、realtime/monotonic 之外的时钟）。
 
 ## Manifest
 

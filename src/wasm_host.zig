@@ -12,16 +12,23 @@ const usage =
     \\Usage:
     \\  scoot-wasm check <component.wasm>
     \\  scoot-wasm run <module.wasm> <export> [int args...]
+    \\  scoot-wasm wasi <module.wasm> [args...]
     \\  scoot-wasm --help
     \\
     \\`check` validates Wasm binary structure only (it does not execute code).
     \\`run` executes an exported integer function with the W1 stack machine
     \\(structured control flow, linear memory, traps, fuel/depth limits); it does
     \\not provide WASI, so a function that imports host functions will trap.
+    \\`wasi` runs a wasm32-wasi command module (its `_start` export) with a
+    \\minimal WASI preview1 subset: stdin is read from this process's stdin,
+    \\stdout/stderr are forwarded, and `proc_exit` sets the exit code. Only
+    \\stdio, args, environ, clock, and random are exposed; files and network are
+    \\not implemented.
     \\
 ;
 
 const component_read_limit: std.Io.Limit = .limited(16 * 1024 * 1024);
+const stdin_read_limit: std.Io.Limit = .limited(64 * 1024 * 1024);
 
 pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
@@ -39,6 +46,10 @@ pub fn main(init: std.process.Init) !void {
     }
     if (args.len >= 2 and std.mem.eql(u8, args[1], "run")) {
         try runCommand(arena, io, out, args);
+        return;
+    }
+    if (args.len >= 2 and std.mem.eql(u8, args[1], "wasi")) {
+        try wasiCommand(arena, io, out, args);
         return;
     }
     if (args.len != 3 or !std.mem.eql(u8, args[1], "check")) {
@@ -147,5 +158,92 @@ fn runCommand(
             try out.print("FAIL {s}: {s}\n", .{ path, msg });
             die(out, 1);
         },
+    }
+}
+
+fn readModule(arena: std.mem.Allocator, io: std.Io, errw: *std.Io.Writer, path: []const u8) []const u8 {
+    return std.Io.Dir.cwd().readFileAlloc(io, path, arena, component_read_limit) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => failErr(errw, path, "file is missing"),
+        error.FileTooBig => failErr(errw, path, "file exceeds 16 MiB"),
+        else => failErr(errw, path, @errorName(err)),
+    };
+}
+
+fn failErr(errw: *std.Io.Writer, path: []const u8, msg: []const u8) noreturn {
+    errw.print("FAIL {s}: {s}\n", .{ path, msg }) catch {};
+    errw.flush() catch {};
+    std.process.exit(1);
+}
+
+fn nanosToU64(ns: i96) u64 {
+    if (ns <= 0) return 0;
+    const u: u96 = @intCast(ns);
+    return @truncate(u);
+}
+
+fn wasiCommand(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    out: *std.Io.Writer,
+    args: []const []const u8,
+) !void {
+    if (args.len < 3) {
+        try out.writeAll(usage);
+        die(out, 2);
+    }
+    const path = args[2];
+
+    var err_buf: [4096]u8 = undefined;
+    var err_writer: std.Io.File.Writer = .init(.stderr(), io, &err_buf);
+    const errw = &err_writer.interface;
+    defer errw.flush() catch {};
+
+    const bytes = readModule(arena, io, errw, path);
+
+    // Read the entire stdin into a buffer presented to the module on fd 0.
+    var in_buf: [1 << 16]u8 = undefined;
+    var ir: std.Io.File.Reader = .init(.stdin(), io, &in_buf);
+    const stdin_bytes = ir.interface.allocRemaining(arena, stdin_read_limit) catch |err| switch (err) {
+        error.StreamTooLong => failErr(errw, path, "stdin exceeds 64 MiB"),
+        else => failErr(errw, path, @errorName(err)),
+    };
+
+    // argv[0] is the module path; remaining CLI args follow.
+    var argv: std.ArrayList([]const u8) = .empty;
+    try argv.append(arena, path);
+    for (args[3..]) |a| try argv.append(arena, a);
+
+    const real_ns: u64 = nanosToU64(std.Io.Timestamp.now(io, .real).nanoseconds);
+    const mono_ns: u64 = nanosToU64(std.Io.Timestamp.now(io, .awake).nanoseconds);
+
+    var stdout_sink: std.ArrayList(u8) = .empty;
+    var stderr_sink: std.ArrayList(u8) = .empty;
+
+    const result = wasm_engine.runWasi(arena, bytes, &stdout_sink, &stderr_sink, .{
+        .stdin = stdin_bytes,
+        .args = argv.items,
+        .env = &.{}, // capability safety: host environment is not exposed
+        .clock_realtime_ns = real_ns,
+        .clock_monotonic_ns = mono_ns,
+        .random_seed = real_ns ^ (mono_ns << 1) ^ 0x9E3779B97F4A7C15,
+    });
+
+    // Forward whatever the module produced before reporting the outcome.
+    out.writeAll(stdout_sink.items) catch {};
+    errw.writeAll(stderr_sink.items) catch {};
+
+    switch (result) {
+        .exited => |code| {
+            out.flush() catch {};
+            errw.flush() catch {};
+            std.process.exit(@truncate(code));
+        },
+        .trap => |msg| {
+            errw.print("TRAP {s}: {s}\n", .{ path, msg }) catch {};
+            out.flush() catch {};
+            errw.flush() catch {};
+            std.process.exit(1);
+        },
+        .load_error => |msg| failErr(errw, path, msg),
     }
 }
