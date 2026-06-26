@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const agent = @import("agent.zig");
+const audit = @import("audit.zig");
 const config = @import("config.zig");
 const llm = @import("llm.zig");
 const paths = @import("paths.zig");
@@ -108,7 +109,10 @@ pub fn start(gpa: std.mem.Allocator, io: std.Io, options: Options) !*Runtime {
 /// The returned slice is owned by the runtime and remains valid until `stop`.
 pub fn run(rt: *Runtime, goal: []const u8) ![]const u8 {
     const state: *RuntimeState = @ptrCast(@alignCast(rt));
-    const arena = state.arena_state.allocator();
+    const runtime_arena = state.arena_state.allocator();
+    var run_arena_state = std.heap.ArenaAllocator.init(state.gpa);
+    defer run_arena_state.deinit();
+    const arena = run_arena_state.allocator();
 
     var sess = session.Session.init(try runtimeSessionId(arena, state.io, state.run_seq));
     state.run_seq += 1;
@@ -118,11 +122,21 @@ pub fn run(rt: *Runtime, goal: []const u8) ![]const u8 {
 
     var ag = state.agent_template;
     ag.skills = refs;
+    var sink: ApiAuditSink = .{};
+    sink.open(arena, state.io, state.dirs.logs_dir, sess.id);
+    defer sink.close(state.io);
+    ag.audit = sink.loggerPtr();
 
     try sess.append(arena, .user, goal);
-    const reply = try ag.run(arena, &sess);
+    if (ag.audit) |lg| lg.log(.run, goal) catch {};
+    const reply = ag.run(arena, &sess) catch |err| {
+        if (ag.audit) |lg| lg.log(.system_error, @errorName(err)) catch {};
+        sess.persist(state.io, state.dirs.sessions_dir) catch {};
+        return err;
+    };
+    const owned_reply = try runtime_arena.dupe(u8, reply);
     sess.persist(state.io, state.dirs.sessions_dir) catch {};
-    return reply;
+    return owned_reply;
 }
 
 /// Stop the runtime and release all memory owned by it.
@@ -147,4 +161,152 @@ fn injectSkills(arena: std.mem.Allocator, io: std.Io, search_paths: []const []co
     const refs = arena.alloc(agent.SkillRef, reg.count()) catch return &.{};
     for (reg.skills.items, 0..) |s, i| refs[i] = .{ .name = s.name, .dir = s.dir };
     return refs;
+}
+
+const ApiAuditSink = struct {
+    file: ?std.Io.File = null,
+    fw: std.Io.File.Writer = undefined,
+    logger: audit.Logger = undefined,
+    buf: [4096]u8 = undefined,
+
+    fn open(self: *ApiAuditSink, arena: std.mem.Allocator, io: std.Io, logs_dir: []const u8, session_id: []const u8) void {
+        const path = std.fmt.allocPrint(arena, "{s}/audit.jsonl", .{logs_dir}) catch return;
+        _ = audit.rotateFileIfTooLarge(io, arena, path, audit.default_max_jsonl_bytes) catch false;
+        const f = std.Io.Dir.cwd().createFile(io, path, .{ .truncate = false }) catch return;
+        self.file = f;
+        f.setPermissions(io, std.Io.File.Permissions.fromMode(0o600)) catch {};
+        self.fw = f.writer(io, &self.buf);
+        if (f.stat(io)) |st| {
+            self.fw.seekTo(st.size) catch {};
+        } else |_| {}
+        self.logger = audit.Logger.init(&self.fw.interface, io);
+        self.logger.setContext(session_id, null);
+    }
+
+    fn loggerPtr(self: *ApiAuditSink) ?*audit.Logger {
+        return if (self.file != null) &self.logger else null;
+    }
+
+    fn close(self: *ApiAuditSink, io: std.Io) void {
+        if (self.file) |f| {
+            self.fw.interface.flush() catch {};
+            f.close(io);
+        }
+    }
+};
+
+const TestBrain = struct {
+    steps: []const []const u8,
+    idx: usize = 0,
+};
+
+fn scriptedComplete(
+    ctx: *anyopaque,
+    arena: std.mem.Allocator,
+    messages: []const llm.Message,
+    opts: llm.ChatOptions,
+) anyerror!llm.Completion {
+    _ = messages;
+    _ = opts;
+    const self: *TestBrain = @ptrCast(@alignCast(ctx));
+    if (self.idx >= self.steps.len) return error.ScriptExhausted;
+    const content = self.steps[self.idx];
+    self.idx += 1;
+    return .{ .content = try arena.dupe(u8, content), .finish_reason = "stop" };
+}
+
+test "embedded run writes session-correlated audit and keeps replies valid until stop" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const home = "/tmp/scoot_api_embed_audit_test";
+    cwd.deleteTree(io, home) catch {};
+    defer cwd.deleteTree(io, home) catch {};
+
+    var env: std.process.Environ.Map = .init(gpa);
+    defer env.deinit();
+
+    const rt = try start(gpa, io, .{ .env = &env, .scoot_home = home });
+    defer stop(rt);
+
+    var brain = TestBrain{ .steps = &.{
+        "{\"thought\":\"first\",\"action\":\"final\",\"action_input\":\"one-ok\"}",
+        "{\"thought\":\"second\",\"action\":\"final\",\"action_input\":\"two-ok\"}",
+    } };
+    const state: *RuntimeState = @ptrCast(@alignCast(rt));
+    state.agent_template.complete_ctx = &brain;
+    state.agent_template.complete_fn = scriptedComplete;
+    state.agent_template.max_turns = 2;
+    state.skill_paths = &.{};
+
+    const r1 = try run(rt, "first goal");
+    const r2 = try run(rt, "second goal");
+    try std.testing.expectEqualStrings("one-ok", r1);
+    try std.testing.expectEqualStrings("two-ok", r2);
+    try std.testing.expectEqual(@as(usize, 2), brain.idx);
+
+    const log_path = home ++ "/logs/audit.jsonl";
+    const log = try cwd.readFileAlloc(io, log_path, gpa, .limited(64 * 1024));
+    defer gpa.free(log);
+
+    const Event = struct {
+        seq: u64,
+        ts: i64,
+        session_id: ?[]const u8 = null,
+        run_id: ?[]const u8 = null,
+        kind: []const u8,
+        msg: []const u8,
+    };
+    var first_sid_buf: [128]u8 = undefined;
+    var second_sid_buf: [128]u8 = undefined;
+    var first_sid_len: usize = 0;
+    var second_sid_len: usize = 0;
+    var run_count: usize = 0;
+    var final_count: usize = 0;
+
+    var it = std.mem.tokenizeScalar(u8, log, '\n');
+    while (it.next()) |line| {
+        const parsed = try std.json.parseFromSlice(Event, gpa, line, .{ .ignore_unknown_fields = true });
+        defer parsed.deinit();
+        const sid = parsed.value.session_id orelse return error.MissingSessionId;
+        try std.testing.expect(std.mem.startsWith(u8, sid, "embed-"));
+        if (std.mem.eql(u8, parsed.value.kind, "run")) {
+            run_count += 1;
+            if (first_sid_len == 0) {
+                try std.testing.expect(sid.len <= first_sid_buf.len);
+                @memcpy(first_sid_buf[0..sid.len], sid);
+                first_sid_len = sid.len;
+            } else {
+                try std.testing.expect(sid.len <= second_sid_buf.len);
+                @memcpy(second_sid_buf[0..sid.len], sid);
+                second_sid_len = sid.len;
+            }
+        } else if (std.mem.eql(u8, parsed.value.kind, "final")) {
+            final_count += 1;
+        }
+        _ = parsed.value.seq;
+        _ = parsed.value.ts;
+        _ = parsed.value.run_id;
+        _ = parsed.value.msg;
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), run_count);
+    try std.testing.expectEqual(@as(usize, 2), final_count);
+    try std.testing.expect(first_sid_len > 0);
+    try std.testing.expect(second_sid_len > 0);
+    const first_sid = first_sid_buf[0..first_sid_len];
+    const second_sid = second_sid_buf[0..second_sid_len];
+    try std.testing.expect(!std.mem.eql(u8, first_sid, second_sid));
+
+    const first_session = try std.fmt.allocPrint(gpa, "{s}/state/sessions/{s}.jsonl", .{ home, first_sid });
+    defer gpa.free(first_session);
+    const second_session = try std.fmt.allocPrint(gpa, "{s}/state/sessions/{s}.jsonl", .{ home, second_sid });
+    defer gpa.free(second_session);
+    try std.testing.expect(fileExists(io, first_session));
+    try std.testing.expect(fileExists(io, second_session));
+}
+
+fn fileExists(io: std.Io, path: []const u8) bool {
+    _ = std.Io.Dir.cwd().statFile(io, path, .{}) catch return false;
+    return true;
 }
