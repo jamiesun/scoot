@@ -255,6 +255,7 @@ and `running: <tool>`.
 | `scoot skills check [dir]` | Validate a skill directory without executing scripts. |
 | `scoot skills pack <dir> [out.tar]` | Export a reviewable skill package. |
 | `scoot wasm-tools check <dir>` | Statically validate a Wasm tool package boundary. |
+| `scoot serve` | Run the foreground stdio NDJSON app-server protocol. |
 | `scoot schedule list` | Show configured scheduled jobs. |
 | `scoot daemon run` | Run scheduled jobs in the foreground daemon loop. |
 
@@ -265,18 +266,25 @@ Examples:
 ./zig-out/bin/scoot skills check docs/examples/skills/minimal
 ./zig-out/bin/scoot skills pack docs/examples/skills/minimal minimal.scoot-skill.tar
 ./zig-out/bin/scoot wasm-tools check path/to/tool
+printf '%s\n' '{"id":"1","method":"session.list","params":{}}' | ./zig-out/bin/scoot serve
 ./zig-out/bin/scoot daemon run --ticks 1
 ```
 
 ## Choose The Right Run Mode
 
-Scoot has three common ways to run work. They are intentionally different:
+Scoot has four common ways to run work. They are intentionally different:
 
 | Mode | Goal source | Lifetime | Use when |
 | --- | --- | --- | --- |
 | `scoot -e "<goal>"` | The prompt on the command line. | Run now, print the final answer, exit. | A human or script wants one immediate task. |
+| `scoot serve` | NDJSON requests on stdin. | Runs until stdin closes. | A local app or supervisor wants a single long-lived stdio peer. |
 | `scoot schedule run --ticks 1` | `[[schedule.jobs]]` in config. | Poll configured jobs once, run any that are due, exit. | An external scheduler such as cron or a systemd timer owns the timing. |
 | `scoot daemon run` | `[[schedule.jobs]]` in config. | Poll forever by default (`--ticks N` makes it bounded). | Scoot owns the schedule loop and a supervisor only keeps the process alive. |
+
+`serve` is a foreground protocol process, not a network service: it reads one
+JSON request per stdin line and writes one JSON response per stdout line. It
+supports `run`, `session.list`, `session.get`, and `audit.query`; lifecycle,
+restart, and logs belong to the caller or supervisor.
 
 `daemon run` is not just `-e` with a different name. `-e` executes one explicit
 prompt immediately. `daemon run` loads configured jobs, applies their

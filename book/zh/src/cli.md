@@ -26,6 +26,7 @@ scoot [options] [command]
 | 模式 | 工作来源 | 退出行为 | 什么时候用 |
 | --- | --- | --- | --- |
 | `scoot -e "<goal>"` | 命令行 prompt。 | 返回一个答案后退出。 | 要立即执行一个任务。 |
+| `scoot serve` | stdin 上的 NDJSON 请求。 | 一直运行到 stdin 关闭。 | 本地 app 需要长期 stdio peer。 |
 | `scoot schedule run --ticks 1` | 配置里的 `[[schedule.jobs]]`。 | 轮询一次调度器后退出。 | cron、systemd timer 或 CI 负责调度时间。 |
 | `scoot daemon run` | 配置里的 `[[schedule.jobs]]`。 | 默认持续运行。 | Scoot 负责调度循环，外部 supervisor 负责保活。 |
 
@@ -58,6 +59,28 @@ scoot --trace -e "list the largest files under src/"
 stderr 上附加逐步轨迹，便于调试而不污染答复。轨迹会在每个阻塞步骤**之前**先打印实时进度
 标记——调用模型前打印 `thinking:`，执行工具前打印 `running: <工具>`——这样等待期间也能看到
 agent 当前在做什么，轨迹不会显得卡死。`--retries` 控制对瞬时后端失败（限流、5xx）的重试。
+
+### `serve` — stdio app-server
+
+```sh
+printf '%s\n' '{"id":"1","method":"session.list","params":{}}' | scoot serve
+```
+
+以前台进程运行本地 app 集成用的 stdio 协议。协议是换行分隔 JSON：stdin 每一行
+是一条请求，stdout 每一行是一条响应；响应会带回同一个 `id`、`ok`，以及
+`result` 或 `error`。
+
+支持的方法：
+
+| 方法 | 参数 | 结果 |
+| --- | --- | --- |
+| `run` | `{ "goal": "..." }` | `{ "session_id": "...", "reply": "..." }` |
+| `session.list` | `{}` | `{ "sessions": [...] }` |
+| `session.get` | `{ "id": "..." }` | `{ "id": "...", "messages": [...] }` |
+| `audit.query` | `{ "session_id": "..." }` | `{ "session_id": "...", "events": [...] }` |
+
+`serve` 不打开 TCP/UDS，不做鉴权，不把自己后台化，也不做多任务并发状态机。
+进程生命周期、重启和日志归调用方或 supervisor 管理。
 
 ### `setup`
 
