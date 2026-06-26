@@ -1,5 +1,6 @@
 //! Audit log: every thought and tool call leaves a replayable trace.
-//! Each line is JSONL: `{"seq":N,"ts":MS,"kind":"...","msg":"..."}`.
+//! Each line is JSONL:
+//! `{"seq":N,"ts":MS,"session_id":"...","kind":"...","msg":"..."}`.
 //! `msg` is JSON-escaped, so newlines or quotes in bash output cannot break
 //! the line structure and can be replayed line by line with `std.json`.
 //!
@@ -60,9 +61,18 @@ pub const Logger = struct {
     /// Monotonic per-instance event sequence, starting at 0.
     seq: u64 = 0,
     stats: Stats = .{},
+    /// Stable correlation for the local session/run that produced this event.
+    session_id: ?[]const u8 = null,
+    /// Optional finer-grained run correlation for future multi-run sessions.
+    run_id: ?[]const u8 = null,
 
     pub fn init(writer: *std.Io.Writer, io: std.Io) Logger {
         return .{ .writer = writer, .io = io };
+    }
+
+    pub fn setContext(self: *Logger, session_id: []const u8, run_id: ?[]const u8) void {
+        self.session_id = session_id;
+        self.run_id = run_id;
     }
 
     /// Appends one JSONL audit event. The caller flushes the writer when needed.
@@ -72,7 +82,16 @@ pub const Logger = struct {
         const ts_ms = std.Io.Timestamp.now(self.io, .real).toMilliseconds();
         const seq = self.seq;
         self.seq += 1;
-        try w.print("{{\"seq\":{d},\"ts\":{d},\"kind\":\"", .{ seq, ts_ms });
+        try w.print("{{\"seq\":{d},\"ts\":{d}", .{ seq, ts_ms });
+        if (self.session_id) |session_id| {
+            try w.writeAll(",\"session_id\":");
+            try jsonio.writeString(w, session_id);
+        }
+        if (self.run_id) |run_id| {
+            try w.writeAll(",\"run_id\":");
+            try jsonio.writeString(w, run_id);
+        }
+        try w.writeAll(",\"kind\":\"");
         try w.writeAll(@tagName(kind));
         try w.writeAll("\",\"msg\":");
         try jsonio.writeString(w, message);
@@ -99,16 +118,26 @@ test "log writes parseable JSONL with seq ts and escaping" {
     var buf: [256]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
     var lg = Logger.init(&w, std.testing.io);
+    lg.setContext("cli-1", "run-1");
     try lg.log(.thought, "look at \"Logs\"\nnext line");
     try lg.log(.tool_call, "ls -a");
 
-    const Line = struct { seq: u64, ts: i64, kind: []const u8, msg: []const u8 };
+    const Line = struct {
+        seq: u64,
+        ts: i64,
+        session_id: ?[]const u8 = null,
+        run_id: ?[]const u8 = null,
+        kind: []const u8,
+        msg: []const u8,
+    };
     var it = std.mem.tokenizeScalar(u8, w.buffered(), '\n');
 
     const l0 = try std.json.parseFromSlice(Line, std.testing.allocator, it.next().?, .{});
     defer l0.deinit();
     try std.testing.expectEqual(@as(u64, 0), l0.value.seq);
     try std.testing.expect(l0.value.ts >= 0);
+    try std.testing.expectEqualStrings("cli-1", l0.value.session_id.?);
+    try std.testing.expectEqualStrings("run-1", l0.value.run_id.?);
     try std.testing.expectEqualStrings("thought", l0.value.kind);
     try std.testing.expectEqualStrings("look at \"Logs\"\nnext line", l0.value.msg);
 

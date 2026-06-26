@@ -47,17 +47,19 @@ Every meaningful step is recorded to the audit log when `[audit] to_file = true`
 Each line is one event:
 
 ```json
-{"seq":0,"ts":1718600000123,"kind":"run","msg":"goal: count the Zig files"}
-{"seq":1,"ts":1718600000456,"kind":"thought","msg":"..."}
-{"seq":2,"ts":1718600000789,"kind":"tool_call","msg":"glob {\"pattern\":\"**/*.zig\"}"}
-{"seq":3,"ts":1718600000900,"kind":"observation","msg":"..."}
-{"seq":4,"ts":1718600001000,"kind":"final","msg":"There are 23 Zig files."}
+{"seq":0,"ts":1718600000123,"session_id":"cli-1718600000000-4242","kind":"run","msg":"goal: count the Zig files"}
+{"seq":1,"ts":1718600000456,"session_id":"cli-1718600000000-4242","kind":"thought","msg":"..."}
+{"seq":2,"ts":1718600000789,"session_id":"cli-1718600000000-4242","kind":"tool_call","msg":"glob {\"pattern\":\"**/*.zig\"}"}
+{"seq":3,"ts":1718600000900,"session_id":"cli-1718600000000-4242","kind":"observation","msg":"..."}
+{"seq":4,"ts":1718600001000,"session_id":"cli-1718600000000-4242","kind":"final","msg":"There are 23 Zig files."}
 ```
 
 | Field | Meaning |
 | --- | --- |
 | `seq` | Monotonic event sequence number (per logger instance, from 0). |
 | `ts` | Wall-clock timestamp, Unix **milliseconds**. |
+| `session_id` | Local session id that correlates audit events with `state/sessions/<id>.jsonl`. |
+| `run_id` | Optional finer-grained run correlation field. |
 | `kind` | Event type (see below). |
 | `msg` | Message text, with secrets redacted. |
 

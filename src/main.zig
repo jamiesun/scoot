@@ -2066,6 +2066,7 @@ fn setupRun(
     ag.mcp_servers = cfg.mcp.servers;
 
     sink.open(warn, arena, io, cfg.dirs.logs_dir);
+    sink.setContext(session_id, null);
     ag.audit = sink.loggerPtr();
 
     return .{ .sess = sess, .agent = ag };
@@ -2203,6 +2204,10 @@ const AuditSink = struct {
     /// Logger pointer injectable into agent; null if open failed.
     fn loggerPtr(self: *AuditSink) ?*scoot.audit.Logger {
         return if (self.file != null) &self.logger else null;
+    }
+
+    fn setContext(self: *AuditSink, session_id: []const u8, run_id: ?[]const u8) void {
+        if (self.loggerPtr()) |lg| lg.setContext(session_id, run_id);
     }
 
     fn close(self: *AuditSink, io: std.Io) void {
