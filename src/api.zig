@@ -32,6 +32,11 @@ pub const Options = struct {
     config_file: ?[]const u8 = null,
 };
 
+pub const RunResult = struct {
+    session_id: []const u8,
+    reply: []const u8,
+};
+
 const RuntimeState = struct {
     gpa: std.mem.Allocator,
     arena_state: std.heap.ArenaAllocator,
@@ -108,6 +113,13 @@ pub fn start(gpa: std.mem.Allocator, io: std.Io, options: Options) !*Runtime {
 ///
 /// The returned slice is owned by the runtime and remains valid until `stop`.
 pub fn run(rt: *Runtime, goal: []const u8) ![]const u8 {
+    return (try runDetailed(rt, goal)).reply;
+}
+
+/// Run one goal and return protocol-friendly metadata for internal callers.
+///
+/// Returned slices are owned by the runtime and remain valid until `stop`.
+pub fn runDetailed(rt: *Runtime, goal: []const u8) !RunResult {
     const state: *RuntimeState = @ptrCast(@alignCast(rt));
     const runtime_arena = state.arena_state.allocator();
     var run_arena_state = std.heap.ArenaAllocator.init(state.gpa);
@@ -135,8 +147,12 @@ pub fn run(rt: *Runtime, goal: []const u8) ![]const u8 {
         return err;
     };
     const owned_reply = try runtime_arena.dupe(u8, reply);
+    const owned_session_id = try runtime_arena.dupe(u8, sess.id);
     sess.persist(state.io, state.dirs.sessions_dir) catch {};
-    return owned_reply;
+    return .{
+        .session_id = owned_session_id,
+        .reply = owned_reply,
+    };
 }
 
 /// Stop the runtime and release all memory owned by it.

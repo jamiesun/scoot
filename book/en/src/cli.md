@@ -27,6 +27,7 @@ overridden with `--scoot-home` or `SCOOT_HOME`.
 | Mode | Source of work | Exit behavior | Use when |
 | --- | --- | --- | --- |
 | `scoot -e "<goal>"` | Command-line prompt. | Exits after one answer. | You want one immediate task. |
+| `scoot serve` | NDJSON requests on stdin. | Runs until stdin closes. | A local app wants a long-lived stdio peer. |
 | `scoot schedule run --ticks 1` | Configured `[[schedule.jobs]]`. | Exits after one scheduler poll. | cron, systemd timer, or CI owns the schedule. |
 | `scoot daemon run` | Configured `[[schedule.jobs]]`. | Runs forever by default. | Scoot owns the schedule loop and a supervisor keeps it alive. |
 
@@ -64,6 +65,30 @@ debugging without polluting the answer. The trace emits a live progress marker
 `running: <tool>` before executing a tool — so you can see what the agent is
 doing while it waits, instead of the trace appearing to freeze. `--retries`
 controls retry of transient backend failures (rate limits, 5xx).
+
+### `serve` — stdio app-server
+
+```sh
+printf '%s\n' '{"id":"1","method":"session.list","params":{}}' | scoot serve
+```
+
+Runs a foreground stdio protocol process for local app integrations. The
+protocol is newline-delimited JSON: each stdin line is one request and each
+stdout line is one response with the same `id`, `ok`, and either `result` or
+`error`.
+
+Supported methods:
+
+| Method | Params | Result |
+| --- | --- | --- |
+| `run` | `{ "goal": "..." }` | `{ "session_id": "...", "reply": "..." }` |
+| `session.list` | `{}` | `{ "sessions": [...] }` |
+| `session.get` | `{ "id": "..." }` | `{ "id": "...", "messages": [...] }` |
+| `audit.query` | `{ "session_id": "..." }` | `{ "session_id": "...", "events": [...] }` |
+
+`serve` does not open TCP/UDS sockets, implement authentication, background
+itself, or run multiple concurrent jobs. Process lifecycle, restart, and logs
+belong to the caller or supervisor.
 
 ### `setup`
 

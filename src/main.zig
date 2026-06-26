@@ -29,6 +29,7 @@ const usage =
     \\  session show <id>    print one local session transcript as JSONL
     \\  audit show <session-id>
     \\                       print audit events for one session as JSONL
+    \\  serve                run a foreground stdio NDJSON app-server protocol
     \\  schedule [list|run]  list / run scheduled jobs (unattended, forced readonly safety mode)
     \\  daemon [run|status|stop]
     \\                       run scheduled jobs as a foreground daemon, recording pid/state and supporting SIGTERM stop
@@ -77,6 +78,7 @@ pub fn main(init: std.process.Init) !void {
     var cmd_sessions: ?SessionsCommand = null;
     var cmd_session: ?SessionCommand = null;
     var cmd_audit: ?AuditCommand = null;
+    var cmd_serve = false;
     var cmd_schedule: ?[]const u8 = null; // null means not requested; otherwise list/run.
     var cmd_daemon: ?[]const u8 = null; // null means not requested; otherwise run/status/stop.
     var schedule_ticks: usize = 0; // 0 means run continuously.
@@ -204,6 +206,8 @@ pub fn main(init: std.process.Init) !void {
             }
             i += 2;
             cmd_audit = .{ .show = args[i] };
+        } else if (eql(arg, "serve")) {
+            cmd_serve = true;
         } else if (eql(arg, "schedule")) {
             // Optional subaction; default is list, which is read-only. Do not
             // consume the next token if it is an option.
@@ -235,7 +239,7 @@ pub fn main(init: std.process.Init) !void {
     const non_agent_cmd = cmd_config or cmd_doctor or cmd_setup or
         (cmd_policy_check != null) or (cmd_skills != null) or
         (cmd_wasm_tools != null) or (cmd_sessions != null) or
-        (cmd_session != null) or (cmd_audit != null) or
+        (cmd_session != null) or (cmd_audit != null) or cmd_serve or
         (cmd_schedule != null) or (cmd_daemon != null);
     if (trace and non_agent_cmd) {
         try out.writeAll("error: --trace is only for -e/--eval or interactive REPL mode\n");
@@ -381,6 +385,12 @@ pub fn main(init: std.process.Init) !void {
         switch (cmd) {
             .show => |session_id| try printAuditShow(out, arena, io, cfg, session_id),
         }
+        return;
+    }
+
+    if (cmd_serve) {
+        validateAgentRuntimeConfig(err_out, cfg);
+        try runServe(out, err_out, io, env, cfg, scoot_home_override);
         return;
     }
 
@@ -1477,6 +1487,221 @@ fn printAuditShow(
     for (events) |ev| try scoot.audit.writeEventJsonl(out, ev);
 }
 
+const ServeRequest = struct {
+    id: ?std.json.Value = null,
+    method: []const u8,
+    params: ?std.json.Value = null,
+};
+
+fn runServe(
+    out: *Io.Writer,
+    err_out: *Io.Writer,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+    cfg: scoot.config.Config,
+    scoot_home_override: ?[]const u8,
+) !void {
+    const rt = scoot.api.start(std.heap.page_allocator, io, .{
+        .env = env,
+        .scoot_home = scoot_home_override,
+    }) catch |err| {
+        try err_out.print("[scoot] serve runtime start failed: {s}\n", .{@errorName(err)});
+        try err_out.flush();
+        die(out, 1);
+    };
+    defer scoot.api.stop(rt);
+
+    var in_buf: [1 << 16]u8 = undefined;
+    var ir: Io.File.Reader = .init(.stdin(), io, &in_buf);
+    try serveLoop(out, &ir.interface, rt, io, cfg);
+}
+
+fn serveLoop(
+    out: *Io.Writer,
+    in: *Io.Reader,
+    rt: *scoot.api.Runtime,
+    io: std.Io,
+    cfg: scoot.config.Config,
+) !void {
+    while (true) {
+        const raw = (readLine(in) catch |err| {
+            try writeServeError(out, null, "read_error", @errorName(err));
+            try out.flush();
+            return;
+        }) orelse return;
+        const line = std.mem.trim(u8, raw, " \t\r\n");
+        if (line.len == 0) continue;
+
+        var arena_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        try handleServeLine(out, arena, rt, io, cfg, line);
+        try out.flush();
+    }
+}
+
+fn handleServeLine(
+    out: *Io.Writer,
+    arena: std.mem.Allocator,
+    rt: *scoot.api.Runtime,
+    io: std.Io,
+    cfg: scoot.config.Config,
+    line: []const u8,
+) !void {
+    const req = std.json.parseFromSliceLeaky(ServeRequest, arena, line, .{ .ignore_unknown_fields = true }) catch {
+        try writeServeError(out, null, "bad_json", "request must be a JSON object with id, method, and optional params");
+        return;
+    };
+    const id = req.id;
+    if (req.method.len == 0) {
+        try writeServeError(out, id, "invalid_request", "method is required");
+        return;
+    }
+
+    if (eql(req.method, "run")) {
+        const goal = serveParamString(req.params, "goal") orelse {
+            try writeServeError(out, id, "invalid_params", "run requires params.goal string");
+            return;
+        };
+        const result = scoot.api.runDetailed(rt, goal) catch |err| {
+            try writeServeError(out, id, "run_failed", @errorName(err));
+            return;
+        };
+        try writeServeRunResult(out, id, result);
+    } else if (eql(req.method, "session.list")) {
+        const sessions = scoot.session.list(arena, io, cfg.dirs.sessions_dir) catch |err| {
+            try writeServeError(out, id, "session_list_failed", @errorName(err));
+            return;
+        };
+        try writeServeSessionList(out, id, sessions);
+    } else if (eql(req.method, "session.get")) {
+        const session_id = serveParamString(req.params, "id") orelse {
+            try writeServeError(out, id, "invalid_params", "session.get requires params.id string");
+            return;
+        };
+        const loaded = scoot.session.loadById(arena, io, cfg.dirs.sessions_dir, session_id) catch |err| {
+            try writeServeError(out, id, serveReadErrorCode(err), @errorName(err));
+            return;
+        };
+        try writeServeSessionGet(out, id, loaded);
+    } else if (eql(req.method, "audit.query")) {
+        const session_id = serveParamString(req.params, "session_id") orelse {
+            try writeServeError(out, id, "invalid_params", "audit.query requires params.session_id string");
+            return;
+        };
+        const events = scoot.audit.querySession(arena, io, cfg.dirs.logs_dir, session_id) catch |err| {
+            try writeServeError(out, id, "audit_query_failed", @errorName(err));
+            return;
+        };
+        try writeServeAuditQuery(out, id, session_id, events);
+    } else if (eql(req.method, "run.stream")) {
+        try writeServeError(out, id, "not_implemented", "run.stream is not implemented in this serial stdio protocol version");
+    } else {
+        try writeServeError(out, id, "method_not_found", "unknown serve method");
+    }
+}
+
+fn serveParamString(params: ?std.json.Value, name: []const u8) ?[]const u8 {
+    const p = params orelse return null;
+    if (p != .object) return null;
+    const v = p.object.get(name) orelse return null;
+    if (v != .string) return null;
+    return v.string;
+}
+
+fn serveReadErrorCode(err: anyerror) []const u8 {
+    return switch (err) {
+        error.InvalidSessionId => "invalid_params",
+        error.SessionNotFound => "not_found",
+        else => "session_get_failed",
+    };
+}
+
+fn writeServeRunResult(out: *Io.Writer, id: ?std.json.Value, result: scoot.api.RunResult) !void {
+    try writeServeResultPrefix(out, id);
+    try out.writeAll("{\"session_id\":");
+    try scoot.jsonio.writeString(out, result.session_id);
+    try out.writeAll(",\"reply\":");
+    try scoot.jsonio.writeString(out, result.reply);
+    try out.writeAll("}}\n");
+}
+
+fn writeServeSessionList(out: *Io.Writer, id: ?std.json.Value, sessions: []const scoot.session.Summary) !void {
+    try writeServeResultPrefix(out, id);
+    try out.writeAll("{\"sessions\":[");
+    for (sessions, 0..) |s, idx| {
+        if (idx != 0) try out.writeByte(',');
+        try out.writeAll("{\"id\":");
+        try scoot.jsonio.writeString(out, s.id);
+        try out.print(",\"mtime_ms\":{d},\"message_count\":{d},\"first_user_summary\":", .{ s.mtime_ms, s.message_count });
+        try scoot.jsonio.writeString(out, s.first_user_summary);
+        try out.writeByte('}');
+    }
+    try out.writeAll("]}}\n");
+}
+
+fn writeServeSessionGet(out: *Io.Writer, id: ?std.json.Value, loaded: scoot.session.Loaded) !void {
+    try writeServeResultPrefix(out, id);
+    try out.writeAll("{\"id\":");
+    try scoot.jsonio.writeString(out, loaded.id);
+    try out.writeAll(",\"messages\":[");
+    for (loaded.messages, 0..) |m, idx| {
+        if (idx != 0) try out.writeByte(',');
+        try out.writeAll("{\"role\":\"");
+        try out.writeAll(@tagName(m.role));
+        try out.writeAll("\",\"content\":");
+        try scoot.jsonio.writeString(out, m.content);
+        try out.writeByte('}');
+    }
+    try out.writeAll("]}}\n");
+}
+
+fn writeServeAuditQuery(out: *Io.Writer, id: ?std.json.Value, session_id: []const u8, events: []const scoot.audit.Event) !void {
+    try writeServeResultPrefix(out, id);
+    try out.writeAll("{\"session_id\":");
+    try scoot.jsonio.writeString(out, session_id);
+    try out.writeAll(",\"events\":[");
+    for (events, 0..) |ev, idx| {
+        if (idx != 0) try out.writeByte(',');
+        try out.print("{{\"seq\":{d},\"ts\":{d},\"session_id\":", .{ ev.seq, ev.ts });
+        try scoot.jsonio.writeString(out, ev.session_id);
+        if (ev.run_id) |run_id| {
+            try out.writeAll(",\"run_id\":");
+            try scoot.jsonio.writeString(out, run_id);
+        }
+        try out.writeAll(",\"kind\":\"");
+        try out.writeAll(@tagName(ev.kind));
+        try out.writeAll("\",\"msg\":");
+        try scoot.jsonio.writeString(out, ev.msg);
+        try out.writeByte('}');
+    }
+    try out.writeAll("]}}\n");
+}
+
+fn writeServeResultPrefix(out: *Io.Writer, id: ?std.json.Value) !void {
+    try out.writeAll("{\"id\":");
+    try writeServeId(out, id);
+    try out.writeAll(",\"ok\":true,\"result\":");
+}
+
+fn writeServeError(out: *Io.Writer, id: ?std.json.Value, code: []const u8, message: []const u8) !void {
+    try out.writeAll("{\"id\":");
+    try writeServeId(out, id);
+    try out.writeAll(",\"ok\":false,\"error\":{\"code\":");
+    try scoot.jsonio.writeString(out, code);
+    try out.writeAll(",\"message\":");
+    try scoot.jsonio.writeString(out, message);
+    try out.writeAll("}}\n");
+}
+
+fn writeServeId(out: *Io.Writer, id: ?std.json.Value) !void {
+    if (id) |value| {
+        try out.print("{f}", .{std.json.fmt(value, .{})});
+    } else {
+        try out.writeAll("null");
+    }
+}
+
 fn printList(out: *Io.Writer, items: []const []const u8) !void {
     for (items, 0..) |item, idx| {
         if (idx != 0) try out.writeAll(",");
@@ -2498,6 +2723,64 @@ test "readLine: with newline/without trailing newline/empty input" {
 
     var in3 = Io.Reader.fixed("");
     try std.testing.expect((try readLine(&in3)) == null);
+}
+
+test "serveLoop: handles read APIs bad JSON and unknown methods as NDJSON" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cwd = Io.Dir.cwd();
+    const home = "/tmp/scoot_serve_loop_test";
+    cwd.deleteTree(io, home) catch {};
+    defer cwd.deleteTree(io, home) catch {};
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const dirs = try scoot.paths.Paths.fromHome(arena, home);
+    try dirs.ensure(io);
+    const cfg: scoot.config.Config = .{ .dirs = dirs };
+
+    try cwd.writeFile(io, .{
+        .sub_path = home ++ "/state/sessions/alpha.jsonl",
+        .data =
+        \\{"role":"system","content":"sys"}
+        \\{"role":"user","content":"hello\nworld"}
+        \\{"role":"assistant","content":"done"}
+        \\
+        ,
+    });
+    try cwd.writeFile(io, .{
+        .sub_path = home ++ "/logs/audit.jsonl",
+        .data =
+        \\{"seq":0,"ts":10,"session_id":"alpha","kind":"run","msg":"hello"}
+        \\{"seq":1,"ts":11,"session_id":"beta","kind":"run","msg":"other"}
+        \\
+        ,
+    });
+
+    var in = Io.Reader.fixed(
+        \\{not json}
+        \\{"id":"list-1","method":"session.list","params":{}}
+        \\{"id":2,"method":"session.get","params":{"id":"alpha"}}
+        \\{"id":"audit-1","method":"audit.query","params":{"session_id":"alpha"}}
+        \\{"id":"missing","method":"bogus","params":{}}
+        \\
+    );
+    var obuf: [8192]u8 = undefined;
+    var out = Io.Writer.fixed(&obuf);
+    const rt: *scoot.api.Runtime = undefined;
+
+    try serveLoop(&out, &in, rt, io, cfg);
+    const got = out.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, got, "\"id\":null,\"ok\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "\"code\":\"bad_json\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "\"id\":\"list-1\",\"ok\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "\"sessions\":[{\"id\":\"alpha\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "\"id\":2,\"ok\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "\"messages\":[{\"role\":\"system\",\"content\":\"sys\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "\"session_id\":\"alpha\",\"events\":[{\"seq\":0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "\"code\":\"method_not_found\"") != null);
 }
 
 fn testGuardDecision(

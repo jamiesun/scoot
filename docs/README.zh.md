@@ -230,6 +230,7 @@ export OPENAI_API_KEY="sk-..."
 | `scoot skills check [dir]` | 校验 skill 目录，不执行脚本。 |
 | `scoot skills pack <dir> [out.tar]` | 导出可审查的 skill 包。 |
 | `scoot wasm-tools check <dir>` | 静态校验 Wasm 工具包边界。 |
+| `scoot serve` | 以前台 stdio NDJSON 协议运行 app-server。 |
 | `scoot schedule list` | 查看已配置的定时任务。 |
 | `scoot daemon run` | 以前台 daemon loop 运行定时任务。 |
 
@@ -240,18 +241,24 @@ export OPENAI_API_KEY="sk-..."
 ./zig-out/bin/scoot skills check docs/examples/skills/minimal
 ./zig-out/bin/scoot skills pack docs/examples/skills/minimal minimal.scoot-skill.tar
 ./zig-out/bin/scoot wasm-tools check path/to/tool
+printf '%s\n' '{"id":"1","method":"session.list","params":{}}' | ./zig-out/bin/scoot serve
 ./zig-out/bin/scoot daemon run --ticks 1
 ```
 
 ## 选择合适的运行模式
 
-Scoot 常见的运行方式有三种，它们的定位不同：
+Scoot 常见的运行方式有四种，它们的定位不同：
 
 | 模式 | 目标来源 | 生命周期 | 什么时候用 |
 | --- | --- | --- | --- |
 | `scoot -e "<goal>"` | 命令行里的 prompt。 | 立刻运行，打印最终答案，然后退出。 | 人或脚本要执行一个即时任务。 |
+| `scoot serve` | stdin 上的 NDJSON 请求。 | 一直运行到 stdin 关闭。 | 本地 app 或 supervisor 需要一个长期 stdio peer。 |
 | `scoot schedule run --ticks 1` | 配置里的 `[[schedule.jobs]]`。 | 轮询一次配置任务，执行到期任务，然后退出。 | 由 cron 或 systemd timer 这类外部调度器负责触发时间。 |
 | `scoot daemon run` | 配置里的 `[[schedule.jobs]]`。 | 默认持续轮询；加 `--ticks N` 才会有界退出。 | 由 Scoot 自己负责调度循环，外部 supervisor 只负责托管进程。 |
+
+`serve` 是前台协议进程，不是网络服务：它从 stdin 逐行读取 JSON 请求，并向
+stdout 逐行写 JSON 响应。首版支持 `run`、`session.list`、`session.get` 与
+`audit.query`；生命周期、重启和日志归调用方或 supervisor 管理。
 
 `daemon run` 不是换了名字的 `-e`。`-e` 会立即执行一个明确的 prompt；
 `daemon run` 会加载配置任务，根据 `every_sec`、`at_unix` 或 `cron` 判断
