@@ -35,6 +35,20 @@ and is not enabled by the session file naming alone.
 Sessions are short-term memory only. They are not indexed or summarized across
 runs; persistence is for auditability and inspection, not recall.
 
+### Inspecting Sessions
+
+Use the read-only CLI commands to inspect persisted session files without
+starting the agent:
+
+```bash
+scoot sessions list
+scoot session show <id>
+```
+
+`sessions list` prints each local session id with its modification timestamp,
+message count, and first user-message summary. `session show <id>` prints that
+session transcript as JSONL so it can be piped into other tools.
+
 ## Audit Log
 
 Every meaningful step is recorded to the audit log when `[audit] to_file = true`
@@ -78,6 +92,15 @@ Each line is one event:
 `run` markers let you split a single append-only file into individual runs, and
 `seq` + `ts` let you replay a timeline and correlate events. `policy_deny` entries
 are an audit trail of exactly what the gate blocked.
+
+To inspect the events for one session:
+
+```bash
+scoot audit show <session-id>
+```
+
+The command filters `logs/audit.jsonl` by `session_id` and prints matching events
+as JSONL, preserving `seq`, `ts`, optional `run_id`, `kind`, and `msg`.
 
 ## Verbosity
 
