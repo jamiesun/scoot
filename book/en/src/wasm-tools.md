@@ -47,14 +47,23 @@ function-body subset: operand/control stack shapes, block/loop/if signatures,
 branch labels, call signatures, local/global access, memory/table presence, and
 immutable globals.
 
-The repo includes a complete compressor example in `examples/wasm-compressor`:
+The repo includes a complete compressor example, a copyable template, and a
+second deterministic redactor compressor:
 
 ```sh
-zig build wasm-compressor-example
+zig build wasm-compressor-example wasm-plugin-template wasm-redactor-compressor
 scoot wasm-tools check examples/wasm-compressor
+scoot wasm-tools check examples/wasm-plugin-template
+scoot wasm-tools check examples/wasm-redactor-compressor
 printf '%s\n' '{"version":1,"kind":"compressor","keep_recent":2,"elided_count":3,"elided_bytes":1200,"messages":[]}' \
   | scoot-wasm wasi examples/wasm-compressor/component.wasm
+scoot-wasm wasi examples/wasm-redactor-compressor/component.wasm \
+  < examples/wasm-redactor-compressor/fixtures/request.json
 ```
+
+Use `examples/wasm-plugin-template` for new compressor packages. The
+`scripts/check-wasm-examples.sh` smoke check builds the host and examples,
+validates package boundaries, and runs representative WASI executions.
 
 ## Manifest & Policy
 

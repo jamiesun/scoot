@@ -93,15 +93,25 @@ than corrupting host memory. Bad file descriptors return `EBADF`. Resource use
 stays bounded by the same fuel / call-depth / memory-page caps as `run`, and the
 core additionally wraps the subprocess with a hard wall-clock timeout.
 
-The repository includes a runnable compressor package under
-`examples/wasm-compressor`. Build it with:
+The repository includes runnable compressor packages and a copyable template:
 
 ```sh
-zig build wasm-compressor-example
+zig build wasm-compressor-example wasm-plugin-template wasm-redactor-compressor
 ./zig-out/bin/scoot wasm-tools check examples/wasm-compressor
+./zig-out/bin/scoot wasm-tools check examples/wasm-plugin-template
+./zig-out/bin/scoot wasm-tools check examples/wasm-redactor-compressor
 printf '%s\n' '{"version":1,"kind":"compressor","keep_recent":2,"elided_count":3,"elided_bytes":1200,"messages":[]}' \
   | ./zig-out/bin/scoot-wasm wasi examples/wasm-compressor/component.wasm
+./zig-out/bin/scoot-wasm wasi examples/wasm-redactor-compressor/component.wasm \
+  < examples/wasm-redactor-compressor/fixtures/request.json
 ```
+
+Use `examples/wasm-plugin-template` as the starting point for new compressor
+plugins. `examples/wasm-redactor-compressor` is a second, deterministic example
+that scans elided messages for secret-like hints without returning message
+content. `scripts/check-wasm-examples.sh` builds the host and all example
+components, validates package boundaries, and runs the template/redactor smoke
+checks.
 
 Not yet implemented (later phases): full spec-conformant validation beyond the
 current host subset, floating-point conformance, and the broader WASI surface

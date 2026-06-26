@@ -64,24 +64,30 @@ pub fn build(b: *std.Build) void {
         .cpu_arch = .wasm32,
         .os_tag = .wasi,
     });
-    const wasm_compressor_example = b.addExecutable(.{
-        .name = "component",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/wasm-compressor/src/main.zig"),
-            .target = wasm32_wasi,
-            .optimize = .ReleaseSmall,
-        }),
-    });
-    wasm_compressor_example.entry = .disabled;
-    wasm_compressor_example.rdynamic = true;
-
-    const update_wasm_compressor_example = b.addUpdateSourceFiles();
-    update_wasm_compressor_example.addCopyFileToSource(
-        wasm_compressor_example.getEmittedBin(),
+    addWasmCommandExample(
+        b,
+        wasm32_wasi,
+        "examples/wasm-compressor/src/main.zig",
         "examples/wasm-compressor/component.wasm",
+        "wasm-compressor-example",
+        "Build examples/wasm-compressor/component.wasm",
     );
-    const wasm_compressor_example_step = b.step("wasm-compressor-example", "Build examples/wasm-compressor/component.wasm");
-    wasm_compressor_example_step.dependOn(&update_wasm_compressor_example.step);
+    addWasmCommandExample(
+        b,
+        wasm32_wasi,
+        "examples/wasm-plugin-template/src/main.zig",
+        "examples/wasm-plugin-template/component.wasm",
+        "wasm-plugin-template",
+        "Build examples/wasm-plugin-template/component.wasm",
+    );
+    addWasmCommandExample(
+        b,
+        wasm32_wasi,
+        "examples/wasm-redactor-compressor/src/main.zig",
+        "examples/wasm-redactor-compressor/component.wasm",
+        "wasm-redactor-compressor",
+        "Build examples/wasm-redactor-compressor/component.wasm",
+    );
 
     // The standalone Wasm engine lives outside the core `scoot` binary so the
     // zero-dependency core never embeds a runtime. Its tests are compiled as a
@@ -141,4 +147,33 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_wasm_engine_tests.step);
     test_step.dependOn(&run_wasm_host_tests.step);
     test_step.dependOn(&embed_example.step);
+}
+
+fn addWasmCommandExample(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    source_path: []const u8,
+    component_path: []const u8,
+    step_name: []const u8,
+    description: []const u8,
+) void {
+    const exe = b.addExecutable(.{
+        .name = "component",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(source_path),
+            .target = target,
+            .optimize = .ReleaseSmall,
+        }),
+    });
+    exe.entry = .disabled;
+    exe.rdynamic = true;
+
+    const update_component = b.addUpdateSourceFiles();
+    update_component.addCopyFileToSource(exe.getEmittedBin(), component_path);
+
+    const normalize_mode = b.addSystemCommand(&.{ "chmod", "644", component_path });
+    normalize_mode.step.dependOn(&update_component.step);
+
+    const step = b.step(step_name, description);
+    step.dependOn(&normalize_mode.step);
 }

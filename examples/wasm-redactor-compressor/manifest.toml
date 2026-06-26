@@ -1,0 +1,8 @@
+kind = "compressor"
+name = "wasm-redactor"
+description = "Scoot compressor plugin that reports deterministic redaction hints without returning message content"
+entry = "_start"
+component = "component.wasm"
+input_schema = "schema/input.json"
+output_schema = "schema/output.json"
+capabilities = ["compute"]

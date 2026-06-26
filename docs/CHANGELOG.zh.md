@@ -17,6 +17,8 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 ### 新增
 
+- 新增可复制的 Wasm compressor 插件模板、确定性的 redactor compressor 示例，以及用于
+  构建、校验和 smoke-test 示例包的 `scripts/check-wasm-examples.sh`。
 - `scoot-wasm` 现在会在执行前对当前 host 子集做 W3 函数体静态类型验证。该验证会检查
   operand/control stack 形状、block/loop/if 签名、分支 label、直接与间接调用签名、
   local/global 访问、memory/table 是否存在，以及不可变 global 写入，使畸形类型/索引错误
