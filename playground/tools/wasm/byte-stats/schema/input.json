@@ -1,0 +1,7 @@
+{
+  "type": "object",
+  "description": "Any JSON value; byte-stats measures the raw payload Scoot writes to stdin.",
+  "properties": {
+    "text": { "type": "string" }
+  }
+}

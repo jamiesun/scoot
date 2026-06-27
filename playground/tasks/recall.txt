@@ -1,0 +1,17 @@
+Playground recall smoke. Exercise the native `recall` action, which retrieves
+original text from the current session transcript archive.
+
+This prompt embeds a unique sentinel: PLAYGROUND-RECALL-MARKER-7
+
+Steps:
+
+- Use exactly one `recall` action with action_input
+  {"query":"PLAYGROUND-RECALL-MARKER-7","limit":3} to locate where that sentinel
+  appears in this session's transcript.
+- Do not use `bash`, `file_read`, `grep`, or any other action; `recall` only.
+
+In your final answer, quote the recalled line that contains the sentinel and
+report the transcript `seq` it came from, confirming the text was retrieved via
+the native `recall` action rather than re-reading a file.
+
+Constraint: do not read `playground/logs/audit.jsonl` directly.

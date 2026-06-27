@@ -1,0 +1,11 @@
+Playground MCP smoke.
+
+Use exactly one `mcp_call` action against the configured server `playground-echo`,
+tool `echo`, with args:
+
+```json
+{"message":"scoot-playground"}
+```
+
+Do not use `bash` or `http_request`. After the observation, give a final answer
+containing the exact marker string returned by the MCP tool.

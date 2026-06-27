@@ -1,0 +1,1 @@
+Use the playground-operator skill. Inspect the repository at a high level without changing any files. Identify the main source directories under `src/`, explain where this playground stores its config, skills, sessions, logs, and reports, then give a concise final summary.

@@ -1,0 +1,10 @@
+Use the playground-operator skill. Test the native `wasm_tool` action against the local compute-only package at `playground/tools/wasm/byte-stats`.
+
+Steps:
+
+- Use exactly one `wasm_tool` action with action_input {"package":"playground/tools/wasm/byte-stats","input":{"text":"scoot playground"}}.
+- Do not use `bash` or any other action to run the tool; `wasm_tool` only.
+- The tool returns JSON {"bytes":N,"lines":N,"checksum":N} computed over the exact JSON payload Scoot pipes to it.
+- In your final answer, report the three returned numbers and confirm the tool ran through the wasm_tool boundary rather than a shell.
+
+Constraint: do not read `playground/logs/audit.jsonl` directly.

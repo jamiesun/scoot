@@ -1,0 +1,24 @@
+Playground write smoke. Exercise scoot's mutating file tools under the default
+`guarded` policy, which confines writes to the project root.
+
+Hard requirements (read before acting):
+
+- Your FIRST emitted action MUST be `file_write`, and your SECOND action MUST be
+  `file_read`. Do not emit a `final` action before you have actually performed
+  both and received their observations.
+- Do not answer from prior knowledge or describe what you "would" do; you must
+  actually create and read the file and use the real observations.
+- Use `file_write` then `file_read` only — no `bash`, `file_edit`, or other
+  actions.
+
+Steps:
+
+- Use exactly one `file_write` action to create `playground/tmp/write-smoke.txt`
+  with the exact content `scoot-write-ok`.
+- Then use exactly one `file_read` action to read that same file back.
+
+In your final answer, confirm that the write succeeded under `guarded` (writes are
+allowed because the path stays inside the project root), and quote the exact
+content you read back.
+
+Constraint: do not read `playground/logs/audit.jsonl` directly.

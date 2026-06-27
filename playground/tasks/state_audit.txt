@@ -1,0 +1,1 @@
+Use the playground-evaluator skill. Run `playground/scripts/state-brief.sh` and do not read `playground/logs/audit.jsonl` directly. Summarize audit event counts, recent transcript exit statuses, whether any policy denials occurred, and the most likely reason for any failure or timeout.

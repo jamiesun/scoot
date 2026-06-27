@@ -1,0 +1,61 @@
+# Scoot Playground — default runtime config (committed, no secrets).
+#
+# This file is the COMMITTED default. The active runtime config
+# (playground/config.toml) is GENERATED from this file plus playground/.env by
+# playground/scripts/env.sh, and is gitignored. Edit defaults here; put secrets
+# and per-developer backend overrides in playground/.env (see .env.example).
+#
+# Run everything against this directory without touching ~/.scoot:
+#   playground/scripts/run-task.sh playground/tasks/smoke.txt
+#
+# The backend base_url/model below are intentionally neutral defaults. Override
+# them per developer in playground/.env via SCOOT_PLAYGROUND_BASE_URL /
+# SCOOT_PLAYGROUND_MODEL so personal endpoints never land in git.
+
+[backend]
+base_url = "http://127.0.0.1:11434/v1"
+model = "qwen2.5"
+api_key_env = "SCOOT_PLAYGROUND_API_KEY"
+timeout_ms = 120000
+
+[agent]
+max_turns = 32
+default_mode = "goal"
+compactor = "extractive"
+context_budget_bytes = 80000
+
+[tools]
+timeout_ms = 30000
+policy = "guarded"
+confine_writes = true
+block_internal_http = true
+
+[skills]
+enabled = true
+# The playground's own skills live in SCOOT_HOME/skills (playground/skills),
+# which is already a default discovery path, so no extra_paths are needed.
+extra_paths = []
+
+[mcp]
+# A local, unauthenticated Streamable HTTP MCP server for smoke tests.
+# Start it with playground/scripts/run-mcp-server.sh before exercising mcp_call.
+[[mcp.servers]]
+name = "playground-echo"
+transport = "http"
+url = "http://127.0.0.1:18799/mcp"
+allowed_tools = ["echo"]
+policy = "readonly"
+
+[audit]
+level = "debug"
+to_file = true
+
+[schedule]
+enabled = false
+poll_ms = 1000
+
+[[schedule.jobs]]
+id = "playground-readonly-smoke"
+goal = "Use the playground-operator skill. Inspect the repository read-only and summarize where the playground stores config, skills, sessions, logs, and reports."
+every_sec = 3600
+mode = "readonly"

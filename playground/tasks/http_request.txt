@@ -1,0 +1,32 @@
+Playground network smoke. Exercise the allowed `http_request` path under the
+default `guarded` policy, which permits external GET/HEAD but blocks loopback and
+private targets (SSRF protection). The loopback *deny* path is covered separately
+by `policy-dry-runs.sh`; this task covers a positive, allowed request.
+
+Hard requirements (read before acting):
+
+- Your FIRST emitted action MUST be `http_request`. Do not emit a `final` action
+  on the first step, and do not answer from prior knowledge.
+- The response body contains a value you cannot know without actually making the
+  request, so you MUST make the request and read the observation before answering.
+- Use `http_request` only — no `bash`, `curl`, or `wget`.
+
+Action to run, exactly once:
+
+    {"method":"GET","url":"https://www.cloudflare.com/cdn-cgi/trace"}
+
+The response body is a list of `key=value` lines (it includes `fl=`, `ip=`,
+`ts=`, `uag=`, ...). After you receive the observation, finish with a final
+answer that:
+
+- reports the exact HTTP status code from the observation,
+- quotes the exact `ts=` value (a request timestamp) copied verbatim from the
+  response body in the observation, and
+- confirms the request went through the native `http_request` action under the
+  `guarded` policy (allowed because the target is external, not loopback/private).
+
+If the request itself errors (network down), finish with a final answer that
+quotes the exact error text from the observation — but only after you actually
+emitted the `http_request` action; never invent a `ts=` value.
+
+Constraint: do not read `playground/logs/audit.jsonl` directly.

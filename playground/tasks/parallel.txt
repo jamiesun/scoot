@@ -1,0 +1,27 @@
+Playground parallel smoke. Exercise the `parallel` action, which runs 1-4
+independent read-only subcalls concurrently (only file_read / grep / glob /
+outline / HTTP GET or HEAD are allowed).
+
+Hard requirements (read before acting):
+
+- Your FIRST emitted action MUST be `parallel`. Do not emit a `final` action on
+  the first step.
+- Do not answer from prior knowledge, and never claim to have run subcalls whose
+  output you have not actually seen in an observation. If you have not yet seen
+  the parallel observation, you may not produce a final answer.
+- Use exactly one `parallel` action; no `bash`, no writes, no nested `parallel`.
+
+Action to run, exactly once (two independent read-only subcalls):
+
+    {"calls":[{"action":"file_read","input":"{\"path\":\"playground/README.md\"}"},{"action":"grep","input":"{\"pattern\":\"Coverage\",\"path\":\"playground/README.md\"}"}]}
+
+After you receive the observation, finish with a final answer that:
+
+- quotes the exact text of the first Markdown H1 heading (the `# ...` line) from
+  the `file_read` subcall result, and
+- reports the matched line text and its line number for `Coverage` from the
+  `grep` subcall result,
+
+confirming both facts came from a single `parallel` action's observation.
+
+Constraint: do not read `playground/logs/audit.jsonl` directly.

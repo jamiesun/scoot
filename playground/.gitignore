@@ -1,0 +1,22 @@
+# Scoot Playground — ignore runtime state, keep the committed test environment.
+#
+# Everything in this directory is committed EXCEPT the entries below: secrets,
+# the generated runtime config, and all data Scoot produces while running.
+# This keeps the playground reproducible in git while never leaking local state.
+
+# Secrets and personal overrides.
+.env
+
+# Generated runtime config (built from config.default.toml + .env by env.sh).
+config.toml
+
+# Runtime data produced by Scoot and the test scripts.
+runs/
+logs/
+state/
+reports/
+tmp/
+
+# Built Wasm artifacts are reproducible from source via build.sh.
+tools/wasm/*/component.wasm
+scripts/__pycache__
