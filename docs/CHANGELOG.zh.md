@@ -15,8 +15,11 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 ## [未发布]
 
+## [0.5.0] - 2026-06-27
+
 ### 新增
 
+- 新增已提交的 `playground/` 测试环境，针对真实后端端到端覆盖全部 action（#161）。
 - `scoot-wasm` 现已能执行浮点 Wasm（W4）：f32/f64 算术（add/sub/mul/div）、
   一元运算（abs/neg/ceil/floor/trunc/nearest/sqrt）、min/max/copysign、有序
   比较、整数与浮点互转，以及会 trap 的截断（`iNN.trunc_fMM_s/u`）与饱和截断
@@ -75,6 +78,13 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 - 移除 `-small`（`ReleaseSmall`）发布产物以及安装脚本的 `SCOOT_INSTALL_FLAVOR`
   变量。`install.sh` 现在只下载唯一发布的变体。
+- 将 Wasm 插件沙箱收窄为仅 stdin/stdout/stderr/argv，并作为新的硬规则：不提供
+  文件系统、网络、时钟或随机数权限（#164）。
+
+### 文档
+
+- 将 README 重写为更易读、概念优先，并用等距视角主视觉刷新信息图（#160、#165）。
+- 移除冗余的 README 语言链接，并把剩余中文注释与字符串翻译为英文（#146、#153）。
 
 ## [0.4.0] - 2026-06-26
 
@@ -233,7 +243,8 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 - 完善首页/许可证元数据、信息图与双语用户指南（#6、#19、#36）
 
-[未发布]: https://github.com/jamiesun/scoot/compare/v0.4.0...HEAD
+[未发布]: https://github.com/jamiesun/scoot/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/jamiesun/scoot/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jamiesun/scoot/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jamiesun/scoot/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jamiesun/scoot/compare/v0.1.0...v0.2.0
