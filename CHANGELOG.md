@@ -71,6 +71,28 @@ heading when cutting a release.
   (`-Dwasm-host=true`); the zero-dependency core never links it. Full
   spec-conformant validation beyond the supported subset remains a later
   phase (#100).
+- Release workflow now publishes a separate `scoot-wasm-<target>.tar.gz` archive
+  (plus `.sha256`) for every target, built in the same job via
+  `-Dwasm-host=true`. The optional standalone Wasm compute-unit host is now a
+  downloadable artifact, not a build-from-source-only binary.
+- Added a Homebrew tap publish job (`brew install jamiesun/tap/scoot` and
+  `brew install jamiesun/tap/scoot-wasm`). The `scoot-wasm` formula depends on
+  `scoot`, so installing the host also installs the agent; the default
+  `wasm_host` then resolves `scoot-wasm` from `PATH`. The job no-ops unless a
+  `HOMEBREW_TAP_TOKEN` secret is set, mirroring the optional Docker Hub publish.
+
+### Changed
+
+- Release archives now ship a single `ReleaseSafe` flavor per target instead of
+  both `ReleaseSafe` and `ReleaseSmall`. Users who need a smaller binary compile
+  from source with `-Doptimize=ReleaseSmall`; the published release notes carry a
+  permanent footer documenting this and the optional Wasm host.
+
+### Removed
+
+- Dropped the `-small` (`ReleaseSmall`) release artifacts and the installer's
+  `SCOOT_INSTALL_FLAVOR` variable. `install.sh` now downloads the single
+  published flavor.
 
 ## [0.4.0] - 2026-06-26
 

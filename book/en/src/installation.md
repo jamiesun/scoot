@@ -37,31 +37,44 @@ Pin a specific release when reproducibility matters:
 curl -fsSL https://raw.githubusercontent.com/jamiesun/scoot/main/install.sh | env SCOOT_INSTALL_VERSION=v0.2.0 sh
 ```
 
-Install the smaller `ReleaseSmall` build when footprint matters more than
-runtime safety checks:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/jamiesun/scoot/main/install.sh | env SCOOT_INSTALL_FLAVOR=small sh
-```
-
 Supported installer environment variables:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `SCOOT_INSTALL_DIR` | `/usr/local/bin` | Destination directory for the binary. |
 | `SCOOT_INSTALL_VERSION` | `latest` | Release tag to install, with or without leading `v`. |
-| `SCOOT_INSTALL_FLAVOR` | `safe` | `safe` installs the default `ReleaseSafe` artifact; `small` installs the `ReleaseSmall` artifact. |
 | `SCOOT_INSTALL_BINARY` | `scoot` | Installed binary name. |
 | `SCOOT_INSTALL_REPO` | `jamiesun/scoot` | GitHub repository to download from. |
 
-## Safe Vs Small Release Builds
+## Install With Homebrew (macOS)
 
-Tagged releases publish two binary flavors for every supported target:
+A Homebrew tap publishes formulae for macOS:
 
-| Flavor | Zig optimize mode | Use when |
-| --- | --- | --- |
-| default | `ReleaseSafe` | You want the normal release with runtime safety checks and clearer fail-fast diagnostics. |
-| `small` | `ReleaseSmall` | You need a tiny binary for probes, edge devices, or minimal containers and accept fewer runtime safety checks. |
+```sh
+brew install jamiesun/tap/scoot
+```
+
+To also run compute-only Wasm tool packages (the `wasm_tool` action), install the
+optional standalone host. Its formula depends on `scoot`, so this single command
+installs both the agent and the host:
+
+```sh
+brew install jamiesun/tap/scoot-wasm
+```
+
+Both land on Homebrew's `bin` (on your `PATH`), so the default
+`wasm_host = ["scoot-wasm", "wasi", "{component}"]` resolves `scoot-wasm` from
+`PATH` with no extra configuration. The core `scoot` formula never pulls in the
+Wasm host, keeping the default install minimal.
+
+## Release Build Flavor
+
+Prebuilt release archives ship a single flavor — Zig `ReleaseSafe`, which keeps
+runtime safety checks and clear fail-fast diagnostics. If you need a smaller
+binary for probes, edge devices, or minimal containers, compile from source with
+`ReleaseSmall` (see [Build From Source](#build-from-source)). Each target also
+publishes a separate `scoot-wasm-*` archive containing only the optional Wasm
+compute-unit host.
 
 ## Build From Source
 
@@ -90,8 +103,9 @@ install -m 0755 zig-out/bin/scoot /usr/local/bin/scoot
 
 ## Install A Release Artifact
 
-Each tagged release publishes a default `.tar.gz` per target plus a `-small`
-variant and `.sha256` checksums.
+Each tagged release publishes a `scoot-<target>.tar.gz` per target plus a
+separate `scoot-wasm-<target>.tar.gz` (the optional Wasm host) and `.sha256`
+checksums.
 
 ```sh
 # Pick the archive for your platform from the Releases page, then:

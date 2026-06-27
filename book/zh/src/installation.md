@@ -34,30 +34,41 @@ curl -fsSL https://raw.githubusercontent.com/jamiesun/scoot/main/install.sh | en
 curl -fsSL https://raw.githubusercontent.com/jamiesun/scoot/main/install.sh | env SCOOT_INSTALL_VERSION=v0.2.0 sh
 ```
 
-当体积比运行时安全检查更重要时，可以安装更小的 `ReleaseSmall` 构建：
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/jamiesun/scoot/main/install.sh | env SCOOT_INSTALL_FLAVOR=small sh
-```
-
 安装脚本支持的环境变量：
 
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
 | `SCOOT_INSTALL_DIR` | `/usr/local/bin` | 二进制安装目录。 |
 | `SCOOT_INSTALL_VERSION` | `latest` | 要安装的 release tag，可带或不带开头的 `v`。 |
-| `SCOOT_INSTALL_FLAVOR` | `safe` | `safe` 安装默认的 `ReleaseSafe` 产物；`small` 安装 `ReleaseSmall` 产物。 |
 | `SCOOT_INSTALL_BINARY` | `scoot` | 安装后的二进制名称。 |
 | `SCOOT_INSTALL_REPO` | `jamiesun/scoot` | 下载 release 的 GitHub 仓库。 |
 
-## Safe 与 Small 发布构建
+## 用 Homebrew 安装（macOS）
 
-每个 tag 版本会为每个支持目标发布两种二进制：
+一个 Homebrew tap 为 macOS 发布 formula：
 
-| 变体 | Zig optimize 模式 | 什么时候用 |
-| --- | --- | --- |
-| 默认 | `ReleaseSafe` | 需要常规 release，保留运行时安全检查和更清晰的 fail-fast 诊断。 |
-| `small` | `ReleaseSmall` | 需要极小二进制用于探针、边缘设备或极简容器，并接受更少运行时安全检查。 |
+```sh
+brew install jamiesun/tap/scoot
+```
+
+如果还要运行只做计算的 Wasm 工具包（`wasm_tool` action），再安装可选的独立 host。
+它的 formula 依赖 `scoot`，所以这一条命令会同时装上 agent 和 host：
+
+```sh
+brew install jamiesun/tap/scoot-wasm
+```
+
+两者都会落在 Homebrew 的 `bin`（已在 `PATH` 上），因此默认的
+`wasm_host = ["scoot-wasm", "wasi", "{component}"]` 会从 `PATH` 解析到
+`scoot-wasm`，无需额外配置。核心 `scoot` formula 永远不会带上 Wasm host，
+保持默认安装最小化。
+
+## 发布构建变体
+
+预编译的 release 压缩包只发布一种变体——Zig `ReleaseSafe`，保留运行时安全检查与
+清晰的 fail-fast 诊断。如果你需要更小的二进制（用于探针、边缘设备或极简容器），
+请用 `ReleaseSmall` 从源码自行编译（见[从源码构建](#从源码构建)）。每个目标还会
+单独发布一个 `scoot-wasm-*` 压缩包，里面只包含可选的 Wasm 计算单元 host。
 
 ## 从源码构建
 
@@ -86,8 +97,8 @@ install -m 0755 zig-out/bin/scoot /usr/local/bin/scoot
 
 ## 安装发布产物
 
-每个 tag 版本会为每个目标发布默认 `.tar.gz`、一个 `-small` 变体，以及对应的
-`.sha256` 校验和。
+每个 tag 版本会为每个目标发布一个 `scoot-<target>.tar.gz`，外加一个独立的
+`scoot-wasm-<target>.tar.gz`（可选的 Wasm host），以及对应的 `.sha256` 校验和。
 
 ```sh
 # Pick the archive for your platform from the Releases page, then:

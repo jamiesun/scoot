@@ -55,6 +55,26 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
   调用深度与内存页上限兜底。用 `scoot-wasm run <module.wasm> <export> [整数参数...]`
   调用。引擎仅编译进独立的 `scoot-wasm` 二进制（`-Dwasm-host=true`），零依赖核心
   从不链接它。超出当前支持子集的完整 spec 一致验证留待后续阶段（#100）。
+- 发布流程现在会为每个目标单独发布一个 `scoot-wasm-<target>.tar.gz` 压缩包
+  （外加 `.sha256`），在同一个 job 中通过 `-Dwasm-host=true` 构建。可选的独立
+  Wasm 计算单元 host 现在是可下载产物，不再只能从源码构建。
+- 新增 Homebrew tap 发布 job（`brew install jamiesun/tap/scoot` 与
+  `brew install jamiesun/tap/scoot-wasm`）。`scoot-wasm` formula 依赖 `scoot`，
+  所以安装 host 会一并安装 agent；默认的 `wasm_host` 随后会从 `PATH` 解析
+  `scoot-wasm`。该 job 仅在设置了 `HOMEBREW_TAP_TOKEN` secret 时运行，与可选的
+  Docker Hub 发布保持一致。
+
+### 变更
+
+- 发布压缩包现在每个目标只发布单一 `ReleaseSafe` 变体，不再同时发布
+  `ReleaseSafe` 与 `ReleaseSmall`。需要更小二进制的用户用
+  `-Doptimize=ReleaseSmall` 从源码编译；发布说明带有一段固定脚注说明这一点以及
+  可选的 Wasm host。
+
+### 移除
+
+- 移除 `-small`（`ReleaseSmall`）发布产物以及安装脚本的 `SCOOT_INSTALL_FLAVOR`
+  变量。`install.sh` 现在只下载唯一发布的变体。
 
 ## [0.4.0] - 2026-06-26
 

@@ -62,7 +62,13 @@ HTTP 请求、调用技能等。它无法凭空造出绕过策略门的能力。
 curl -fsSL https://raw.githubusercontent.com/jamiesun/scoot/main/install.sh | sh
 ```
 
-想用 Docker、small 构建或从源码编译？见
+macOS 也可以用 Homebrew：
+
+```sh
+brew install jamiesun/tap/scoot
+```
+
+想用 Docker、可选的 Wasm host，或从源码编译更小的构建？见
 [安装](../book/zh/src/installation.md)。
 
 **2. 配置。** 向导会创建 `~/.scoot` 并写好配置：
