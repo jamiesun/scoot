@@ -17,6 +17,16 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 ### 新增
 
+- `scoot-wasm` 现已能执行浮点 Wasm（W4）：f32/f64 算术（add/sub/mul/div）、
+  一元运算（abs/neg/ceil/floor/trunc/nearest/sqrt）、min/max/copysign、有序
+  比较、整数与浮点互转，以及会 trap 的截断（`iNN.trunc_fMM_s/u`）与饱和截断
+  （`iNN.trunc_sat_fMM_s/u`），并与已支持的批量 `memory.copy`/`memory.fill`
+  一同工作。NaN 结果会被规范化以保证跨 host 的确定性输出，而 abs/neg/copysign
+  保留精确位模式；`nearest` 采用“就近取偶”并保留零的符号。静态类型验证器现在也会
+  对浮点 opcode 做类型检查，因此浮点模块可端到端加载并运行。新增的健壮性
+  测试套件会向加载器喂入截断的、单字节损坏的以及随机/恶意的模块字节，
+  并断言每个输入都返回结构化的加载错误或 trap 而不是崩溃。超出当前支持
+  子集的完整 spec 一致验证仍留待后续阶段（#100）。
 - 新增原生 `wasm_tool` Agent 动作，用于运行 compute-only 本地 Wasm 包。它会校验
   package 边界，要求 `entry = "_start"` 且 `policy.toml` 只能授予 `compute`，
   并直接运行配置好的 `scoot-wasm` host argv，不再为了执行 Wasm 工具给模型宽泛的
@@ -44,7 +54,7 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
   （unreachable、除零、整数溢出、内存/表越界、间接调用类型不匹配），并由 fuel、
   调用深度与内存页上限兜底。用 `scoot-wasm run <module.wasm> <export> [整数参数...]`
   调用。引擎仅编译进独立的 `scoot-wasm` 二进制（`-Dwasm-host=true`），零依赖核心
-  从不链接它。超出当前支持子集的完整 spec 一致验证与浮点运算留待后续阶段（#100）。
+  从不链接它。超出当前支持子集的完整 spec 一致验证留待后续阶段（#100）。
 
 ## [0.4.0] - 2026-06-26
 

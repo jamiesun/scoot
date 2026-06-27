@@ -1,7 +1,7 @@
 # Wasm 工具包
 
 **状态：核心静态校验 + 独立 host。** 核心 `scoot` 二进制依旧**不**加载或执行 Wasm；可选的
-`scoot-wasm` 二进制在使用 `-Dwasm-host=true` 构建后，可以执行当前的整数/WASI host 子集。
+`scoot-wasm` 二进制在使用 `-Dwasm-host=true` 构建后，可以执行当前的整数、浮点与 WASI host 子集。
 完整参考见 [`docs/WASM_TOOLS.md`](https://github.com/jamiesun/scoot/blob/main/docs/WASM_TOOLS.md)；本页是概览。
 
 目标是为第三方工具提供一个小巧、本地、**可审查**的边界 —— 刻意比 MCP 或 Wassette 更小 —— 使一个包在引入任何运行时*之前*就能被检视、其请求的权限被理解。

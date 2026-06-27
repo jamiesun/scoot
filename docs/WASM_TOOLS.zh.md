@@ -1,6 +1,6 @@
 # Wasm 工具包
 
-状态：核心仍只定义边界并做静态校验；独立的 `scoot-wasm` host 现已能执行整数 Wasm 函数（W1），能在最小 WASI preview1 子集上运行 `wasm32-wasi` 命令模块（W2），并会在执行前对当前 host 子集做静态类型验证（W3）。核心 `scoot` 二进制依旧从不加载或执行 Wasm。
+状态：核心仍只定义边界并做静态校验；独立的 `scoot-wasm` host 现已能执行整数与浮点 Wasm 函数（W1/W4），能在最小 WASI preview1 子集上运行 `wasm32-wasi` 命令模块（W2），并会在执行前对当前 host 子集做静态类型验证（W3）。核心 `scoot` 二进制依旧从不加载或执行 Wasm。
 
 Scoot 的 Wasm 工具包格式刻意比 Wassette 或 MCP 更小。目标是在引入运行时之前，先给第三方工具建立一个本地、可审查的边界。
 
@@ -93,8 +93,9 @@ printf '%s\n' '{"version":1,"kind":"compressor","keep_recent":2,"elided_count":3
 `scripts/check-wasm-examples.sh` 会构建 host 和全部示例 component，校验包边界，并运行
 template / redactor smoke checks。
 
-尚未实现（后续阶段）：超出当前 host 子集的完整 spec 一致验证、浮点一致性，以及更大的
-WASI 表面（文件、套接字、realtime/monotonic 之外的时钟）。
+尚未实现（后续阶段）：针对官方 Wasm spec 测试套件、超出当前 host 子集的完整 spec
+一致验证与浮点一致性测试，以及更大的 WASI 表面（文件、套接字、realtime/monotonic
+之外的时钟）。
 
 ## Manifest
 

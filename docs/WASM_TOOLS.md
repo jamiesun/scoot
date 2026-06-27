@@ -1,10 +1,11 @@
 # Wasm Tool Packages
 
 Status: design boundary and static validation in the core; the standalone
-`scoot-wasm` host now executes integer Wasm functions (W1) and runs
-`wasm32-wasi` command modules over a minimal WASI preview1 subset (W2), with a
-static type validation pass for the current host subset before execution (W3).
-The core `scoot` binary still never loads or executes Wasm.
+`scoot-wasm` host now executes integer and floating-point Wasm functions
+(W1/W4) and runs `wasm32-wasi` command modules over a minimal WASI preview1
+subset (W2), with a static type validation pass for the current host subset
+before execution (W3). The core `scoot` binary still never loads or executes
+Wasm.
 
 Scoot's Wasm tool package format is intentionally smaller than Wassette or MCP.
 The goal is a local, reviewable boundary for third-party tools before any
@@ -113,9 +114,10 @@ content. `scripts/check-wasm-examples.sh` builds the host and all example
 components, validates package boundaries, and runs the template/redactor smoke
 checks.
 
-Not yet implemented (later phases): full spec-conformant validation beyond the
-current host subset, floating-point conformance, and the broader WASI surface
-(files, sockets, clocks beyond realtime/monotonic).
+Not yet implemented (later phases): full spec-conformant validation and
+floating-point conformance against the official Wasm spec test suite beyond the
+current host subset, and the broader WASI surface (files, sockets, clocks
+beyond realtime/monotonic).
 
 ## Manifest
 

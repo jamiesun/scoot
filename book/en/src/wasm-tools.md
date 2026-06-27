@@ -2,8 +2,8 @@
 
 **Status: core static validation plus a standalone host.** The core `scoot`
 binary still does **not** load or execute Wasm, but the optional
-`scoot-wasm` binary can execute the current integer/WASI host subset when built
-with `-Dwasm-host=true`. The full reference is
+`scoot-wasm` binary can execute the current integer, floating-point, and WASI
+host subset when built with `-Dwasm-host=true`. The full reference is
 [`docs/WASM_TOOLS.md`](https://github.com/jamiesun/scoot/blob/main/docs/WASM_TOOLS.md); this is the overview.
 
 The goal is a small, local, **reviewable** boundary for third-party tools —

@@ -1,17 +1,19 @@
-//! W1 integer stack machine for Scoot's standalone `scoot-wasm` host.
+//! W1 integer stack machine plus W4 floating point for Scoot's standalone
+//! `scoot-wasm` host.
 //!
 //! This module loads a decoded Wasm module into a runnable form and executes
-//! integer functions: a stack machine with call frames and locals, structured
+//! functions: a stack machine with call frames and locals, structured
 //! control flow (block/loop/if/else/br/br_if/br_table/return/call/
-//! call_indirect), i32/i64 arithmetic, a single linear memory (64 KiB pages,
-//! bounds-checked load/store, memory.size/grow), globals, a funcref table for
-//! call_indirect, and active data/element segments.
+//! call_indirect), i32/i64 and f32/f64 arithmetic, comparisons, conversions
+//! (including saturating truncation), a single linear memory (64 KiB pages,
+//! bounds-checked load/store, memory.size/grow, bulk memory.copy/fill),
+//! globals, a funcref table for call_indirect, and active data/element
+//! segments.
 //!
 //! Safety is the point: every fault is a structured trap, never a panic. Fuel,
 //! call-depth, value-stack, and memory-page caps bound runaway or hostile
-//! modules. WASI, a full type validator, and floating point arithmetic are out
-//! of scope for W1 (later phases); float values are carried as opaque bits so
-//! integer code that merely moves them stays correct.
+//! modules. Float results are canonicalized on NaN so arithmetic stays
+//! deterministic across hosts, while abs/neg/copysign keep exact bit patterns.
 const std = @import("std");
 const wasm = std.wasm;
 
@@ -175,6 +177,7 @@ pub const Trap = error{
     Unsupported,
     TypeMismatch,
     GrowFailed,
+    BadConversion,
     MalformedBody,
     OutOfMemory,
     /// Clean WASI `proc_exit`: not a fault, unwound to the entry point.
@@ -1056,6 +1059,15 @@ const TypeValidator = struct {
     fn miscOp(self: *TypeValidator, body: []const u8, pc: *usize) LoadError!void {
         const sub = try readU32Load(body, pc);
         switch (sub) {
+            // ---- saturating float-to-int truncation ----
+            0...3 => { // i32.trunc_sat_f32/f64_s/u
+                if (sub < 2) try self.popType(.f32) else try self.popType(.f64);
+                try self.pushType(.i32);
+            },
+            4...7 => { // i64.trunc_sat_f32/f64_s/u
+                if (sub < 6) try self.popType(.f32) else try self.popType(.f64);
+                try self.pushType(.i64);
+            },
             10 => {
                 try self.requireMemory();
                 const dst_mem = try readByteLoad(body, pc);
@@ -1146,6 +1158,79 @@ const TypeValidator = struct {
             0xC2...0xC4 => {
                 try self.popType(.i64);
                 try self.pushType(.i64);
+            },
+            // ---- f32/f64 comparisons ----
+            0x5B...0x60 => { // f32 eq ne lt gt le ge
+                try self.popType(.f32);
+                try self.popType(.f32);
+                try self.pushType(.i32);
+            },
+            0x61...0x66 => { // f64 eq ne lt gt le ge
+                try self.popType(.f64);
+                try self.popType(.f64);
+                try self.pushType(.i32);
+            },
+            // ---- f32 unary / binary ----
+            0x8B...0x91 => { // f32 abs neg ceil floor trunc nearest sqrt
+                try self.popType(.f32);
+                try self.pushType(.f32);
+            },
+            0x92...0x98 => { // f32 add sub mul div min max copysign
+                try self.popType(.f32);
+                try self.popType(.f32);
+                try self.pushType(.f32);
+            },
+            // ---- f64 unary / binary ----
+            0x99...0x9F => { // f64 abs neg ceil floor trunc nearest sqrt
+                try self.popType(.f64);
+                try self.pushType(.f64);
+            },
+            0xA0...0xA6 => { // f64 add sub mul div min max copysign
+                try self.popType(.f64);
+                try self.popType(.f64);
+                try self.pushType(.f64);
+            },
+            // ---- trapping float-to-int truncation ----
+            0xA8, 0xA9 => { // i32.trunc_f32_s/u
+                try self.popType(.f32);
+                try self.pushType(.i32);
+            },
+            0xAA, 0xAB => { // i32.trunc_f64_s/u
+                try self.popType(.f64);
+                try self.pushType(.i32);
+            },
+            0xAE, 0xAF => { // i64.trunc_f32_s/u
+                try self.popType(.f32);
+                try self.pushType(.i64);
+            },
+            0xB0, 0xB1 => { // i64.trunc_f64_s/u
+                try self.popType(.f64);
+                try self.pushType(.i64);
+            },
+            // ---- int-to-float conversions ----
+            0xB2, 0xB3 => { // f32.convert_i32_s/u
+                try self.popType(.i32);
+                try self.pushType(.f32);
+            },
+            0xB4, 0xB5 => { // f32.convert_i64_s/u
+                try self.popType(.i64);
+                try self.pushType(.f32);
+            },
+            0xB6 => { // f32.demote_f64
+                try self.popType(.f64);
+                try self.pushType(.f32);
+            },
+            0xB7, 0xB8 => { // f64.convert_i32_s/u
+                try self.popType(.i32);
+                try self.pushType(.f64);
+            },
+            0xB9, 0xBA => { // f64.convert_i64_s/u
+                try self.popType(.i64);
+                try self.pushType(.f64);
+            },
+            0xBB => { // f64.promote_f32
+                try self.popType(.f32);
+                try self.pushType(.f64);
             },
             else => return self.fail(),
         }
@@ -2135,9 +2220,59 @@ pub const Instance = struct {
         };
     }
 
+    fn popF32(self: *Instance) Trap!f32 {
+        return @bitCast(try self.popF32Bits());
+    }
+
+    fn popF64(self: *Instance) Trap!f64 {
+        return @bitCast(try self.popF64Bits());
+    }
+
+    fn pushF32(self: *Instance, x: f32) Trap!void {
+        try self.push(.{ .f32 = @bitCast(x) });
+    }
+
+    fn pushF64(self: *Instance, x: f64) Trap!void {
+        try self.push(.{ .f64 = @bitCast(x) });
+    }
+
+    /// Non-saturating float-to-int truncation: traps on NaN and out-of-range
+    /// values, matching the Wasm `iNN.trunc_fMM_s/u` semantics.
+    fn truncToInt(self: *Instance, comptime I: type, comptime F: type, x: F) Trap!I {
+        if (std.math.isNan(x)) {
+            self.setTrap("invalid conversion to integer");
+            return error.BadConversion;
+        }
+        const info = @typeInfo(I).int;
+        if (info.signedness == .signed) {
+            const min_f: F = @floatFromInt(std.math.minInt(I));
+            const lim_f: F = -min_f; // 2^(bits-1), exactly representable
+            if (!(x >= min_f and x < lim_f)) {
+                self.setTrap("integer overflow");
+                return error.IntOverflow;
+            }
+        } else {
+            const lim_f: F = @floatFromInt(@as(u128, 1) << info.bits); // 2^bits
+            if (!(x > -1.0 and x < lim_f)) {
+                self.setTrap("integer overflow");
+                return error.IntOverflow;
+            }
+        }
+        return @intFromFloat(@trunc(x));
+    }
+
     fn miscOp(self: *Instance, body: []const u8, pc: *usize) Trap!void {
         const sub = try readU32(body, pc);
         switch (sub) {
+            // ---- saturating float-to-int truncation (no immediates) ----
+            0 => try self.push(.{ .i32 = floatToIntSat(i32, f32, try self.popF32()) }), // i32.trunc_sat_f32_s
+            1 => try self.push(.{ .i32 = @bitCast(floatToIntSat(u32, f32, try self.popF32())) }), // i32.trunc_sat_f32_u
+            2 => try self.push(.{ .i32 = floatToIntSat(i32, f64, try self.popF64()) }), // i32.trunc_sat_f64_s
+            3 => try self.push(.{ .i32 = @bitCast(floatToIntSat(u32, f64, try self.popF64())) }), // i32.trunc_sat_f64_u
+            4 => try self.push(.{ .i64 = floatToIntSat(i64, f32, try self.popF32()) }), // i64.trunc_sat_f32_s
+            5 => try self.push(.{ .i64 = @bitCast(floatToIntSat(u64, f32, try self.popF32())) }), // i64.trunc_sat_f32_u
+            6 => try self.push(.{ .i64 = floatToIntSat(i64, f64, try self.popF64()) }), // i64.trunc_sat_f64_s
+            7 => try self.push(.{ .i64 = @bitCast(floatToIntSat(u64, f64, try self.popF64())) }), // i64.trunc_sat_f64_u
             10 => { // memory.copy
                 _ = try readByte(body, pc);
                 _ = try readByte(body, pc);
@@ -2251,8 +2386,82 @@ pub const Instance = struct {
             0xC2 => try self.push(.{ .i64 = @as(i8, @truncate(try self.popI64())) }), // i64.extend8_s
             0xC3 => try self.push(.{ .i64 = @as(i16, @truncate(try self.popI64())) }), // i64.extend16_s
             0xC4 => try self.push(.{ .i64 = @as(i32, @truncate(try self.popI64())) }), // i64.extend32_s
+            // ---- f32 comparisons ----
+            0x5B => try self.cmpF32(.eq),
+            0x5C => try self.cmpF32(.ne),
+            0x5D => try self.cmpF32(.lt),
+            0x5E => try self.cmpF32(.gt),
+            0x5F => try self.cmpF32(.le),
+            0x60 => try self.cmpF32(.ge),
+            // ---- f64 comparisons ----
+            0x61 => try self.cmpF64(.eq),
+            0x62 => try self.cmpF64(.ne),
+            0x63 => try self.cmpF64(.lt),
+            0x64 => try self.cmpF64(.gt),
+            0x65 => try self.cmpF64(.le),
+            0x66 => try self.cmpF64(.ge),
+            // ---- f32 unary ----
+            0x8B => try self.push(.{ .f32 = try self.popF32Bits() & 0x7FFF_FFFF }), // abs
+            0x8C => try self.push(.{ .f32 = try self.popF32Bits() ^ 0x8000_0000 }), // neg
+            0x8D => try self.pushF32(canonFloat(f32, @ceil(try self.popF32()))),
+            0x8E => try self.pushF32(canonFloat(f32, @floor(try self.popF32()))),
+            0x8F => try self.pushF32(canonFloat(f32, @trunc(try self.popF32()))),
+            0x90 => try self.pushF32(canonFloat(f32, nearestEven(f32, try self.popF32()))),
+            0x91 => try self.pushF32(canonFloat(f32, @sqrt(try self.popF32()))),
+            // ---- f32 binary ----
+            0x92 => try self.binF32(.add),
+            0x93 => try self.binF32(.sub),
+            0x94 => try self.binF32(.mul),
+            0x95 => try self.binF32(.div),
+            0x96 => try self.binF32(.min),
+            0x97 => try self.binF32(.max),
+            0x98 => { // copysign: magnitude of a, sign of b
+                const b = try self.popF32Bits();
+                const a = try self.popF32Bits();
+                try self.push(.{ .f32 = (a & 0x7FFF_FFFF) | (b & 0x8000_0000) });
+            },
+            // ---- f64 unary ----
+            0x99 => try self.push(.{ .f64 = try self.popF64Bits() & 0x7FFF_FFFF_FFFF_FFFF }), // abs
+            0x9A => try self.push(.{ .f64 = try self.popF64Bits() ^ 0x8000_0000_0000_0000 }), // neg
+            0x9B => try self.pushF64(canonFloat(f64, @ceil(try self.popF64()))),
+            0x9C => try self.pushF64(canonFloat(f64, @floor(try self.popF64()))),
+            0x9D => try self.pushF64(canonFloat(f64, @trunc(try self.popF64()))),
+            0x9E => try self.pushF64(canonFloat(f64, nearestEven(f64, try self.popF64()))),
+            0x9F => try self.pushF64(canonFloat(f64, @sqrt(try self.popF64()))),
+            // ---- f64 binary ----
+            0xA0 => try self.binF64(.add),
+            0xA1 => try self.binF64(.sub),
+            0xA2 => try self.binF64(.mul),
+            0xA3 => try self.binF64(.div),
+            0xA4 => try self.binF64(.min),
+            0xA5 => try self.binF64(.max),
+            0xA6 => { // copysign
+                const b = try self.popF64Bits();
+                const a = try self.popF64Bits();
+                try self.push(.{ .f64 = (a & 0x7FFF_FFFF_FFFF_FFFF) | (b & 0x8000_0000_0000_0000) });
+            },
+            // ---- trapping float-to-int truncation ----
+            0xA8 => try self.push(.{ .i32 = try self.truncToInt(i32, f32, try self.popF32()) }),
+            0xA9 => try self.push(.{ .i32 = @bitCast(try self.truncToInt(u32, f32, try self.popF32())) }),
+            0xAA => try self.push(.{ .i32 = try self.truncToInt(i32, f64, try self.popF64()) }),
+            0xAB => try self.push(.{ .i32 = @bitCast(try self.truncToInt(u32, f64, try self.popF64())) }),
+            0xAE => try self.push(.{ .i64 = try self.truncToInt(i64, f32, try self.popF32()) }),
+            0xAF => try self.push(.{ .i64 = @bitCast(try self.truncToInt(u64, f32, try self.popF32())) }),
+            0xB0 => try self.push(.{ .i64 = try self.truncToInt(i64, f64, try self.popF64()) }),
+            0xB1 => try self.push(.{ .i64 = @bitCast(try self.truncToInt(u64, f64, try self.popF64())) }),
+            // ---- int-to-float conversions ----
+            0xB2 => try self.pushF32(@floatFromInt(try self.popI32())), // f32.convert_i32_s
+            0xB3 => try self.pushF32(@floatFromInt(@as(u32, @bitCast(try self.popI32())))), // f32.convert_i32_u
+            0xB4 => try self.pushF32(@floatFromInt(try self.popI64())), // f32.convert_i64_s
+            0xB5 => try self.pushF32(@floatFromInt(@as(u64, @bitCast(try self.popI64())))), // f32.convert_i64_u
+            0xB6 => try self.pushF32(canonFloat(f32, @floatCast(try self.popF64()))), // f32.demote_f64
+            0xB7 => try self.pushF64(@floatFromInt(try self.popI32())), // f64.convert_i32_s
+            0xB8 => try self.pushF64(@floatFromInt(@as(u32, @bitCast(try self.popI32())))), // f64.convert_i32_u
+            0xB9 => try self.pushF64(@floatFromInt(try self.popI64())), // f64.convert_i64_s
+            0xBA => try self.pushF64(@floatFromInt(@as(u64, @bitCast(try self.popI64())))), // f64.convert_i64_u
+            0xBB => try self.pushF64(canonFloat(f64, @floatCast(try self.popF32()))), // f64.promote_f32
             else => {
-                self.setTrap("unsupported numeric opcode (likely floating point, a later phase)");
+                self.setTrap("unsupported numeric opcode");
                 return error.Unsupported;
             },
         }
@@ -2388,7 +2597,125 @@ pub const Instance = struct {
         self.setTrap("integer overflow");
         return error.IntOverflow;
     }
+
+    const FCmp = enum { eq, ne, lt, gt, le, ge };
+    const FBin = enum { add, sub, mul, div, min, max };
+
+    fn cmpF32(self: *Instance, comptime c: FCmp) Trap!void {
+        const b = try self.popF32();
+        const a = try self.popF32();
+        try self.push(.{ .i32 = b2i(floatCompare(c, a, b)) });
+    }
+
+    fn cmpF64(self: *Instance, comptime c: FCmp) Trap!void {
+        const b = try self.popF64();
+        const a = try self.popF64();
+        try self.push(.{ .i32 = b2i(floatCompare(c, a, b)) });
+    }
+
+    fn binF32(self: *Instance, comptime op: FBin) Trap!void {
+        const b = try self.popF32();
+        const a = try self.popF32();
+        try self.pushF32(floatBinary(f32, op, a, b));
+    }
+
+    fn binF64(self: *Instance, comptime op: FBin) Trap!void {
+        const b = try self.popF64();
+        const a = try self.popF64();
+        try self.pushF64(floatBinary(f64, op, a, b));
+    }
 };
+
+fn floatCompare(comptime c: Instance.FCmp, a: anytype, b: @TypeOf(a)) bool {
+    // NaN-involving comparisons follow IEEE 754 / Wasm: all but `ne` are false.
+    return switch (c) {
+        .eq => a == b,
+        .ne => a != b,
+        .lt => a < b,
+        .gt => a > b,
+        .le => a <= b,
+        .ge => a >= b,
+    };
+}
+
+fn floatBinary(comptime F: type, comptime op: Instance.FBin, a: F, b: F) F {
+    return switch (op) {
+        .add => canonFloat(F, a + b),
+        .sub => canonFloat(F, a - b),
+        .mul => canonFloat(F, a * b),
+        .div => canonFloat(F, a / b),
+        .min => fmin(F, a, b),
+        .max => fmax(F, a, b),
+    };
+}
+
+/// Canonical quiet NaN for `F` (positive sign, payload MSB set).
+fn canonNan(comptime F: type) F {
+    return switch (F) {
+        f32 => @bitCast(@as(u32, 0x7FC0_0000)),
+        f64 => @bitCast(@as(u64, 0x7FF8_0000_0000_0000)),
+        else => @compileError("unsupported float type"),
+    };
+}
+
+/// Replaces any NaN result with the canonical NaN so arithmetic stays
+/// deterministic across hosts; non-NaN values pass through unchanged.
+fn canonFloat(comptime F: type, x: F) F {
+    return if (std.math.isNan(x)) canonNan(F) else x;
+}
+
+/// Round to nearest, ties to even, preserving the sign of zero. Matches the
+/// Wasm `fNN.nearest` semantics (not `@round`, which rounds halves away).
+fn nearestEven(comptime F: type, x: F) F {
+    if (!std.math.isFinite(x) or x == 0) return x;
+    const t = @trunc(x);
+    const diff = x - t;
+    if (diff > 0.5) return t + 1;
+    if (diff < -0.5) return t - 1;
+    if (diff == 0.5 or diff == -0.5) {
+        const lo = @floor(x);
+        const hi = @ceil(x);
+        return if (@mod(lo, @as(F, 2)) == 0) lo else hi;
+    }
+    return t;
+}
+
+/// Wasm `fNN.min`: NaN-propagating, and min(+0,-0) == -0.
+fn fmin(comptime F: type, a: F, b: F) F {
+    if (std.math.isNan(a) or std.math.isNan(b)) return canonNan(F);
+    if (a == 0 and b == 0) {
+        return if (std.math.signbit(a) or std.math.signbit(b)) -@as(F, 0.0) else @as(F, 0.0);
+    }
+    return if (a < b) a else b;
+}
+
+/// Wasm `fNN.max`: NaN-propagating, and max(+0,-0) == +0.
+fn fmax(comptime F: type, a: F, b: F) F {
+    if (std.math.isNan(a) or std.math.isNan(b)) return canonNan(F);
+    if (a == 0 and b == 0) {
+        return if (std.math.signbit(a) and std.math.signbit(b)) -@as(F, 0.0) else @as(F, 0.0);
+    }
+    return if (a > b) a else b;
+}
+
+/// Saturating float-to-int truncation (`iNN.trunc_sat_fMM_s/u`): NaN maps to 0,
+/// out-of-range values clamp to the integer min/max.
+fn floatToIntSat(comptime I: type, comptime F: type, x: F) I {
+    if (std.math.isNan(x)) return 0;
+    const info = @typeInfo(I).int;
+    if (info.signedness == .signed) {
+        const min_f: F = @floatFromInt(std.math.minInt(I));
+        const lim_f: F = -min_f; // 2^(bits-1)
+        if (x < min_f) return std.math.minInt(I);
+        if (x >= lim_f) return std.math.maxInt(I);
+        return @intFromFloat(@trunc(x));
+    } else {
+        const lim_f: F = @floatFromInt(@as(u128, 1) << info.bits); // 2^bits
+        if (x < 0.0) return 0;
+        if (x >= lim_f) return std.math.maxInt(I);
+        return @intFromFloat(@trunc(x));
+    }
+}
 
 fn b2i(b: bool) i32 {
     return if (b) 1 else 0;
@@ -2652,6 +2979,54 @@ fn expectI64(outcome: RunOutcome, want: i64) !void {
         .ok => |vals| {
             try testing.expectEqual(@as(usize, 1), vals.len);
             try testing.expectEqual(want, vals[0].i64);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+fn expectF32(outcome: RunOutcome, want: f32) !void {
+    switch (outcome) {
+        .ok => |vals| {
+            try testing.expectEqual(@as(usize, 1), vals.len);
+            const got: f32 = @bitCast(vals[0].f32);
+            try testing.expectEqual(want, got);
+        },
+        .trap => |m| {
+            std.debug.print("unexpected trap: {s}\n", .{m});
+            return error.TestUnexpectedTrap;
+        },
+        .load_error => |m| {
+            std.debug.print("unexpected load error: {s}\n", .{m});
+            return error.TestUnexpectedLoadError;
+        },
+    }
+}
+
+fn expectF64(outcome: RunOutcome, want: f64) !void {
+    switch (outcome) {
+        .ok => |vals| {
+            try testing.expectEqual(@as(usize, 1), vals.len);
+            const got: f64 = @bitCast(vals[0].f64);
+            try testing.expectEqual(want, got);
+        },
+        .trap => |m| {
+            std.debug.print("unexpected trap: {s}\n", .{m});
+            return error.TestUnexpectedTrap;
+        },
+        .load_error => |m| {
+            std.debug.print("unexpected load error: {s}\n", .{m});
+            return error.TestUnexpectedLoadError;
+        },
+    }
+}
+
+/// Returns the raw u32 bits of the single f32 result (so NaN payloads and the
+/// sign of zero can be asserted exactly).
+fn f32Bits(outcome: RunOutcome) !u32 {
+    switch (outcome) {
+        .ok => |vals| {
+            try testing.expectEqual(@as(usize, 1), vals.len);
+            return vals[0].f32;
         },
         else => return error.TestUnexpectedResult,
     }
@@ -3731,4 +4106,356 @@ test "wasi: imported call without host traps via runExport" {
         null,
     );
     try expectTrap(runExport(a, bytes, "_start", &.{}, .{}));
+}
+
+// ---------------------------------------------------------------------------
+// W4: floating point arithmetic, comparisons, conversions, and trunc_sat.
+// ---------------------------------------------------------------------------
+
+test "f64.add of two parameters" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const b = Builder{
+        .a = a,
+        .params = &.{ 0x7C, 0x7C },
+        .results = &.{0x7C},
+        // (local.get 0)(local.get 1)(f64.add)(end)
+        .body = &.{ 0x00, 0x20, 0x00, 0x20, 0x01, 0xA0, 0x0B },
+    };
+    const bytes = try b.module();
+    const out = runExport(a, bytes, "f", &.{
+        .{ .f64 = @bitCast(@as(f64, 1.5)) },
+        .{ .f64 = @bitCast(@as(f64, 2.25)) },
+    }, .{});
+    try expectF64(out, 3.75);
+}
+
+test "f32.sqrt and f32.div" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // (local.get 0)(f32.sqrt)(end)
+    const sqrt = Builder{
+        .a = a,
+        .params = &.{0x7D},
+        .results = &.{0x7D},
+        .body = &.{ 0x00, 0x20, 0x00, 0x91, 0x0B },
+    };
+    try expectF32(runExport(a, try sqrt.module(), "f", &.{.{ .f32 = @bitCast(@as(f32, 16.0)) }}, .{}), 4.0);
+
+    // (local.get 0)(local.get 1)(f32.div)(end)
+    const div = Builder{
+        .a = a,
+        .params = &.{ 0x7D, 0x7D },
+        .results = &.{0x7D},
+        .body = &.{ 0x00, 0x20, 0x00, 0x20, 0x01, 0x95, 0x0B },
+    };
+    try expectF32(runExport(a, try div.module(), "f", &.{
+        .{ .f32 = @bitCast(@as(f32, 7.0)) },
+        .{ .f32 = @bitCast(@as(f32, 2.0)) },
+    }, .{}), 3.5);
+}
+
+test "f32.min keeps the sign of zero" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // (local.get 0)(local.get 1)(f32.min)(end)
+    const b = Builder{
+        .a = a,
+        .params = &.{ 0x7D, 0x7D },
+        .results = &.{0x7D},
+        .body = &.{ 0x00, 0x20, 0x00, 0x20, 0x01, 0x96, 0x0B },
+    };
+    const bytes = try b.module();
+    // min(-0, +0) == -0  (bit pattern 0x80000000)
+    const bits = try f32Bits(runExport(a, bytes, "f", &.{
+        .{ .f32 = 0x8000_0000 },
+        .{ .f32 = 0x0000_0000 },
+    }, .{}));
+    try testing.expectEqual(@as(u32, 0x8000_0000), bits);
+}
+
+test "f32.neg flips the sign bit of a NaN exactly" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // (local.get 0)(f32.neg)(end)
+    const b = Builder{
+        .a = a,
+        .params = &.{0x7D},
+        .results = &.{0x7D},
+        .body = &.{ 0x00, 0x20, 0x00, 0x8C, 0x0B },
+    };
+    const bytes = try b.module();
+    // neg is a pure bit op: 0x7FC00001 (a NaN) -> 0xFFC00001, not canonicalized.
+    const bits = try f32Bits(runExport(a, bytes, "f", &.{.{ .f32 = 0x7FC0_0001 }}, .{}));
+    try testing.expectEqual(@as(u32, 0xFFC0_0001), bits);
+}
+
+test "f64.nearest rounds halves to even" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // (local.get 0)(f64.nearest)(end)
+    const b = Builder{
+        .a = a,
+        .params = &.{0x7C},
+        .results = &.{0x7C},
+        .body = &.{ 0x00, 0x20, 0x00, 0x9E, 0x0B },
+    };
+    const bytes = try b.module();
+    try expectF64(runExport(a, bytes, "f", &.{.{ .f64 = @bitCast(@as(f64, 0.5)) }}, .{}), 0.0);
+    try expectF64(runExport(a, bytes, "f", &.{.{ .f64 = @bitCast(@as(f64, 1.5)) }}, .{}), 2.0);
+    try expectF64(runExport(a, bytes, "f", &.{.{ .f64 = @bitCast(@as(f64, 2.5)) }}, .{}), 2.0);
+    try expectF64(runExport(a, bytes, "f", &.{.{ .f64 = @bitCast(@as(f64, -2.5)) }}, .{}), -2.0);
+}
+
+test "f64 comparison with NaN yields false" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // (local.get 0)(local.get 1)(f64.lt)(end) -> i32
+    const b = Builder{
+        .a = a,
+        .params = &.{ 0x7C, 0x7C },
+        .results = &.{0x7F},
+        .body = &.{ 0x00, 0x20, 0x00, 0x20, 0x01, 0x63, 0x0B },
+    };
+    const bytes = try b.module();
+    const nan = std.math.nan(f64);
+    try expectI32(runExport(a, bytes, "f", &.{
+        .{ .f64 = @bitCast(nan) },
+        .{ .f64 = @bitCast(@as(f64, 1.0)) },
+    }, .{}), 0);
+    try expectI32(runExport(a, bytes, "f", &.{
+        .{ .f64 = @bitCast(@as(f64, 1.0)) },
+        .{ .f64 = @bitCast(@as(f64, 2.0)) },
+    }, .{}), 1);
+}
+
+test "i32.trunc_f64_s truncates toward zero" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // (local.get 0)(i32.trunc_f64_s)(end)
+    const b = Builder{
+        .a = a,
+        .params = &.{0x7C},
+        .results = &.{0x7F},
+        .body = &.{ 0x00, 0x20, 0x00, 0xAA, 0x0B },
+    };
+    const bytes = try b.module();
+    try expectI32(runExport(a, bytes, "f", &.{.{ .f64 = @bitCast(@as(f64, 3.9)) }}, .{}), 3);
+    try expectI32(runExport(a, bytes, "f", &.{.{ .f64 = @bitCast(@as(f64, -3.9)) }}, .{}), -3);
+}
+
+test "trap: i32.trunc_f64_s on NaN is an invalid conversion" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const b = Builder{
+        .a = a,
+        .params = &.{0x7C},
+        .results = &.{0x7F},
+        .body = &.{ 0x00, 0x20, 0x00, 0xAA, 0x0B },
+    };
+    const bytes = try b.module();
+    switch (runExport(a, bytes, "f", &.{.{ .f64 = @bitCast(std.math.nan(f64)) }}, .{})) {
+        .trap => |m| try testing.expect(std.mem.indexOf(u8, m, "invalid conversion") != null),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "trap: i32.trunc_f32_s overflows out of range" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // (local.get 0)(i32.trunc_f32_s)(end)
+    const b = Builder{
+        .a = a,
+        .params = &.{0x7D},
+        .results = &.{0x7F},
+        .body = &.{ 0x00, 0x20, 0x00, 0xA8, 0x0B },
+    };
+    const bytes = try b.module();
+    switch (runExport(a, bytes, "f", &.{.{ .f32 = @bitCast(@as(f32, 1e30)) }}, .{})) {
+        .trap => |m| try testing.expect(std.mem.indexOf(u8, m, "integer overflow") != null),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "i32.trunc_sat_f32_s saturates instead of trapping" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // (local.get 0)(i32.trunc_sat_f32_s = 0xFC 0x00)(end)
+    const b = Builder{
+        .a = a,
+        .params = &.{0x7D},
+        .results = &.{0x7F},
+        .body = &.{ 0x00, 0x20, 0x00, 0xFC, 0x00, 0x0B },
+    };
+    const bytes = try b.module();
+    try expectI32(runExport(a, bytes, "f", &.{.{ .f32 = @bitCast(@as(f32, 1e30)) }}, .{}), std.math.maxInt(i32));
+    try expectI32(runExport(a, bytes, "f", &.{.{ .f32 = @bitCast(@as(f32, -1e30)) }}, .{}), std.math.minInt(i32));
+    try expectI32(runExport(a, bytes, "f", &.{.{ .f32 = @bitCast(std.math.nan(f32)) }}, .{}), 0);
+}
+
+test "f64.convert_i32_s round-trips a small integer" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // (local.get 0)(f64.convert_i32_s = 0xB7)(end)
+    const b = Builder{
+        .a = a,
+        .params = &.{0x7F},
+        .results = &.{0x7C},
+        .body = &.{ 0x00, 0x20, 0x00, 0xB7, 0x0B },
+    };
+    const bytes = try b.module();
+    try expectF64(runExport(a, bytes, "f", &.{.{ .i32 = -42 }}, .{}), -42.0);
+}
+
+test "f64.const arithmetic with no parameters" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // body: (f64.const 1.5)(f64.const 2.5)(f64.add)(end)
+    var body: std.ArrayList(u8) = .empty;
+    try body.append(a, 0x00); // no locals
+    try body.append(a, 0x44); // f64.const
+    var buf: [8]u8 = undefined;
+    std.mem.writeInt(u64, &buf, @bitCast(@as(f64, 1.5)), .little);
+    try body.appendSlice(a, &buf);
+    try body.append(a, 0x44); // f64.const
+    std.mem.writeInt(u64, &buf, @bitCast(@as(f64, 2.5)), .little);
+    try body.appendSlice(a, &buf);
+    try body.append(a, 0xA0); // f64.add
+    try body.append(a, 0x0B); // end
+    const b = Builder{ .a = a, .results = &.{0x7C}, .body = body.items };
+    try expectF64(runExport(a, try b.module(), "f", &.{}, .{}), 4.0);
+}
+
+test "load error: static validator rejects f64.add on i32 operands" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // (local.get 0)(local.get 1)(f64.add)(end) but params are i32 -> type error
+    const b = Builder{
+        .a = a,
+        .params = &.{ 0x7F, 0x7F },
+        .results = &.{0x7C},
+        .body = &.{ 0x00, 0x20, 0x00, 0x20, 0x01, 0xA0, 0x0B },
+    };
+    const bytes = try b.module();
+    switch (runExport(a, bytes, "f", &.{ .{ .i32 = 1 }, .{ .i32 = 2 } }, .{})) {
+        .load_error => {},
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+// W4 robustness: the standalone host must reject malformed or hostile module
+// bytes with a structured outcome (load_error or trap) and must never panic,
+// loop unbounded, or attempt an implausible allocation. These tests feed
+// adversarial byte sequences and assert only that execution stays structured;
+// a crash would fail the test process itself.
+
+test "robustness: every truncated prefix of a valid module stays structured" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const b = Builder{
+        .a = a,
+        .params = &.{ 0x7F, 0x7F },
+        .results = &.{0x7F},
+        // (local.get 0)(local.get 1)(i32.add)(end)
+        .body = &.{ 0x00, 0x20, 0x00, 0x20, 0x01, 0x6A, 0x0B },
+    };
+    const full = try b.module();
+
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+    var i: usize = 0;
+    while (i < full.len) : (i += 1) {
+        _ = scratch.reset(.retain_capacity);
+        // The result is intentionally discarded: the assertion is that the call
+        // returns at all (no panic) for every strict prefix.
+        _ = runExport(scratch.allocator(), full[0..i], "f", &.{ .{ .i32 = 1 }, .{ .i32 = 2 } }, .{});
+    }
+    // The intact module still runs after the truncation sweep.
+    try expectI32(runExport(a, full, "f", &.{ .{ .i32 = 40 }, .{ .i32 = 2 } }, .{}), 42);
+}
+
+test "robustness: single-byte corruption of a valid module never crashes" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const b = Builder{
+        .a = a,
+        .params = &.{ 0x7F, 0x7F },
+        .results = &.{0x7F},
+        .body = &.{ 0x00, 0x20, 0x00, 0x20, 0x01, 0x6A, 0x0B },
+    };
+    const full = try b.module();
+
+    // Adversarial replacements: zero, a valtype byte, a continuation-bit byte,
+    // and an all-ones byte stress LEB128 decoding, index bounds, and opcodes.
+    const pokes = [_]u8{ 0x00, 0x7F, 0x80, 0xFF };
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+    var i: usize = 0;
+    while (i < full.len) : (i += 1) {
+        for (pokes) |p| {
+            _ = scratch.reset(.retain_capacity);
+            const sa = scratch.allocator();
+            const buf = try sa.dupe(u8, full);
+            buf[i] = p;
+            _ = runExport(sa, buf, "f", &.{ .{ .i32 = 1 }, .{ .i32 = 2 } }, .{});
+        }
+    }
+}
+
+test "robustness: deterministic random bytes never crash the loader" {
+    var scratch = std.heap.ArenaAllocator.init(testing.allocator);
+    defer scratch.deinit();
+    var prng = std.Random.DefaultPrng.init(0x5c0017f10a7);
+    const rand = prng.random();
+    var iter: usize = 0;
+    while (iter < 1024) : (iter += 1) {
+        _ = scratch.reset(.retain_capacity);
+        const sa = scratch.allocator();
+        const len = rand.intRangeAtMost(usize, 0, 80);
+        const buf = try sa.alloc(u8, len);
+        rand.bytes(buf);
+        // Half the inputs carry a valid header so the section dispatch loop and
+        // LEB128 length parsing are exercised on otherwise-garbage payloads.
+        if (len >= header.len and (iter & 1) == 0) {
+            @memcpy(buf[0..header.len], header);
+        }
+        _ = runExport(sa, buf, "f", &.{}, .{});
+    }
+}
+
+test "load error: implausible vector length is rejected without crashing" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Type section: 1 function type whose param count claims 1024 entries, with
+    // no param bytes following. The loader must fail the decode instead of
+    // reading past the buffer.
+    const type_sec = try sec(a, 1, &.{ 0x01, 0x60, 0x80, 0x08 });
+    const bytes = try std.mem.concat(a, u8, &.{ header, type_sec });
+    try expectLoadError(runExport(a, bytes, "f", &.{}, .{}));
+}
+
+test "load error: section length overruns the module is rejected" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // A type section header that declares 0x7E payload bytes but supplies only a
+    // couple. The cursor `take` must reject the overrun rather than read OOB.
+    const bytes = try std.mem.concat(a, u8, &.{ header, &[_]u8{ 0x01, 0x7E, 0x01, 0x60 } });
+    try expectLoadError(runExport(a, bytes, "f", &.{}, .{}));
 }
