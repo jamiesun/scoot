@@ -16,8 +16,12 @@ heading when cutting a release.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-27
+
 ### Added
 
+- Added a committed `playground/` test environment that exercises full action
+  coverage end-to-end against a real backend (#161).
 - `scoot-wasm` now executes floating-point Wasm (W4): f32/f64 arithmetic
   (add/sub/mul/div), unary ops (abs/neg/ceil/floor/trunc/nearest/sqrt),
   min/max/copysign, ordered comparisons, int/float conversions, and both
@@ -93,6 +97,15 @@ heading when cutting a release.
 - Dropped the `-small` (`ReleaseSmall`) release artifacts and the installer's
   `SCOOT_INSTALL_FLAVOR` variable. `install.sh` now downloads the single
   published flavor.
+- Narrowed the Wasm plugin sandbox to stdin/stdout/stderr/argv as a new hard
+  rule: no filesystem, network, clock, or randomness authority (#164).
+
+### Documentation
+
+- Rewrote the README to be human-friendly and concept-first, and refreshed the
+  infographic with an isometric hero image (#160, #165).
+- Removed the redundant README language link and translated remaining Chinese
+  comments and strings to English (#146, #153).
 
 ## [0.4.0] - 2026-06-26
 
@@ -267,7 +280,8 @@ First feature release since `v0.0.2` (which only carried release-workflow plumbi
 
 - Polished homepage/license metadata, infographic, bilingual user guide (#6, #19, #36)
 
-[Unreleased]: https://github.com/jamiesun/scoot/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/jamiesun/scoot/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/jamiesun/scoot/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jamiesun/scoot/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jamiesun/scoot/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jamiesun/scoot/compare/v0.1.0...v0.2.0

@@ -280,8 +280,8 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/')
     env:
-      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      DOCKERHUB_USERNAME: ${{ secrets.SCOOT_DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.SCOOT_DOCKERHUB_TOKEN }}
     strategy:
       fail-fast: false
       matrix:
