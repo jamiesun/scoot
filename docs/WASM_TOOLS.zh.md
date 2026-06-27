@@ -62,18 +62,19 @@ stdout/stderr，并以模块的 `proc_exit` 状态退出（`_start` 正常返回
 外部压缩插件的子进程 host：核心通过 `scoot-wasm wasi <component>` 调用，并在 stdio 上走
 JSON 进 / JSON 出的插件协议。
 
-仅暴露一个刻意收窄的 WASI preview1 表面，使模块按构造无法获得环境权限：
+暴露的 WASI preview1 表面刻意极小：插件是纯数据变换，唯一通道是 stdin、stdout/stderr、
+argv 与退出码。按构造它拿不到任何环境权限：
 
-- `args_sizes_get` / `args_get`、`environ_sizes_get` / `environ_get`
-- `fd_read`（仅 fd 0）、`fd_write`（仅 fd 1/2）、`fd_close`、`fd_seek`
-  （stdio 不可 seek → `ESPIPE`）、`fd_fdstat_get`（stdio 字符设备）
-- `clock_time_get`（realtime/monotonic）、`random_get`（带种子、确定性）
+- `args_sizes_get` / `args_get`（argv，唯一的配置通道）
+- `fd_read`（仅 fd 0 / stdin）、`fd_write`（仅 fd 1/2 / stdout+stderr）
 - `proc_exit`
 
-host 不暴露自身环境变量（environ 默认为空），也不实现任何文件 / 网络函数：其余 WASI
-import 一旦被调用即 trap；越界的 guest 指针返回 `EFAULT` 而非破坏 host 内存；非法文件
-描述符返回 `EBADF`。资源使用受与 `run` 相同的 fuel / 调用深度 / 内存页上限约束，核心还会
-为该子进程套一层硬性墙钟超时。
+host 不暴露环境变量、时钟或随机数，也不实现任何文件/网络函数：`environ_*`、
+`clock_time_get`、`random_get` 以及其余所有 WASI import 都会被视为 `unsupported` 并在调用
+时 trap。这使插件输出保持为 `(stdin, argv)` 的纯函数：若插件需要时间戳、种子或
+nonce，由 host 作为输入字节传入，而不是通过环境 syscall。向非 stdio 描述符写入返回
+`EBADF`；越界的 guest 指针返回 `EFAULT` 而非破坏 host 内存。资源使用受与 `run` 相同的
+fuel / 调用深度 / 内存页上限约束，核心还会为该子进程套一层硬性墙钟超时。
 
 仓库内置了可运行的压缩插件包和一个可复制模板：
 
@@ -94,8 +95,8 @@ printf '%s\n' '{"version":1,"kind":"compressor","keep_recent":2,"elided_count":3
 template / redactor smoke checks。
 
 尚未实现（后续阶段）：针对官方 Wasm spec 测试套件、超出当前 host 子集的完整 spec
-一致验证与浮点一致性测试，以及更大的 WASI 表面（文件、套接字、realtime/monotonic
-之外的时钟）。
+一致验证与浮点一致性测试，以及更大的 WASI 表面（文件、套接字、环境变量、时钟、
+随机数）——纯数据变换沙箱按设计排除这些。
 
 ## Manifest
 
@@ -138,7 +139,7 @@ policy 能力必须是 manifest 能力的子集，避免工具包静默获得自
 - `net_write`：外向写类网络访问。
 
 第一阶段纯工具应主要使用 `compute`。package capability 仍只是准入元数据：独立 host
-当前只暴露 stdio/args/environ/clock/random/proc-exit，不会把 `read`、`write`、
+当前只暴露 stdin/stdout/stderr/argv/proc-exit 子集，不会把 `read`、`write`、
 `net_read` 或 `net_write` 映射成文件、环境变量或网络权限。
 
 ## Agent 调用

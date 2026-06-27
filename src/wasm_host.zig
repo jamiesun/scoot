@@ -21,9 +21,10 @@ const usage =
     \\not provide WASI, so a function that imports host functions will trap.
     \\`wasi` runs a wasm32-wasi command module (its `_start` export) with a
     \\minimal WASI preview1 subset: stdin is read from this process's stdin,
-    \\stdout/stderr are forwarded, and `proc_exit` sets the exit code. Only
-    \\stdio, args, environ, clock, and random are exposed; files and network are
-    \\not implemented.
+    \\stdout/stderr are forwarded, and `proc_exit` sets the exit code. The only
+    \\channels are stdin, stdout/stderr, argv, and the exit code; environment,
+    \\clock, randomness, files, and network are not exposed, so a plugin's output
+    \\is a pure function of its stdin and argv.
     \\
 ;
 
@@ -193,12 +194,6 @@ fn failErr(errw: *std.Io.Writer, path: []const u8, msg: []const u8) noreturn {
     std.process.exit(1);
 }
 
-fn nanosToU64(ns: i96) u64 {
-    if (ns <= 0) return 0;
-    const u: u96 = @intCast(ns);
-    return @truncate(u);
-}
-
 fn wasiCommand(
     arena: std.mem.Allocator,
     io: std.Io,
@@ -232,19 +227,12 @@ fn wasiCommand(
     try argv.append(arena, path);
     for (args[3..]) |a| try argv.append(arena, a);
 
-    const real_ns: u64 = nanosToU64(std.Io.Timestamp.now(io, .real).nanoseconds);
-    const mono_ns: u64 = nanosToU64(std.Io.Timestamp.now(io, .awake).nanoseconds);
-
     var stdout_sink: std.ArrayList(u8) = .empty;
     var stderr_sink: std.ArrayList(u8) = .empty;
 
     const result = wasm_engine.runWasi(arena, bytes, &stdout_sink, &stderr_sink, .{
         .stdin = stdin_bytes,
         .args = argv.items,
-        .env = &.{}, // capability safety: host environment is not exposed
-        .clock_realtime_ns = real_ns,
-        .clock_monotonic_ns = mono_ns,
-        .random_seed = real_ns ^ (mono_ns << 1) ^ 0x9E3779B97F4A7C15,
     });
 
     // Forward whatever the module produced before reporting the outcome.

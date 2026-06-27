@@ -82,8 +82,8 @@ capabilities = ["compute"]
 ```
 
 能力名：`compute`（纯 CPU，无 I/O）、`read`、`write`、`net_read`、`net_write`。独立 host
-当前只暴露最小 WASI preview1 的 stdio/args/environ/clock/random/proc-exit 子集；文件与网络权限
-尚未实现。
+当前只暴露最小 WASI preview1 的 stdin/stdout/stderr/argv/proc-exit 子集；环境变量、时钟、
+随机数、文件与网络权限均未实现。
 
 ## Agent 调用
 

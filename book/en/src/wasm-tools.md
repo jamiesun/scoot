@@ -95,8 +95,8 @@ capabilities = ["compute"]
 
 Capability names: `compute` (CPU-only, no I/O), `read`, `write`, `net_read`,
 `net_write`. The standalone host currently exposes only a minimal WASI preview1
-stdio/args/environ/clock/random/proc-exit subset; filesystem and network
-authority are not implemented.
+stdin/stdout/stderr/argv/proc-exit subset; environment, clock, randomness,
+filesystem, and network authority are not implemented.
 
 ## Agent Invocation
 

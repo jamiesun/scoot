@@ -46,22 +46,19 @@ pub const Value = union(enum) {
 // W2: minimal WASI preview1 subset.
 // ---------------------------------------------------------------------------
 
-/// The WASI preview1 function imports this host understands. Anything else
-/// (including the entire filesystem / network surface) is `unsupported`: it
-/// traps when called, so a hostile module gets no capability by construction.
+/// The WASI preview1 function imports this host understands. The plugin
+/// sandbox is a pure data transform: the only channels are stdin (`fd_read`
+/// on fd 0), stdout/stderr (`fd_write` on fd 1/2), argv (`args_*`), and the
+/// exit code (`proc_exit`). Everything else -- filesystem, network, the host
+/// environment, the clock, and randomness -- is `unsupported`: it traps when
+/// called, so a plugin's output stays a pure function of (stdin, argv) and a
+/// hostile module gets no ambient authority by construction.
 pub const WasiFn = enum {
     unsupported,
     args_sizes_get,
     args_get,
-    environ_sizes_get,
-    environ_get,
-    clock_time_get,
-    random_get,
     fd_write,
     fd_read,
-    fd_close,
-    fd_seek,
-    fd_fdstat_get,
     proc_exit,
 };
 
@@ -75,15 +72,8 @@ fn resolveWasiFn(module_name: []const u8, field: []const u8) WasiFn {
     const table = [_]struct { name: []const u8, fnc: WasiFn }{
         .{ .name = "args_sizes_get", .fnc = .args_sizes_get },
         .{ .name = "args_get", .fnc = .args_get },
-        .{ .name = "environ_sizes_get", .fnc = .environ_sizes_get },
-        .{ .name = "environ_get", .fnc = .environ_get },
-        .{ .name = "clock_time_get", .fnc = .clock_time_get },
-        .{ .name = "random_get", .fnc = .random_get },
         .{ .name = "fd_write", .fnc = .fd_write },
         .{ .name = "fd_read", .fnc = .fd_read },
-        .{ .name = "fd_close", .fnc = .fd_close },
-        .{ .name = "fd_seek", .fnc = .fd_seek },
-        .{ .name = "fd_fdstat_get", .fnc = .fd_fdstat_get },
         .{ .name = "proc_exit", .fnc = .proc_exit },
     };
     for (table) |e| {
@@ -98,8 +88,6 @@ const Errno = enum(i32) {
     badf = 8,
     fault = 21,
     inval = 28,
-    nosys = 52,
-    spipe = 70,
 
     fn code(self: Errno) i32 {
         return @intFromEnum(self);
@@ -120,6 +108,12 @@ const fd_stderr: u32 = 2;
 /// in-memory sinks the caller (the `scoot-wasm` host) drains afterwards. Time
 /// and randomness are seeded by the caller so runs stay deterministic and
 /// dependency-free.
+/// Host-side WASI state shared with the running instance. The engine never
+/// performs real IO itself: stdin is a fixed buffer and stdout/stderr are
+/// in-memory sinks the caller (the `scoot-wasm` host) drains afterwards. The
+/// surface is deliberately limited to stdin/stdout/stderr/argv and the exit
+/// code, with no clock or randomness, so a run is a pure function of its
+/// inputs.
 pub const Wasi = struct {
     stdin: []const u8 = &.{},
     stdin_pos: usize = 0,
@@ -127,22 +121,8 @@ pub const Wasi = struct {
     stderr: *std.ArrayList(u8),
     /// Each entry is a NUL-free argument; argv[0] is the program name.
     args: []const []const u8 = &.{},
-    /// Each entry is a `KEY=VALUE` string (no NUL).
-    env: []const []const u8 = &.{},
     alloc: std.mem.Allocator,
     exit_code: u32 = 0,
-    clock_realtime_ns: u64 = 0,
-    clock_monotonic_ns: u64 = 0,
-    rng: u64 = 0x2545F4914F6CDD1D,
-
-    /// splitmix64; deterministic given the seed, no OS entropy.
-    fn nextRandom(self: *Wasi) u64 {
-        self.rng +%= 0x9E3779B97F4A7C15;
-        var z = self.rng;
-        z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9;
-        z = (z ^ (z >> 27)) *% 0x94D049BB133111EB;
-        return z ^ (z >> 31);
-    }
 };
 
 pub const Limits = struct {
@@ -1651,15 +1631,8 @@ pub const Instance = struct {
             },
             .args_sizes_get => try self.push(.{ .i32 = try self.wasiArgsSizesGet(w) }),
             .args_get => try self.push(.{ .i32 = try self.wasiArgsGet(w) }),
-            .environ_sizes_get => try self.push(.{ .i32 = try self.wasiEnvironSizesGet(w) }),
-            .environ_get => try self.push(.{ .i32 = try self.wasiEnvironGet(w) }),
-            .clock_time_get => try self.push(.{ .i32 = try self.wasiClockTimeGet(w) }),
-            .random_get => try self.push(.{ .i32 = try self.wasiRandomGet(w) }),
             .fd_write => try self.push(.{ .i32 = try self.wasiFdWrite(w) }),
             .fd_read => try self.push(.{ .i32 = try self.wasiFdRead(w) }),
-            .fd_close => try self.push(.{ .i32 = try self.wasiFdClose() }),
-            .fd_seek => try self.push(.{ .i32 = try self.wasiFdSeek() }),
-            .fd_fdstat_get => try self.push(.{ .i32 = try self.wasiFdFdstatGet() }),
         }
     }
 
@@ -1727,51 +1700,6 @@ pub const Instance = struct {
         return self.writeStringVec(w.args, vec_ptr, buf_ptr);
     }
 
-    fn wasiEnvironSizesGet(self: *Instance, w: *Wasi) Trap!i32 {
-        const buf_size_ptr = try self.popU32();
-        const count_ptr = try self.popU32();
-        return self.writeVecSizes(w.env, count_ptr, buf_size_ptr);
-    }
-
-    fn wasiEnvironGet(self: *Instance, w: *Wasi) Trap!i32 {
-        const buf_ptr = try self.popU32();
-        const vec_ptr = try self.popU32();
-        return self.writeStringVec(w.env, vec_ptr, buf_ptr);
-    }
-
-    fn wasiClockTimeGet(self: *Instance, w: *Wasi) Trap!i32 {
-        const time_ptr = try self.popU32();
-        _ = try self.popI64(); // precision (ignored)
-        const clock_id = try self.popU32();
-        const ns: u64 = switch (clock_id) {
-            0 => w.clock_realtime_ns, // realtime
-            1 => w.clock_monotonic_ns, // monotonic
-            else => return Errno.inval.code(),
-        };
-        self.memWriteU64(time_ptr, ns) catch return Errno.fault.code();
-        return Errno.success.code();
-    }
-
-    fn wasiRandomGet(self: *Instance, w: *Wasi) Trap!i32 {
-        const buf_len = try self.popU32();
-        const buf = try self.popU32();
-        const dst = self.memSliceMut(buf, buf_len) catch return Errno.fault.code();
-        var i: usize = 0;
-        while (i < dst.len) {
-            const r = w.nextRandom();
-            var shift: u6 = 0;
-            while (i < dst.len) : (i += 1) {
-                dst[i] = @truncate(r >> shift);
-                if (shift == 56) {
-                    i += 1;
-                    break;
-                }
-                shift += 8;
-            }
-        }
-        return Errno.success.code();
-    }
-
     fn wasiFdWrite(self: *Instance, w: *Wasi) Trap!i32 {
         const nwritten_ptr = try self.popU32();
         const iovs_len = try self.popU32();
@@ -1819,40 +1747,6 @@ pub const Instance = struct {
             if (n < dst.len) break :outer; // stdin exhausted mid-iovec
         }
         self.memWriteU32(nread_ptr, @intCast(total)) catch return Errno.fault.code();
-        return Errno.success.code();
-    }
-
-    fn wasiFdClose(self: *Instance) Trap!i32 {
-        const fd = try self.popU32();
-        return switch (fd) {
-            fd_stdin, fd_stdout, fd_stderr => Errno.success.code(),
-            else => Errno.badf.code(),
-        };
-    }
-
-    fn wasiFdSeek(self: *Instance) Trap!i32 {
-        _ = try self.popU32(); // newoffset_ptr
-        _ = try self.popU32(); // whence
-        _ = try self.popI64(); // offset
-        const fd = try self.popU32();
-        // stdio streams are not seekable.
-        return switch (fd) {
-            fd_stdin, fd_stdout, fd_stderr => Errno.spipe.code(),
-            else => Errno.badf.code(),
-        };
-    }
-
-    fn wasiFdFdstatGet(self: *Instance) Trap!i32 {
-        const stat_ptr = try self.popU32();
-        const fd = try self.popU32();
-        switch (fd) {
-            fd_stdin, fd_stdout, fd_stderr => {},
-            else => return Errno.badf.code(),
-        }
-        // fdstat is 24 bytes; fs_filetype is the first byte.
-        const buf = self.memSliceMut(stat_ptr, 24) catch return Errno.fault.code();
-        @memset(buf, 0);
-        buf[0] = 2; // __WASI_FILETYPE_CHARACTER_DEVICE
         return Errno.success.code();
     }
 
@@ -2831,14 +2725,6 @@ pub const WasiConfig = struct {
     stdin: []const u8 = &.{},
     /// argv; argv[0] is the program name.
     args: []const []const u8 = &.{},
-    /// environ; each entry is `KEY=VALUE`.
-    env: []const []const u8 = &.{},
-    /// Value returned by `clock_time_get(realtime)` in nanoseconds.
-    clock_realtime_ns: u64 = 0,
-    /// Value returned by `clock_time_get(monotonic)` in nanoseconds.
-    clock_monotonic_ns: u64 = 0,
-    /// Seed for the deterministic `random_get` generator.
-    random_seed: u64 = 0x2545F4914F6CDD1D,
     /// Exported entry point to run (WASI command modules use `_start`).
     entry: []const u8 = "_start",
     limits: Limits = .{},
@@ -2871,11 +2757,7 @@ pub fn runWasi(
         .stdout = stdout,
         .stderr = stderr,
         .args = cfg.args,
-        .env = cfg.env,
         .alloc = arena,
-        .clock_realtime_ns = cfg.clock_realtime_ns,
-        .clock_monotonic_ns = cfg.clock_monotonic_ns,
-        .rng = cfg.random_seed,
     };
     instance.wasi = &wasi;
 
@@ -3608,7 +3490,6 @@ fn runWasiTest(
     bytes: []const u8,
     stdin: []const u8,
     args: []const []const u8,
-    env: []const []const u8,
 ) WasiRun {
     const so = a.create(std.ArrayList(u8)) catch unreachable;
     const se = a.create(std.ArrayList(u8)) catch unreachable;
@@ -3617,10 +3498,6 @@ fn runWasiTest(
     const r = runWasi(a, bytes, so, se, .{
         .stdin = stdin,
         .args = args,
-        .env = env,
-        .clock_realtime_ns = 0x0102030405060708,
-        .clock_monotonic_ns = 0x1112131415161718,
-        .random_seed = 42,
     });
     return .{ .result = r, .stdout = so.items, .stderr = se.items };
 }
@@ -3715,7 +3592,7 @@ test "wasi: echo stdin to stdout via fd_read/fd_write" {
         &.{&body},
         null,
     );
-    const run = runWasiTest(a, bytes, "hello world", &.{"prog"}, &.{});
+    const run = runWasiTest(a, bytes, "hello world", &.{"prog"});
     try testing.expect(run.result == .exited);
     try testing.expectEqual(@as(u32, 0), run.result.exited);
     try testing.expectEqualStrings("hello world", run.stdout);
@@ -3736,7 +3613,7 @@ test "wasi: proc_exit sets exit code" {
         &.{&body},
         null,
     );
-    const run = runWasiTest(a, bytes, "", &.{"prog"}, &.{});
+    const run = runWasiTest(a, bytes, "", &.{"prog"});
     try testing.expect(run.result == .exited);
     try testing.expectEqual(@as(u32, 7), run.result.exited);
 }
@@ -3756,7 +3633,7 @@ test "wasi: normal return from _start exits 0" {
         &.{&body},
         null,
     );
-    const run = runWasiTest(a, bytes, "", &.{"prog"}, &.{});
+    const run = runWasiTest(a, bytes, "", &.{"prog"});
     try testing.expect(run.result == .exited);
     try testing.expectEqual(@as(u32, 0), run.result.exited);
 }
@@ -3801,216 +3678,129 @@ test "wasi: args round-trip via args_sizes_get/args_get" {
         null,
     );
     // argv[1] == "abc"
-    const run = runWasiTest(a, bytes, "", &.{ "prog", "abc" }, &.{});
+    const run = runWasiTest(a, bytes, "", &.{ "prog", "abc" });
     try testing.expect(run.result == .exited);
     try testing.expectEqualStrings("abc", run.stdout);
 }
 
-test "wasi: environ round-trip" {
+test "wasi: environ_get is unsupported and traps" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    // imports: 0 environ_get, 1 fd_write, 2 proc_exit ; _start = func 3.
-    const body = [_]u8{
-        0x00,
-        // environ_get(environ=256, buf=512); drop
-        0x41,
-        0x80,
-        0x02,
-        0x41,
-        0x80,
-        0x04,
-        0x10,
-        0x00,
-        0x1A,
-        // ciovec.buf = *environ[0] (ptr at 256), len = 7 ("FOO=bar")
-        0x41,
-        0x00,
-        0x41, 0x80, 0x02, 0x28, 0x02, 0x00, // load environ[0] ptr
-        0x36, 0x02, 0x00, 0x41, 0x04, 0x41,
-        0x07, 0x36, 0x02, 0x00, 0x41, 0x01,
-        0x41, 0x00, 0x41, 0x01, 0x41, 0x08,
-        0x10, 0x01, 0x1A, 0x41, 0x00, 0x10,
-        0x02, 0x0B,
-    };
+    // The host exposes no environment. Importing and calling environ_get must
+    // resolve to `unsupported` and trap, never silently return an empty environ.
+    // _start: environ_get(256, 512); drop; end.
+    const body = [_]u8{ 0x00, 0x41, 0x80, 0x02, 0x41, 0x80, 0x04, 0x10, 0x00, 0x1A, 0x0B };
     const bytes = try buildWasiModule(
         a,
-        &.{ sig_unit, sig_i32_i32, sig_i32x4, sig_proc_exit },
-        &.{
-            .{ .field = "environ_get", .type_idx = 1 },
-            .{ .field = "fd_write", .type_idx = 2 },
-            .{ .field = "proc_exit", .type_idx = 3 },
-        },
+        &.{ sig_unit, sig_i32_i32 },
+        &.{.{ .field = "environ_get", .type_idx = 1 }},
         &.{0},
         1,
-        &.{.{ .name = "_start", .index = 3 }},
+        &.{.{ .name = "_start", .index = 1 }},
         &.{&body},
         null,
     );
-    const run = runWasiTest(a, bytes, "", &.{"prog"}, &.{"FOO=bar"});
-    try testing.expect(run.result == .exited);
-    try testing.expectEqualStrings("FOO=bar", run.stdout);
+    const run = runWasiTest(a, bytes, "", &.{"prog"});
+    try testing.expect(run.result == .trap);
 }
 
-test "wasi: clock_time_get writes realtime nanoseconds" {
+test "wasi: clock_time_get is unsupported and traps" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    // imports: 0 clock_time_get, 1 fd_write, 2 proc_exit ; _start = func 3.
-    const body = [_]u8{
-        0x00,
-        // clock_time_get(id=0, precision=0, time_ptr=16); drop
-        0x41, 0x00, // id
-        0x42, 0x00, // i64.const 0 (precision)
-        0x41, 0x10, // time_ptr 16
-        0x10, 0x00,
-        0x1A,
-        // ciovec.buf = 16, len = 8 at addr 0
-        0x41,
-        0x00, 0x41,
-        0x10, 0x36,
-        0x02, 0x00,
-        0x41, 0x04,
-        0x41, 0x08,
-        0x36, 0x02,
-        0x00, 0x41,
-        0x01, 0x41,
-        0x00, 0x41,
-        0x01, 0x41,
-        0x28, 0x10,
-        0x01, 0x1A,
-        0x41, 0x00,
-        0x10, 0x02,
-        0x0B,
-    };
+    // No ambient clock: a plugin's output must be a pure function of its input,
+    // so calling clock_time_get traps instead of returning a host timestamp.
+    // _start: clock_time_get(0, 0, 16); drop; end.
+    const body = [_]u8{ 0x00, 0x41, 0x00, 0x42, 0x00, 0x41, 0x10, 0x10, 0x00, 0x1A, 0x0B };
     const bytes = try buildWasiModule(
         a,
-        &.{ sig_unit, sig_clock, sig_i32x4, sig_proc_exit },
-        &.{
-            .{ .field = "clock_time_get", .type_idx = 1 },
-            .{ .field = "fd_write", .type_idx = 2 },
-            .{ .field = "proc_exit", .type_idx = 3 },
-        },
+        &.{ sig_unit, sig_clock },
+        &.{.{ .field = "clock_time_get", .type_idx = 1 }},
         &.{0},
         1,
-        &.{.{ .name = "_start", .index = 3 }},
+        &.{.{ .name = "_start", .index = 1 }},
         &.{&body},
         null,
     );
-    const run = runWasiTest(a, bytes, "", &.{"prog"}, &.{});
-    try testing.expect(run.result == .exited);
-    var expected: [8]u8 = undefined;
-    std.mem.writeInt(u64, &expected, 0x0102030405060708, .little);
-    try testing.expectEqualSlices(u8, &expected, run.stdout);
+    const run = runWasiTest(a, bytes, "", &.{"prog"});
+    try testing.expect(run.result == .trap);
 }
 
-test "wasi: random_get is deterministic for a fixed seed" {
+test "wasi: random_get is unsupported and traps" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    // imports: 0 random_get, 1 fd_write, 2 proc_exit ; _start = func 3.
-    const body = [_]u8{
-        0x00,
-        // random_get(buf=16, len=8); drop
-        0x41,
-        0x10,
-        0x41,
-        0x08,
-        0x10,
-        0x00,
-        0x1A,
-        // ciovec.buf = 16, len = 8
-        0x41,
-        0x00,
-        0x41,
-        0x10,
-        0x36,
-        0x02,
-        0x00,
-        0x41,
-        0x04,
-        0x41,
-        0x08,
-        0x36,
-        0x02,
-        0x00,
-        0x41,
-        0x01,
-        0x41,
-        0x00,
-        0x41,
-        0x01,
-        0x41,
-        0x28,
-        0x10,
-        0x01,
-        0x1A,
-        0x41,
-        0x00,
-        0x10,
-        0x02,
-        0x0B,
-    };
+    // No entropy source is exposed: random_get traps rather than handing the
+    // plugin a (seeded or otherwise) random buffer.
+    // _start: random_get(16, 8); drop; end.
+    const body = [_]u8{ 0x00, 0x41, 0x10, 0x41, 0x08, 0x10, 0x00, 0x1A, 0x0B };
     const bytes = try buildWasiModule(
         a,
-        &.{ sig_unit, sig_i32_i32, sig_i32x4, sig_proc_exit },
-        &.{
-            .{ .field = "random_get", .type_idx = 1 },
-            .{ .field = "fd_write", .type_idx = 2 },
-            .{ .field = "proc_exit", .type_idx = 3 },
-        },
+        &.{ sig_unit, sig_i32_i32 },
+        &.{.{ .field = "random_get", .type_idx = 1 }},
         &.{0},
         1,
-        &.{.{ .name = "_start", .index = 3 }},
+        &.{.{ .name = "_start", .index = 1 }},
         &.{&body},
         null,
     );
-    const r1 = runWasiTest(a, bytes, "", &.{"prog"}, &.{});
-    const r2 = runWasiTest(a, bytes, "", &.{"prog"}, &.{});
-    try testing.expect(r1.result == .exited);
-    try testing.expectEqual(@as(usize, 8), r1.stdout.len);
-    try testing.expectEqualSlices(u8, r1.stdout, r2.stdout);
+    const run = runWasiTest(a, bytes, "", &.{"prog"});
+    try testing.expect(run.result == .trap);
 }
 
-test "wasi: bad fd returns errno observable in output" {
+test "wasi: write to a non-stdio fd returns EBADF" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    // imports: 0 fd_close (i32)->i32, 1 fd_write, 2 proc_exit ; _start = func 3.
-    const sig_i32_to_i32 = Sig{ .params = &.{0x7F}, .results = &.{0x7F} };
+    // imports: 0 fd_write, 1 proc_exit ; _start = func 2.
+    // errno = fd_write(5, 0, 0, 0) -> EBADF(8); echo the errno bytes to stdout.
     const body = [_]u8{
         0x00,
-        // errno = fd_close(5); store at addr 32 (fd 5 is not stdio -> EBADF)
-        0x41, 0x20, // addr 32
-        0x41, 0x05, 0x10, 0x00, // fd_close(5) -> errno
+        // store-addr 32; errno = fd_write(5, iovs=0, len=0, nwritten=0)
+        0x41,
+        0x20,
+        0x41,
+        0x05,
+        0x41,
+        0x00,
+        0x41,
+        0x00,
+        0x41,
+        0x00,
+        0x10,
+        0x00,
         0x36, 0x02, 0x00, // store errno at 32
-        // ciovec.buf = 32, len = 4
+        // ciovec.buf = 32 at addr 0, len = 4 at addr 4
         0x41, 0x00, 0x41,
         0x20, 0x36, 0x02,
         0x00, 0x41, 0x04,
         0x41, 0x04, 0x36,
-        0x02, 0x00, 0x41,
+        0x02, 0x00,
+        // fd_write(1, iovs=0, len=1, nwritten=8); drop
+        0x41,
         0x01, 0x41, 0x00,
         0x41, 0x01, 0x41,
-        0x08, 0x10, 0x01,
-        0x1A, 0x41, 0x00,
-        0x10, 0x02, 0x0B,
+        0x08, 0x10, 0x00,
+        0x1A,
+        // proc_exit(0)
+        0x41, 0x00,
+        0x10, 0x01, 0x0B,
     };
     const bytes = try buildWasiModule(
         a,
-        &.{ sig_unit, sig_proc_exit, sig_i32x4, sig_i32_to_i32 },
+        &.{ sig_unit, sig_proc_exit, sig_i32x4 },
         &.{
-            .{ .field = "fd_close", .type_idx = 3 },
             .{ .field = "fd_write", .type_idx = 2 },
             .{ .field = "proc_exit", .type_idx = 1 },
         },
         &.{0},
         1,
-        &.{.{ .name = "_start", .index = 3 }},
+        &.{.{ .name = "_start", .index = 2 }},
         &.{&body},
         null,
     );
-    const run = runWasiTest(a, bytes, "", &.{"prog"}, &.{});
+    const run = runWasiTest(a, bytes, "", &.{"prog"});
     try testing.expect(run.result == .exited);
     var expected: [4]u8 = undefined;
     std.mem.writeInt(u32, &expected, 8, .little); // EBADF
@@ -4057,7 +3847,7 @@ test "wasi: out-of-bounds pointer yields EFAULT" {
         &.{&body},
         null,
     );
-    const run = runWasiTest(a, bytes, "", &.{"prog"}, &.{});
+    const run = runWasiTest(a, bytes, "", &.{"prog"});
     try testing.expect(run.result == .exited);
     var expected: [4]u8 = undefined;
     std.mem.writeInt(u32, &expected, 21, .little); // EFAULT
@@ -4085,7 +3875,7 @@ test "wasi: unknown import traps when called" {
         &.{&body},
         null,
     );
-    const run = runWasiTest(a, bytes, "", &.{"prog"}, &.{});
+    const run = runWasiTest(a, bytes, "", &.{"prog"});
     try testing.expect(run.result == .trap);
 }
 
