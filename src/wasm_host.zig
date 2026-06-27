@@ -287,3 +287,7 @@ test "wasi preflight reports W0 malformed LEB128 errors" {
     try std.testing.expect(std.mem.startsWith(u8, written, "FAIL bad-leb.wasm: "));
     try std.testing.expect(std.mem.indexOf(u8, written, "LEB128") != null);
 }
+
+test {
+    std.testing.refAllDecls(@This());
+}

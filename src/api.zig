@@ -476,3 +476,7 @@ fn fileExists(io: std.Io, path: []const u8) bool {
     _ = std.Io.Dir.cwd().statFile(io, path, .{}) catch return false;
     return true;
 }
+
+test {
+    std.testing.refAllDecls(@This());
+}

@@ -239,3 +239,7 @@ fn hasLineText(entries: []const Entry, want: []const u8) bool {
     }
     return false;
 }
+
+test {
+    std.testing.refAllDecls(@This());
+}

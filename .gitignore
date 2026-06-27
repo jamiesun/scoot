@@ -34,6 +34,9 @@
 *.tmp
 *.temp
 
+# Audit/report output (project-audit, playground-eval, etc.)
+/reports/
+
 # Editor / IDE files
 .vscode/
 .idea/

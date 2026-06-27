@@ -89,7 +89,10 @@ matches fail cleanly with no change. Same policy treatment as `file_write`.
 ```
 
 Line-by-line regex search within a single file; returns matching line numbers and
-text. Supported regex subset: `.` `^` `$` `*` `+` `?` `[]` `()` `|` `\d` `\w`
+text. The matcher is a **built-in, zero-dependency regex engine** — a linear-time
+Thompson NFA that is immune to catastrophic backtracking (ReDoS), so no system
+`grep` or PCRE is needed and behavior stays identical on minimal/embedded systems.
+Supported regex subset: `.` `^` `$` `*` `+` `?` `[]` `()` `|` `\d` `\w`
 `\s`. **Not** supported: capture-group backreferences, lookaround, lazy
 quantifiers. Read-only; allowed in every mode.
 

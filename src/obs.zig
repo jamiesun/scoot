@@ -264,3 +264,7 @@ test "optimizeStream strips ANSI noise, handles tail signal, and preserves tail 
     try testing.expect(std.mem.indexOf(u8, out, "exit=42") != null); // Tail signal retained.
     try testing.expect(out.len < buf.items.len);
 }
+
+test {
+    std.testing.refAllDecls(@This());
+}

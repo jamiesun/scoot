@@ -731,3 +731,7 @@ test "evaluateHttpUrl:alternate-encoded SSRF bypass is denied(issue #51)" {
     try testing.expectEqual(Decision.allow, evaluateHttpUrl("https://api.github.com/", .guarded, true));
     try testing.expectEqual(Decision.allow, evaluateHttpUrl("https://1e100.net/", .guarded, true));
 }
+
+test {
+    std.testing.refAllDecls(@This());
+}

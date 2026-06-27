@@ -94,9 +94,11 @@ cp book/site-index.html site/index.html
 | `src/secret.zig` | Secret loading from env, 0600 token file, or credential command |
 | `src/llm.zig` | OpenAI-compatible Responses API (`/v1/responses`) client with strict JSON schema output |
 | `src/jsonio.zig` | Shared JSON string escaping |
+| `src/regex.zig` | Local Thompson-NFA regex engine: linear-time and ReDoS-immune; backs `grep` |
 | `src/skill.zig` | Skill discovery, review metadata, packaging, and progressive disclosure |
 | `src/session.zig` | Short-term session message storage and JSONL persistence |
 | `src/compressor.zig` | Context compaction strategies and external compressor plugin boundary |
+| `src/obs.zig` | Observation optimizer: token-budgeted shrinking of tool output before it enters session history |
 | `src/agent.zig` | ReACT loop, action parsing, policy gates, tool execution, observation feedback |
 | `src/daemon.zig` | Foreground daemon lifecycle state, pid handling, and stop/status helpers |
 | `src/schedule.zig` | `every`, `at`, and 5-field UTC `cron` schedule triggers |
