@@ -933,7 +933,7 @@ test "mcp: HTTP request builders emit single JSON-RPC messages" {
     var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const args = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"city\":\"长沙\"}", .{});
+    const args = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"city\":\"London\"}", .{});
 
     const init = try initializeRequest(arena);
     try std.testing.expect(std.mem.indexOf(u8, init, "\"id\":1") != null);
@@ -942,7 +942,7 @@ test "mcp: HTTP request builders emit single JSON-RPC messages" {
     const call_req = try toolsCallRequest(arena, "weather", args);
     try std.testing.expect(std.mem.indexOf(u8, call_req, "\"id\":3") != null);
     try std.testing.expect(std.mem.indexOf(u8, call_req, "\"method\":\"tools/call\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, call_req, "\"arguments\":{\"city\":\"长沙\"}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, call_req, "\"arguments\":{\"city\":\"London\"}") != null);
 }
 
 test "mcp: remote headers resolve env credentials and reject protocol overrides" {
