@@ -66,8 +66,14 @@ See [Built-in Tools](book/en/src/tools.md) for the full list.
 curl -fsSL https://raw.githubusercontent.com/jamiesun/scoot/main/install.sh | sh
 ```
 
-Prefer Docker, a smaller build, or compiling from source? See
-[Installation](book/en/src/installation.md).
+On macOS you can use Homebrew instead:
+
+```sh
+brew install jamiesun/tap/scoot
+```
+
+Prefer Docker, the optional Wasm host, or compiling a smaller build from source?
+See [Installation](book/en/src/installation.md).
 
 **2. Configure.** The wizard creates `~/.scoot` and writes your config:
 

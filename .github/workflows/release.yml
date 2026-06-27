@@ -17,47 +17,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Only the ReleaseSafe flavor is published. Users who need a smaller
+        # binary compile with `-Doptimize=ReleaseSmall` from source (documented
+        # in the release notes footer and Installation guide).
         include:
           - asset: linux-amd64
             target: x86_64-linux-musl
             cpu: ""
-            optimize: ReleaseSafe
           - asset: linux-arm64
             target: aarch64-linux-musl
             cpu: ""
-            optimize: ReleaseSafe
           - asset: linux-armv7
             target: arm-linux-musleabihf
             cpu: cortex_a7
-            optimize: ReleaseSafe
           - asset: macos-amd64
             target: x86_64-macos
             cpu: ""
-            optimize: ReleaseSafe
           - asset: macos-arm64
             target: aarch64-macos
             cpu: ""
-            optimize: ReleaseSafe
-          - asset: linux-amd64-small
-            target: x86_64-linux-musl
-            cpu: ""
-            optimize: ReleaseSmall
-          - asset: linux-arm64-small
-            target: aarch64-linux-musl
-            cpu: ""
-            optimize: ReleaseSmall
-          - asset: linux-armv7-small
-            target: arm-linux-musleabihf
-            cpu: cortex_a7
-            optimize: ReleaseSmall
-          - asset: macos-amd64-small
-            target: x86_64-macos
-            cpu: ""
-            optimize: ReleaseSmall
-          - asset: macos-arm64-small
-            target: aarch64-macos
-            cpu: ""
-            optimize: ReleaseSmall
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
@@ -72,7 +50,7 @@ jobs:
           echo "$PWD/zig-x86_64-linux-${version}" >> "$GITHUB_PATH"
           "$PWD/zig-x86_64-linux-${version}/zig" version
 
-      - name: Build ${{ matrix.optimize }}
+      - name: Build ReleaseSafe (scoot + scoot-wasm)
         run: |
           # Embed the exact tag as the binary version (single source of truth at release time).
           # On a tag push GITHUB_REF_NAME is like "v0.0.3" → strip the leading "v".
@@ -81,33 +59,50 @@ jobs:
             v*) version_arg="-Dversion=${GITHUB_REF_NAME#v}" ;;
             *)  version_arg="" ;;
           esac
+          # `-Dwasm-host=true` builds both the core `scoot` binary and the
+          # optional `scoot-wasm` compute-unit host in one pass.
           if [ -n "${{ matrix.cpu }}" ]; then
-            zig build -Doptimize=${{ matrix.optimize }} -Dtarget=${{ matrix.target }} -Dcpu=${{ matrix.cpu }} $version_arg
+            zig build -Doptimize=ReleaseSafe -Dwasm-host=true -Dtarget=${{ matrix.target }} -Dcpu=${{ matrix.cpu }} $version_arg
           else
-            zig build -Doptimize=${{ matrix.optimize }} -Dtarget=${{ matrix.target }} $version_arg
+            zig build -Doptimize=ReleaseSafe -Dwasm-host=true -Dtarget=${{ matrix.target }} $version_arg
           fi
 
-      - name: Create archive
+      - name: Create archives
         id: package
         run: |
           version="${GITHUB_REF_NAME//\//-}"
-          artifact="scoot-${version}-${{ matrix.asset }}"
+
+          # Core `scoot` archive (layout consumed by install.sh: scoot/scoot).
+          core="scoot-${version}-${{ matrix.asset }}"
           mkdir -p dist/scoot
           cp zig-out/bin/scoot dist/scoot/
           cp README.md config.example.toml install.sh dist/scoot/
           cp -R docs dist/scoot/docs
-          tar -C dist -czf "${artifact}.tar.gz" scoot
-          sha256sum "${artifact}.tar.gz" > "${artifact}.tar.gz.sha256"
-          echo "archive=${artifact}.tar.gz" >> "$GITHUB_OUTPUT"
-          echo "checksum=${artifact}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+          tar -C dist -czf "${core}.tar.gz" scoot
+          sha256sum "${core}.tar.gz" > "${core}.tar.gz.sha256"
+
+          # Optional `scoot-wasm` host archive (layout: scoot-wasm/scoot-wasm).
+          wasm="scoot-wasm-${version}-${{ matrix.asset }}"
+          mkdir -p dist/scoot-wasm
+          cp zig-out/bin/scoot-wasm dist/scoot-wasm/
+          cp README.md dist/scoot-wasm/
+          tar -C dist -czf "${wasm}.tar.gz" scoot-wasm
+          sha256sum "${wasm}.tar.gz" > "${wasm}.tar.gz.sha256"
+
+          echo "core=${core}.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "core_checksum=${core}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+          echo "wasm=${wasm}.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "wasm_checksum=${wasm}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: scoot-${{ matrix.asset }}
           path: |
-            ${{ steps.package.outputs.archive }}
-            ${{ steps.package.outputs.checksum }}
+            ${{ steps.package.outputs.core }}
+            ${{ steps.package.outputs.core_checksum }}
+            ${{ steps.package.outputs.wasm }}
+            ${{ steps.package.outputs.wasm_checksum }}
 
   publish:
     name: Publish GitHub release
@@ -123,12 +118,14 @@ jobs:
         with:
           path: dist-artifacts
 
-      - name: Extract release notes from CHANGELOG
+      - name: Build release notes
         id: notes
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          # Pull the section for this tag out of CHANGELOG.md so the published
-          # release notes match the maintained changelog. Fall back to GitHub's
-          # auto-generated notes when the version has no entry yet.
+          # Always render the body to a single file so the permanent footer is
+          # attached regardless of whether the body came from CHANGELOG.md or
+          # GitHub's auto-generated notes.
           version="${GITHUB_REF_NAME#v}"
           notes_file="$RUNNER_TEMP/release-notes.md"
           if [ -f CHANGELOG.md ] && awk -v v="$version" '
@@ -136,11 +133,17 @@ jobs:
               capture && (/^## \[/ || /^\[[^][]+\]:/) { exit }
               capture { print }
             ' CHANGELOG.md | sed '/./,$!d' | sed -e :a -e '/^\n*$/{$d;N;ba}' > "$notes_file" && [ -s "$notes_file" ]; then
-            echo "source=changelog" >> "$GITHUB_OUTPUT"
+            echo "Using CHANGELOG.md section for $version" >&2
           else
             echo "No CHANGELOG.md entry for $version; using auto-generated notes." >&2
-            echo "source=generated" >> "$GITHUB_OUTPUT"
+            gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f tag_name="$GITHUB_REF_NAME" --jq .body > "$notes_file" || : > "$notes_file"
           fi
+
+          # Permanent footer: explain the published flavor and how to get a
+          # smaller binary or the optional Wasm compute-unit host.
+          cat .github/release-footer.md >> "$notes_file"
+
           echo "file=$notes_file" >> "$GITHUB_OUTPUT"
 
       - name: Create draft release with all assets
@@ -149,21 +152,127 @@ jobs:
         run: |
           mapfile -t files < <(find dist-artifacts -type f | sort)
           files+=(install.sh)
-          if [ "${{ steps.notes.outputs.source }}" = "changelog" ]; then
-            notes_args=(--notes-file "${{ steps.notes.outputs.file }}")
-          else
-            notes_args=(--generate-notes)
-          fi
           gh release create "$GITHUB_REF_NAME" "${files[@]}" \
             --draft \
             --verify-tag \
             --title "$GITHUB_REF_NAME" \
-            "${notes_args[@]}"
+            --notes-file "${{ steps.notes.outputs.file }}"
 
       - name: Publish draft release
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+
+  homebrew:
+    name: Update Homebrew tap
+    runs-on: ubuntu-latest
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/')
+    env:
+      # Set HOMEBREW_TAP_TOKEN (a PAT with push access to the tap repo) to enable
+      # this job. Without it the job no-ops, mirroring the optional Docker Hub
+      # publish path. HOMEBREW_TAP_REPO is the `homebrew-<tap>` repository that
+      # backs `brew install <owner>/<tap>/<formula>`.
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      HOMEBREW_TAP_REPO: jamiesun/homebrew-tap
+    steps:
+      - name: Download release artifacts
+        if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: dist-artifacts
+
+      - name: Render and push formulae
+        if: ${{ env.HOMEBREW_TAP_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"          # e.g. v0.4.0
+          VERSION="${TAG#v}"              # e.g. 0.4.0
+          base="https://github.com/jamiesun/scoot/releases/download/${TAG}"
+
+          # First whitespace field of the matching `.sha256` artifact file.
+          sha() {
+            local f
+            f="$(find dist-artifacts -name "$1.sha256" -print -quit)"
+            [ -n "$f" ] || { echo "missing checksum for $1" >&2; exit 1; }
+            awk '{print $1; exit}' "$f"
+          }
+          SCOOT_ARM_SHA="$(sha "scoot-${TAG}-macos-arm64.tar.gz")"
+          SCOOT_AMD_SHA="$(sha "scoot-${TAG}-macos-amd64.tar.gz")"
+          WASM_ARM_SHA="$(sha "scoot-wasm-${TAG}-macos-arm64.tar.gz")"
+          WASM_AMD_SHA="$(sha "scoot-wasm-${TAG}-macos-amd64.tar.gz")"
+
+          git clone --depth 1 \
+            "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${HOMEBREW_TAP_REPO}.git" tap
+          mkdir -p tap/Formula
+
+          cat > tap/Formula/scoot.rb <<EOF
+          class Scoot < Formula
+            desc "Lightweight, local-first, auditable AI agent daemon and CLI in pure Zig"
+            homepage "https://github.com/jamiesun/scoot"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "${base}/scoot-${TAG}-macos-arm64.tar.gz"
+                sha256 "${SCOOT_ARM_SHA}"
+              else
+                url "${base}/scoot-${TAG}-macos-amd64.tar.gz"
+                sha256 "${SCOOT_AMD_SHA}"
+              end
+            end
+
+            def install
+              bin.install "scoot"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/scoot --version")
+            end
+          end
+          EOF
+
+          cat > tap/Formula/scoot-wasm.rb <<EOF
+          class ScootWasm < Formula
+            desc "Optional standalone Wasm compute-unit host for scoot"
+            homepage "https://github.com/jamiesun/scoot"
+            version "${VERSION}"
+            license "MIT"
+
+            # Installing the host pulls in the agent so wasm_tool works end-to-end.
+            depends_on "jamiesun/tap/scoot"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "${base}/scoot-wasm-${TAG}-macos-arm64.tar.gz"
+                sha256 "${WASM_ARM_SHA}"
+              else
+                url "${base}/scoot-wasm-${TAG}-macos-amd64.tar.gz"
+                sha256 "${WASM_AMD_SHA}"
+              end
+            end
+
+            def install
+              bin.install "scoot-wasm"
+            end
+
+            test do
+              assert_path_exists bin/"scoot-wasm"
+            end
+          end
+          EOF
+
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/scoot.rb Formula/scoot-wasm.rb
+          if git diff --cached --quiet; then
+            echo "Formulae already up to date for ${VERSION}"
+          else
+            git commit -m "scoot ${VERSION}"
+            git push
+          fi
 
   docker:
     name: Build and publish Docker image (${{ matrix.flavor }})
