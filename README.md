@@ -1,432 +1,137 @@
 # Scoot
 
+[English](README.md) | [中文](docs/README.zh.md)
+
 <p align="center">
   <img src="docs/assets/scoot-infographic.png" alt="Scoot - local-first AI agent daemon and CLI in pure Zig" width="100%">
 </p>
 
-Scoot is a local-first AI agent CLI and daemon written in pure Zig. It talks to
-an OpenAI-compatible model backend, asks the model for structured ReACT steps,
-runs local tools through policy gates, and stores sessions plus audit events on
-your machine.
+**Scoot is a small, safe AI agent that lives in your terminal.**
 
-Use it when you want a small terminal agent that can inspect a project, edit
-files, run bounded commands, use local skills, or execute scheduled read-only
-jobs without pulling in a large app stack.
+You give it a goal. It thinks in steps, runs local tools to make progress, and
+writes down everything it did. No app to install, no cloud account, no state
+leaving your machine — just one binary and a model backend you choose.
 
-## Why Scoot
+```sh
+scoot -e "find every TODO in this repo and summarize them by file"
+```
 
-| Need | Scoot's answer |
-| --- | --- |
-| Run an agent from a terminal | One self-contained binary with one-shot and REPL modes. |
-| Keep state local | Config, sessions, skills, logs, and daemon state live under `~/.scoot` by default. |
-| Use existing model infrastructure | OpenAI-compatible Responses API backends work, local or hosted (Ollama >= 0.13.3, vLLM, OpenAI). |
-| Avoid accidental damage | Tool calls pass through `guarded`, `readonly`, or `unrestricted` policy modes. |
-| Audit what happened | Every agent step and tool decision is persisted as local JSONL state. |
-| Extend behavior | Local skills are discovered from directories and read progressively when needed. |
+## What makes Scoot different
 
-## Why Zig
+Most coding agents are large applications that trust the model and reach for the
+cloud. Scoot is the opposite by design.
 
-Single-binary distribution is not unique to Zig; Go and Rust can do that too.
-Scoot uses Zig because its advantages line up with the way this agent is meant
-to be deployed:
+- **One tiny binary, no runtime.** Written in pure [Zig](https://ziglang.org), it
+  ships as a single self-contained executable. Copy it to a laptop, a NAS, an
+  edge device, or a container and it just runs. ([why Zig](book/en/src/design-philosophy.md))
+- **Safe by default.** Scoot never executes raw model output. Every step is
+  validated, and every tool call passes through a [policy gate](book/en/src/policy.md)
+  that can block dangerous commands or refuse writes and network access entirely.
+- **Fully auditable.** Every thought, tool call, observation, and decision is
+  saved as plain JSONL. You can replay exactly what the agent did, after the fact.
+- **Local-first.** Config, sessions, skills, and logs all live under `~/.scoot`.
+  Nothing syncs anywhere you didn't ask it to.
+- **Bring your own model.** Any OpenAI-compatible backend works — local
+  (Ollama, vLLM) or hosted (OpenAI). No provider lock-in.
+- **Extend without rebuilding.** Drop a folder with a `SKILL.md` into your skills
+  directory and the agent can discover and use it. ([skills](book/en/src/skills.md))
 
-1. **Tiny standalone footprint.** Scoot is intended to run as a small local
-   utility, sidecar, or embedded agent on machines where installing a language
-   runtime, package tree, or service stack is unnecessary friction.
-2. **Controlled memory for constrained devices.** Zig keeps allocation visible
-   in the code, which fits a long-running daemon that may live on low-memory
-   Linux boxes, edge devices, NAS hosts, or other resource-limited systems.
-3. **Cross-platform migration with low dependency drag.** Zig's
-   cross-compilation and libc handling make it easier to move the same agent
-   across Linux/macOS targets and CPU architectures while keeping the external
-   dependency surface small.
+## How it works
 
-## Design Philosophy
+Scoot runs a [ReACT](book/en/src/agent.md) loop. Each turn, the model returns one
+structured step, Scoot checks it, runs it, and feeds the result back:
 
-Scoot is intentionally conservative. It optimizes for safety, auditability,
-local-first operation, small deployment surface, and long-running stability
-before feature breadth.
+```mermaid
+flowchart TD
+    A[Your goal] --> B[Model proposes one step]
+    B --> C{Valid and allowed?}
+    C -- no --> B
+    C -- yes --> D[Run the tool]
+    D --> E[Record the result to the audit log]
+    E --> F{Done?}
+    F -- no --> B
+    F -- yes --> G[Final answer]
+```
 
-Some apparent limitations are deliberate choices:
+The model can only ask for a fixed set of built-in actions — read and edit files,
+search code, run bounded shell commands, make a single HTTP request, call a
+skill, and a few more. It can never invent a capability that bypasses the gate.
+See [Built-in Tools](book/en/src/tools.md) for the full list.
 
-- no GUI, because the interface should stay scriptable and inspectable;
-- no provider-specific protocol sprawl, because the model boundary is
-  OpenAI-compatible;
-- no pretending `guarded` is a sandbox, because unattended work should use
-  `readonly` and OS isolation;
-- no native plugin runtime, because skills should extend behavior without
-  expanding the trusted binary surface;
-- foreground daemon mode, because supervisors such as `systemd` should own
-  backgrounding, restart, logs, and shutdown.
+## Quick start
 
-The iron law is simple: validate model output, gate every effect through policy,
-timeout external work, keep secrets out of text artifacts, and keep state local.
-See [Design Philosophy](book/en/src/design-philosophy.md) for the full goals,
-non-goals, and hard boundaries.
-
-## Current Status
-
-The core runtime is usable today:
-
-- `scoot -e` for one-shot tasks and `scoot` / `scoot repl` for interactive use.
-- Built-in tools for shell, file read/write/edit, regex search, globbing, file
-  outlines, HTTP, skills, transcript recall, and bounded parallel read calls.
-- Policy modes: `guarded` by default, `readonly` for fail-closed runs, and
-  `unrestricted` when you deliberately accept full local access.
-- TOML-first configuration with JSON fallback and secret loading from an
-  environment variable, file, or command.
-- Scheduled jobs and foreground daemon mode, with unattended `guarded` jobs
-  coerced to effective `readonly`.
-- Local session and audit logs in JSONL.
-
-## Quick Start
-
-### 1. Install Or Build
-
-Install the latest release for your host:
+**1. Install.** One line installs the latest release for your platform:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/jamiesun/scoot/main/install.sh | sh
 ```
 
-Or install to a user-writable directory:
+Prefer Docker, a smaller build, or compiling from source? See
+[Installation](book/en/src/installation.md).
+
+**2. Configure.** The wizard creates `~/.scoot` and writes your config:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/jamiesun/scoot/main/install.sh | env SCOOT_INSTALL_DIR="$HOME/.local/bin" sh
+scoot setup
 ```
 
-The installer detects your OS/CPU, downloads the matching latest release asset
-and `.sha256` file, verifies the archive, and installs `scoot`.
+It asks for your model backend and where to find the API token. Every config key
+is documented in [Configuration](book/en/src/configuration.md).
 
-For resource-constrained hosts, install the explicit small build:
+**3. Run a goal.**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/jamiesun/scoot/main/install.sh | env SCOOT_INSTALL_FLAVOR=small sh
+scoot -e "summarize this repository"   # one shot, prints the answer
+scoot                                  # interactive REPL
 ```
 
-The default release keeps Zig runtime safety checks. The small release minimizes
-binary size and disables those checks, so use it when footprint matters more
-than fail-fast diagnostics.
+Add `--trace` to watch the agent think and act in real time.
 
-To build from source instead, use **Zig 0.16.0 or newer**:
+## Staying safe
 
-```sh
-zig build
-zig build test
-./zig-out/bin/scoot --version
-```
+Scoot has three policy modes. Pick the one that matches how much you trust the
+task:
 
-For an optimized binary:
-
-```sh
-zig build -Doptimize=ReleaseSafe
-zig build -Doptimize=ReleaseSmall
-```
-
-You can also run Scoot from the published container image. Set `SCOOT_HOME` to
-an explicit mounted directory so config, state, sessions, and logs are not tied
-to the image filesystem:
-
-```sh
-mkdir -p scoot-data
-cp config.example.toml scoot-data/config.toml
-
-docker run --rm \
-  -e SCOOT_HOME=/scoot \
-  -e OPENAI_API_KEY \
-  -v "$PWD/scoot-data:/scoot" \
-  ghcr.io/jamiesun/scoot:latest \
-  --version
-```
-
-For unattended container jobs, edit the mounted `scoot-data/config.toml` and set
-`[schedule] enabled = true`. The sample config keeps scheduling disabled by
-default, so `schedule run` and `daemon run` intentionally fail closed until the
-mounted config explicitly enables them.
-
-Use `schedule run --ticks 1` when Docker, cron, CI, or Kubernetes starts a fresh
-container for each poll:
-
-```sh
-docker run --rm \
-  -e SCOOT_HOME=/scoot \
-  -e OPENAI_API_KEY \
-  -v "$PWD/scoot-data:/scoot" \
-  ghcr.io/jamiesun/scoot:latest \
-  schedule run --ticks 1
-```
-
-Use `daemon run` when the container itself should stay up and own the polling
-loop:
-
-```sh
-docker run -d --name scoot \
-  -e SCOOT_HOME=/scoot \
-  -e OPENAI_API_KEY \
-  -v "$PWD/scoot-data:/scoot" \
-  ghcr.io/jamiesun/scoot:latest \
-  daemon run
-```
-
-If the backend runs on the Docker host, set `backend.base_url` in the mounted
-config to a host-reachable address such as
-`http://host.docker.internal:11434/v1`. On Linux Docker Engine, add
-`--add-host=host.docker.internal:host-gateway` or use a real network address.
-Alpine runtime images use matching `-alpine` tags, for example
-`ghcr.io/jamiesun/scoot:latest-alpine`.
-
-### 2. Configure
-
-The fastest way is the interactive wizard. It creates the runtime directory and
-writes `config.toml` for you, asking only for the backend, token source,
-`max_turns`, and policy — and it is the easiest way to provision **multiple
-isolated instances** on one host (point each at its own `--scoot-home` /
-`SCOOT_HOME`):
-
-```sh
-./zig-out/bin/scoot setup
-./zig-out/bin/scoot --scoot-home /opt/scoot/instance-a setup
-```
-
-Or start from the sample config by hand. Scoot uses `~/.scoot` by default:
-
-```sh
-mkdir -p ~/.scoot
-cp config.example.toml ~/.scoot/config.toml
-```
-
-Edit `[backend]` for your OpenAI-compatible backend. Scoot speaks only the
-Responses API (`/v1/responses`), so the backend must serve it (Ollama >= 0.13.3,
-vLLM, or OpenAI):
-
-```toml
-[backend]
-base_url = "http://127.0.0.1:11434/v1"
-model = "qwen2.5"
-api_key_env = "OPENAI_API_KEY"
-```
-
-Keep tokens out of committed config. The simplest hosted-backend setup is:
-
-```sh
-export OPENAI_API_KEY="sk-..."
-```
-
-For local backends such as Ollama-compatible endpoints, you can leave the token
-unset if the backend does not require one.
-
-### 3. Verify
-
-```sh
-./zig-out/bin/scoot config
-./zig-out/bin/scoot doctor
-```
-
-`config` shows the resolved runtime directory and backend with secrets redacted.
-`doctor` checks local prerequisites, config loading, secret source, skills, and
-audit paths without printing token values.
-
-### 4. Run A Goal
-
-```sh
-./zig-out/bin/scoot -e "summarize this repository"
-./zig-out/bin/scoot --trace -e "count Zig source files in this repository"
-./zig-out/bin/scoot
-```
-
-`-e` prints only the final answer to stdout, which makes it useful in scripts.
-`--trace` streams the ReACT progress to stderr with markers such as `thinking:`
-and `running: <tool>`.
-
-## Common Commands
-
-| Command | What it does |
-| --- | --- |
-| `scoot` or `scoot repl` | Start the interactive REPL. |
-| `scoot -e "<goal>"` | Run one goal and exit. |
-| `scoot --trace -e "<goal>"` | Run one goal with execution trace on stderr. |
-| `scoot setup` | Interactively generate a config directory (quick / multi-instance deploy). |
-| `scoot config` | Show resolved config with secrets redacted. |
-| `scoot doctor` | Run local health checks. |
-| `scoot policy check <action> <input>` | Dry-run a tool action against a policy. |
-| `scoot skills` | List discovered local skills. |
-| `scoot skills check [dir]` | Validate a skill directory without executing scripts. |
-| `scoot skills pack <dir> [out.tar]` | Export a reviewable skill package. |
-| `scoot wasm-tools check <dir>` | Statically validate a Wasm tool package boundary. |
-| `scoot serve` | Run the foreground stdio NDJSON app-server protocol. |
-| `scoot schedule list` | Show configured scheduled jobs. |
-| `scoot daemon run` | Run scheduled jobs in the foreground daemon loop. |
-
-Examples:
-
-```sh
-./zig-out/bin/scoot policy check bash "rm -rf /" --mode guarded
-./zig-out/bin/scoot skills check docs/examples/skills/minimal
-./zig-out/bin/scoot skills pack docs/examples/skills/minimal minimal.scoot-skill.tar
-./zig-out/bin/scoot wasm-tools check path/to/tool
-./scripts/check-wasm-examples.sh
-printf '%s\n' '{"id":"1","method":"session.list","params":{}}' | ./zig-out/bin/scoot serve
-./zig-out/bin/scoot daemon run --ticks 1
-```
-
-## Choose The Right Run Mode
-
-Scoot has four common ways to run work. They are intentionally different:
-
-| Mode | Goal source | Lifetime | Use when |
-| --- | --- | --- | --- |
-| `scoot -e "<goal>"` | The prompt on the command line. | Run now, print the final answer, exit. | A human or script wants one immediate task. |
-| `scoot serve` | NDJSON requests on stdin. | Runs until stdin closes. | A local app or supervisor wants a single long-lived stdio peer. |
-| `scoot schedule run --ticks 1` | `[[schedule.jobs]]` in config. | Poll configured jobs once, run any that are due, exit. | An external scheduler such as cron or a systemd timer owns the timing. |
-| `scoot daemon run` | `[[schedule.jobs]]` in config. | Poll forever by default (`--ticks N` makes it bounded). | Scoot owns the schedule loop and a supervisor only keeps the process alive. |
-
-`serve` is a foreground protocol process, not a network service: it reads one
-JSON request per stdin line and writes one JSON response per stdout line. It
-supports `run`, `session.list`, `session.get`, and `audit.query`; lifecycle,
-restart, and logs belong to the caller or supervisor.
-
-`daemon run` is not just `-e` with a different name. `-e` executes one explicit
-prompt immediately. `daemon run` loads configured jobs, applies their
-`every_sec`, `at_unix`, or `cron` triggers, writes daemon pid/state files, and
-uses the unattended job safety rules. A supervisor such as `systemd` is useful
-with `daemon run` because Scoot stays in the foreground and systemd owns
-startup, restart, logs, environment, and shutdown.
-
-## Configuration Model
-
-Runtime files live under `~/.scoot` unless you override the directory with
-`--scoot-home` or `SCOOT_HOME`. The CLI flag wins over the environment variable.
-
-```text
-~/.scoot/
-  config.toml
-  token
-  skills/
-  logs/
-  state/
-```
-
-Configuration precedence:
-
-```text
-SCOOT_* environment overrides > config.toml > built-in defaults
-```
-
-Secrets are intentionally separate from `SCOOT_*` overrides. Scoot reads the
-backend token from `backend.api_key_env` first, then `backend.api_key_file`,
-then `backend.api_key_cmd`. See
-[Configuration -> Environment Variable Overrides](book/en/src/configuration.md#environment-variable-overrides)
-for the full table and CI examples.
-
-## Safety Model
-
-Scoot validates every model step before execution. Tool calls are then checked
-against the active policy mode:
-
-| Mode | Use when | Behavior |
+| Mode | Use it for | What it does |
 | --- | --- | --- |
-| `guarded` | Normal interactive work. | Allows ordinary work but blocks known catastrophic shell patterns. |
-| `readonly` | Untrusted or unattended work. | Denies shell, writes, and network; allows confined local reads. |
-| `unrestricted` | You fully trust the goal. | Allows all tool actions, still audited. |
+| `guarded` *(default)* | Everyday interactive work | Allows normal work, blocks catastrophic commands |
+| `readonly` | Untrusted or unattended jobs | No writes, no shell, no network — reads only |
+| `unrestricted` | Tasks you fully trust | No limits, still fully audited |
 
-`guarded` is the default convenience mode, not a security sandbox. Use
-`readonly` for unattended jobs or goals you do not trust, and combine it with
-OS-level isolation when you need strong containment.
+`guarded` is a convenience tripwire, not a sandbox. For unattended jobs Scoot
+automatically drops to `readonly`, and you should pair it with OS-level isolation
+when you need strong containment. Full threat model: [Execution Policy & Security](book/en/src/policy.md).
 
-## Built-in Capabilities
+## Run it unattended
 
-Scoot's model may only request structured actions. The built-in action set
-currently covers:
+Scoot can also run on a schedule as a foreground daemon — handy for periodic
+read-only checks, reports, or probes that a supervisor like `systemd` keeps
+alive:
 
-- `bash` for bounded POSIX shell commands.
-- `file_read`, `file_write`, and `file_edit` for file operations.
-- `grep`, `glob`, and `outline` for project inspection.
-- `http_request` for one bounded HTTP/HTTPS request.
-- `wasm_tool` for compute-only local Wasm packages without shell.
-- `skill` for reading trusted local skill instructions and resources.
-- `recall` for retrieving exact earlier messages from the current session transcript.
-- `parallel` for 1-4 independent read-only calls.
-- `final` for returning the answer.
+```sh
+scoot daemon run
+```
 
-The structured file/search/HTTP tools do not require external shell commands,
-which keeps Scoot useful on minimal or embedded systems.
+Scheduling, triggers (`every`, `at`, `cron`), and daemon lifecycle are covered in
+[Scheduling & Daemon](book/en/src/scheduling.md).
 
 ## Documentation
 
-The full user guide is the bilingual mdBook under [`book/`](book/):
+The full, bilingual user guide is the mdBook under [`book/`](book/):
 
-- [Installation](book/en/src/installation.md) - build, install, backend setup.
-- [Design Philosophy](book/en/src/design-philosophy.md) - goals, non-goals, and hard boundaries.
-- [Configuration](book/en/src/configuration.md) - every config key and default.
-- [CLI Reference](book/en/src/cli.md) - every command and flag.
-- [Built-in Tools](book/en/src/tools.md) - all agent actions.
-- [Execution Policy & Security](book/en/src/policy.md) - modes and threat model.
-- [Skills](book/en/src/skills.md) - authoring and using skills.
-- [Scheduling & Daemon](book/en/src/scheduling.md) - unattended jobs.
-- [Sessions & Audit](book/en/src/sessions.md) - local state formats.
-- [Wasm Tool Packages](book/en/src/wasm-tools.md) - package boundary.
-- [Embedding API](book/en/src/embed-api.md) - stable Zig package surface.
-- [Best Practice Cases](book/en/src/best-practices.md) - CI, operations, probes, and runbooks.
-- [Troubleshooting & FAQ](book/en/src/troubleshooting.md)
+- [Installation](book/en/src/installation.md) — build, install, Docker, backends
+- [Design Philosophy](book/en/src/design-philosophy.md) — goals, non-goals, boundaries
+- [CLI Reference](book/en/src/cli.md) — every command and flag
+- [Built-in Tools](book/en/src/tools.md) — the agent's action set
+- [Execution Policy & Security](book/en/src/policy.md) — modes and threat model
+- [Skills](book/en/src/skills.md) — authoring and using skills
+- [Scheduling & Daemon](book/en/src/scheduling.md) — unattended jobs
+- [Sessions & Audit](book/en/src/sessions.md) — local state formats
+- [Embedding API](book/en/src/embed-api.md) — the stable Zig package surface
 
-Chinese chapters live under [`book/zh/src/`](book/zh/src/).
-
-Reference documents:
-
-- Chinese README: [docs/README.zh.md](docs/README.zh.md)
-- Roadmap: [docs/ROADMAP.md](docs/ROADMAP.md) / [docs/ROADMAP.zh.md](docs/ROADMAP.zh.md)
-- Agent guide: [AGENT.md](AGENT.md) / [docs/AGENT.zh.md](docs/AGENT.zh.md)
-- Daemon lifecycle: [docs/DAEMON.md](docs/DAEMON.md) / [docs/DAEMON.zh.md](docs/DAEMON.zh.md)
-- Skills: [docs/SKILLS.md](docs/SKILLS.md) / [docs/SKILLS.zh.md](docs/SKILLS.zh.md)
-- Wasm tool packages: [docs/WASM_TOOLS.md](docs/WASM_TOOLS.md) / [docs/WASM_TOOLS.zh.md](docs/WASM_TOOLS.zh.md)
-- Changelog: [CHANGELOG.md](CHANGELOG.md) / [docs/CHANGELOG.zh.md](docs/CHANGELOG.zh.md)
-
-Build the docs locally:
-
-```sh
-mdbook build book/en
-mdbook build book/zh
-mkdir -p site
-cp book/site-index.html site/index.html
-mkdir -p site/assets
-cp docs/assets/scoot-logo.svg docs/assets/scoot-favicon.svg docs/assets/scoot-favicon.png site/assets/
-```
-
-## Repository Layout
-
-```text
-src/                 Zig source
-src/tools/           Built-in tools
-docs/                Project documents and translated docs
-book/en/             English mdBook site
-book/zh/             Chinese mdBook site
-.github/workflows/   CI, release, and documentation workflows
-```
-
-## Release Artifacts
-
-Tagged releases publish:
-
-- `linux-amd64`
-- `linux-arm64`
-- `linux-armv7`
-- `macos-amd64`
-- `macos-arm64`
-
-Each target also publishes a `-small` variant built with `ReleaseSmall`. Every
-artifact includes a `.tar.gz` archive and a `.sha256` checksum. The release also
-publishes `install.sh`, and each archive includes a copy of the same installer.
-
-Docker releases publish multi-platform Linux images for `linux/amd64`,
-`linux/arm64`, and `linux/arm/v7`. The default tags use the minimal runtime
-image; matching Alpine runtime tags are published with an `-alpine` suffix, for
-example `latest-alpine` and `<version>-alpine`.
-
-## Documentation Policy
-
-Project documentation stays bilingual. Root documentation is English by
-default. Chinese documents live under `docs/` with `.zh.md` suffixes. When
-changing English docs, update the Chinese counterpart in the same change.
+Chinese chapters live under [`book/zh/src/`](book/zh/src/). Project shape and
+intent are in the [Roadmap](docs/ROADMAP.md) ([中文](docs/ROADMAP.zh.md)); contributor
+guidance is in [AGENT.md](AGENT.md) ([中文](docs/AGENT.zh.md)).
 
 ## License
 
