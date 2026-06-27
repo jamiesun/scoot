@@ -73,6 +73,7 @@ pub const system_prompt =
     \\  - "outline": retrieve a low-token structural outline of a file, such as source function/type signatures or Markdown headings; action_input is JSON {"path":"file path"}. This is a best-effort heuristic overview, not precise parsing.
     \\  - "http_request": make one HTTP/HTTPS request; action_input is JSON {"method":"GET","url":"https://...","body":"optional body"}. method is GET/POST/PUT/DELETE/HEAD/PATCH. Returns status code and response body with a hard timeout.
     \\  - "mcp_call": call one configured MCP server tool through Scoot's MCP client; action_input is JSON {"server":"configured server name","tool":"tool name","args":{}}. Only configured servers and explicitly allowed tools can run. stdio, Streamable HTTP, and legacy SSE transports are supported.
+    \\  - "wasm_tool": run one local compute-only Wasm tool package through the configured scoot-wasm host without shell; action_input is JSON {"package":"path/to/tool","input":{}}. The package must validate with manifest.toml/policy.toml/schema files, use entry "_start", and grant only the compute capability.
     \\  - "skill": read instructions or resources for a loaded skill. This is Scoot native read-only capability and works even in readonly mode; action_input is JSON {"name":"skill name","path":"relative path inside the skill directory, optional, default SKILL.md"}. Skill-requested bash/write/network actions still obey execution policy.
     \\  - "recall": recall original text from the current session transcript archive. action_input is JSON {"query":"keyword","limit":8} or {"seq":12,"context":2}. seq starts at 1.
     \\  - "parallel": run 1-4 independent read-only calls concurrently; action_input is JSON {"calls":[{"action":"file_read","input":"{\"path\":\"README.md\"}"},{"action":"grep","input":"{\"pattern\":\"Scoot\",\"path\":\"AGENT.md\"}"}]}. Only file_read / grep / glob / outline / HTTP GET or HEAD are allowed; bash, writes, skill, recall, final, and nested parallel are forbidden.
@@ -91,7 +92,7 @@ pub const system_prompt =
 ;
 
 /// Actions available to the model.
-pub const Action = enum { bash, file_read, file_write, file_edit, grep, glob, outline, http_request, mcp_call, skill, recall, parallel, final };
+pub const Action = enum { bash, file_read, file_write, file_edit, grep, glob, outline, http_request, mcp_call, wasm_tool, skill, recall, parallel, final };
 
 /// One parsed ReACT step.
 pub const Step = struct {
@@ -112,6 +113,7 @@ const GlobArgs = struct { pattern: []const u8, root: []const u8 = "." };
 const OutlineArgs = struct { path: []const u8 };
 const HttpArgs = struct { method: []const u8 = "GET", url: []const u8, body: ?[]const u8 = null };
 const McpCallArgs = tools.mcp.CallArgs;
+const WasmToolArgs = struct { package: []const u8, input: std.json.Value = .null };
 const SkillArgs = struct { name: []const u8, path: []const u8 = "SKILL.md" };
 const RecallArgs = struct { query: ?[]const u8 = null, seq: ?usize = null, context: ?usize = null, limit: ?usize = null };
 const ParallelCallArgs = struct {
@@ -259,6 +261,9 @@ pub const Agent = struct {
     /// Configured external MCP servers. Calls fail closed unless the target
     /// server exists and explicitly allows the requested tool.
     mcp_servers: []const tools.mcp.Server = &.{},
+    /// Host argv for wasm_tool. This is trusted runtime configuration, not
+    /// model input. Placeholders: {package}, {entry}, {component}.
+    wasm_host: []const []const u8 = tools.wasm.default_host,
 
     /// Constructs an Agent backed by a real LLM client.
     pub fn initClient(client: *llm.Client) Agent {
@@ -430,6 +435,7 @@ pub const Agent = struct {
             .file_write, .file_edit => self.guardWrite(arena, action, input),
             .http_request => self.guardHttp(arena, input),
             .mcp_call => self.guardMcp(arena, input),
+            .wasm_tool => self.guardWasmTool(arena, input),
             .skill => .allow, // Native read-only skill instruction read, outside execution policy.
             .recall => .allow, // Native read-only recall from this session transcript.
             .parallel => self.guardParallel(arena, input),
@@ -521,6 +527,30 @@ pub const Agent = struct {
         return .allow;
     }
 
+    /// Guards Wasm tools as compute-only subprocess tools, not shell commands.
+    /// The model chooses only a local package and JSON input; the host argv is
+    /// trusted runtime configuration. Package validation is repeated at execution
+    /// time so policy preview and runtime cannot drift.
+    fn guardWasmTool(self: *Agent, arena: std.mem.Allocator, input: []const u8) policy.Decision {
+        const args = parseToolArgs(WasmToolArgs, arena, input) catch
+            return .{ .deny = "wasm_tool action_input must be {\"package\":\"path/to/tool\",\"input\":{...}} JSON" };
+        switch (policy.evaluateTool(.compute, self.policy_mode)) {
+            .deny => |reason| return .{ .deny = reason },
+            .allow => {},
+        }
+        if (self.policy_mode != .unrestricted and !tools.wasm.safePackagePath(args.package))
+            return .{ .deny = "wasm_tool package path must be project-relative and must not contain absolute paths, .., ~, or $ expansion" };
+        _ = tools.wasm.validateComputePackage(arena, self.io, args.package) catch |err| return .{
+            .deny = switch (err) {
+                error.WasmToolInvalidPackage => "wasm_tool package failed manifest/policy/schema/component validation",
+                error.WasmToolUnsupportedEntry => "wasm_tool currently requires a WASI command package with entry \"_start\"",
+                error.WasmToolPolicyDenied => "wasm_tool package policy must grant only compute capability",
+                else => "wasm_tool package could not be validated",
+            },
+        };
+        return .allow;
+    }
+
     /// Guards file_write/file_edit: first capability check denies writes in
     /// readonly, then confine_writes checks the path stays in project root when enabled.
     fn guardWrite(self: *Agent, arena: std.mem.Allocator, action: Action, input: []const u8) policy.Decision {
@@ -570,6 +600,7 @@ pub const Agent = struct {
                         return .{ .deny = "parallel only allows HTTP GET/HEAD, not write HTTP methods" };
                 },
                 .mcp_call => return .{ .deny = "parallel forbids mcp_call; MCP tools may have external side effects" },
+                .wasm_tool => return .{ .deny = "parallel forbids wasm_tool; run Wasm tools as explicit single actions" },
                 .bash => return .{ .deny = "parallel forbids bash; use structured read-only tools" },
                 .file_write, .file_edit => return .{ .deny = "parallel forbids writing or editing files" },
                 .skill => return .{ .deny = "parallel forbids skill; use a separate skill action to read skill instructions" },
@@ -649,6 +680,15 @@ pub const Agent = struct {
                     .ca_file = self.ca_file,
                     .env = self.env,
                 });
+            },
+            .wasm_tool => blk: {
+                const args = try parseToolArgs(WasmToolArgs, arena, input);
+                const payload = try wasmToolInputJson(arena, args.input);
+                const result = try tools.wasm.run(arena, self.io, args.package, payload, .{
+                    .host = self.wasm_host,
+                    .timeout_ms = self.tool_timeout_ms,
+                });
+                break :blk try formatObservation(arena, result);
             },
             .parallel => try self.execParallel(arena, input),
             .skill => blk: {
@@ -1027,7 +1067,7 @@ fn historyBytes(messages: []const llm.Message) usize {
 /// observation text for model feedback. Common errors include actionable hints.
 fn toolErrorObservation(arena: std.mem.Allocator, err: anyerror) ![]u8 {
     const hint = switch (err) {
-        error.MalformedArgs => "action_input is not valid parameter JSON. Use file_read {\"path\":\"...\"}; file_write {\"path\":\"...\",\"content\":\"...\"}; file_edit {\"path\":\"...\",\"old\":\"...\",\"new\":\"...\"}; grep {\"pattern\":\"...\",\"path\":\"...\"}; glob {\"pattern\":\"...\"}; http_request {\"method\":\"GET\",\"url\":\"...\"}; recall {\"query\":\"...\"} or {\"seq\":1}.",
+        error.MalformedArgs => "action_input is not valid parameter JSON. Use file_read {\"path\":\"...\"}; file_write {\"path\":\"...\",\"content\":\"...\"}; file_edit {\"path\":\"...\",\"old\":\"...\",\"new\":\"...\"}; grep {\"pattern\":\"...\",\"path\":\"...\"}; glob {\"pattern\":\"...\"}; http_request {\"method\":\"GET\",\"url\":\"...\"}; wasm_tool {\"package\":\"path/to/tool\",\"input\":{}}; recall {\"query\":\"...\"} or {\"seq\":1}.",
         error.UnknownMethod => "http_request method is unknown. Use one of GET/POST/PUT/DELETE/HEAD/PATCH.",
         error.ParallelWriteHttp => "parallel only allows HTTP GET/HEAD, not POST/PUT/PATCH/DELETE.",
         error.UnsupportedParallelAction => "parallel only allows file_read / grep / glob / outline / HTTP GET or HEAD.",
@@ -1044,6 +1084,13 @@ fn toolErrorObservation(arena: std.mem.Allocator, err: anyerror) ![]u8 {
         error.McpOutputTooLarge => "mcp server output exceeded the configured output limit.",
         error.McpWriteFailed => "failed to write JSON-RPC request to the mcp stdio server.",
         error.McpInvalidEnv => "mcp server env entries must have non-empty names.",
+        error.WasmToolInvalidPackage => "wasm_tool package failed manifest/policy/schema/component validation. Run `scoot wasm-tools check <dir>` for details.",
+        error.WasmToolUnsupportedEntry => "wasm_tool currently requires a WASI command package with entry \"_start\".",
+        error.WasmToolPolicyDenied => "wasm_tool package policy must grant only compute capability.",
+        error.WasmToolMissingHost => "wasm_tool host is not configured. Build/install scoot-wasm or configure a host argv.",
+        error.WasmToolWriteFailed => "failed to write JSON input to the wasm_tool host.",
+        error.WasmToolOutputTooLarge => "wasm_tool output exceeded the configured limit.",
+        error.WasmToolFailed => "wasm_tool host failed before producing a normal exit status.",
         error.PatternNotFound => "file_edit old text was not found. Use file_read to inspect exact text before editing.",
         error.AmbiguousMatch => "file_edit old text appears multiple times. Provide a longer unique context span.",
         error.EmptyPattern => "file_edit old text must not be empty.",
@@ -1271,6 +1318,13 @@ fn writeRecallJsonLine(w: *std.Io.Writer, seq: usize, m: llm.Message) !void {
     try w.writeAll("\",\"content\":");
     try jsonio.writeString(w, m.content);
     try w.writeAll("}\n");
+}
+
+fn wasmToolInputJson(arena: std.mem.Allocator, input: std.json.Value) ![]const u8 {
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    try aw.writer.print("{f}", .{std.json.fmt(input, .{})});
+    try aw.writer.writeByte('\n');
+    return aw.writer.buffered();
 }
 
 /// Formats tool results as arena-owned observation text to feed back to the model.
@@ -1709,6 +1763,132 @@ test "guard and execTool handle terminal action misuse without panic" {
 
     // execTool(.final): terminal misrouting returns UnexpectedAction for run to feed back.
     try std.testing.expectError(error.UnexpectedAction, ag.execTool(arena, .final, ""));
+}
+
+test "guard: wasm_tool allows compute package and denies broader policy" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const good = ".zig-cache/scoot_agent_wasm_guard_good";
+    const bad = ".zig-cache/scoot_agent_wasm_guard_bad";
+    cwd.deleteTree(io, good) catch {};
+    cwd.deleteTree(io, bad) catch {};
+    defer cwd.deleteTree(io, good) catch {};
+    defer cwd.deleteTree(io, bad) catch {};
+    try writeWasmToolPackage(io, good, "_start", &.{"compute"}, &.{"compute"}, "");
+    try writeWasmToolPackage(io, bad, "_start", &.{ "compute", "net_read" }, &.{"net_read"}, "");
+
+    var brain = ScriptedBrain{ .steps = &.{} };
+    var ag = testAgent(&brain, 16);
+    ag.policy_mode = .readonly;
+
+    const good_input = try std.fmt.allocPrint(arena, "{{\"package\":\"{s}\",\"input\":{{\"ok\":true}}}}", .{good});
+    try std.testing.expectEqual(policy.Decision.allow, ag.guard(arena, .wasm_tool, good_input));
+
+    const bad_input = try std.fmt.allocPrint(arena, "{{\"package\":\"{s}\",\"input\":{{}}}}", .{bad});
+    switch (ag.guard(arena, .wasm_tool, bad_input)) {
+        .deny => |reason| try std.testing.expect(std.mem.indexOf(u8, reason, "compute") != null),
+        .allow => return error.ExpectedDeny,
+    }
+}
+
+test "run: wasm_tool executes configured host without bash action" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const root = ".zig-cache/scoot_agent_wasm_run";
+    cwd.deleteTree(io, root) catch {};
+    defer cwd.deleteTree(io, root) catch {};
+    try writeWasmToolPackage(
+        io,
+        root,
+        "_start",
+        &.{"compute"},
+        &.{"compute"},
+        "cat >/dev/null\nprintf '%s\\n' '{\"result\":\"WASM-OK\"}'\n",
+    );
+
+    const action = try std.fmt.allocPrint(
+        gpa,
+        "{{\"thought\":\"run wasm\",\"action\":\"wasm_tool\",\"action_input\":\"{{\\\"package\\\":\\\"{s}\\\",\\\"input\\\":{{\\\"n\\\":7}}}}\"}}",
+        .{root},
+    );
+    defer gpa.free(action);
+    var brain = ScriptedBrain{ .steps = &.{
+        action,
+        "{\"thought\":\"finish\",\"action\":\"final\",\"action_input\":\"done\"}",
+    } };
+    var ag = testAgent(&brain, 8);
+    ag.wasm_host = &.{ "/bin/sh", root ++ "/host.sh" };
+
+    var sess = session.Session.init("wasm-tool");
+    defer sess.deinit(gpa);
+    try sess.append(gpa, .system, system_prompt);
+    try sess.append(gpa, .user, "goal");
+
+    const answer = try ag.run(gpa, &sess);
+    defer gpa.free(answer);
+    try std.testing.expectEqualStrings("done", answer);
+}
+
+fn writeWasmToolPackage(
+    io: std.Io,
+    root: []const u8,
+    entry: []const u8,
+    manifest_caps: []const []const u8,
+    policy_caps: []const []const u8,
+    host_script: []const u8,
+) !void {
+    const cwd = std.Io.Dir.cwd();
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const schema_dir = try std.fs.path.join(arena, &.{ root, "schema" });
+    const manifest_path = try std.fs.path.join(arena, &.{ root, "manifest.toml" });
+    const policy_path = try std.fs.path.join(arena, &.{ root, "policy.toml" });
+    const component_path = try std.fs.path.join(arena, &.{ root, "component.wasm" });
+    const input_schema_path = try std.fs.path.join(arena, &.{ root, "schema", "input.json" });
+    const output_schema_path = try std.fs.path.join(arena, &.{ root, "schema", "output.json" });
+    const host_path = try std.fs.path.join(arena, &.{ root, "host.sh" });
+
+    try cwd.createDirPath(io, schema_dir);
+    try cwd.writeFile(io, .{
+        .sub_path = manifest_path,
+        .data = try std.fmt.allocPrint(arena,
+            \\kind = "tool"
+            \\name = "test-wasm-tool"
+            \\description = "Test Wasm tool."
+            \\entry = "{s}"
+            \\component = "component.wasm"
+            \\input_schema = "schema/input.json"
+            \\output_schema = "schema/output.json"
+            \\capabilities = {s}
+            \\
+        , .{ entry, try tomlStringArray(arena, manifest_caps) }),
+    });
+    try cwd.writeFile(io, .{
+        .sub_path = policy_path,
+        .data = try std.fmt.allocPrint(arena, "capabilities = {s}\n", .{try tomlStringArray(arena, policy_caps)}),
+    });
+    try cwd.writeFile(io, .{ .sub_path = component_path, .data = "\x00asm\x01\x00\x00\x00" });
+    try cwd.writeFile(io, .{ .sub_path = input_schema_path, .data = "{\"type\":\"object\"}\n" });
+    try cwd.writeFile(io, .{ .sub_path = output_schema_path, .data = "{\"type\":\"object\"}\n" });
+    try cwd.writeFile(io, .{ .sub_path = host_path, .data = host_script });
+}
+
+fn tomlStringArray(arena: std.mem.Allocator, items: []const []const u8) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.append(arena, '[');
+    for (items, 0..) |item, i| {
+        if (i != 0) try out.appendSlice(arena, ", ");
+        try out.append(arena, '"');
+        try out.appendSlice(arena, item);
+        try out.append(arena, '"');
+    }
+    try out.append(arena, ']');
+    return out.items;
 }
 
 test "historyBytes sums message content bytes (issue #28)" {

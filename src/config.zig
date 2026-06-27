@@ -9,6 +9,7 @@ const schedule = @import("schedule.zig");
 const policy = @import("policy.zig");
 const tomlmod = @import("toml.zig");
 const mcp_tool = @import("tools/mcp.zig");
+const wasm_runner = @import("tools/wasm.zig");
 const compressor = @import("compressor.zig");
 
 pub const default_context_budget_bytes: usize = 80_000;
@@ -94,6 +95,9 @@ pub const Tools = struct {
     /// needs these addresses, so the friction is low. Set false explicitly for
     /// intended internal access. readonly already denies networking.
     block_internal_http: bool = true,
+    /// Trusted host argv for wasm_tool; supports {package}, {entry}, and
+    /// {component}. This is config, not model-controlled input.
+    wasm_host: []const []const u8 = wasm_runner.default_host,
 };
 
 /// Skill mechanism configuration.
@@ -620,7 +624,30 @@ pub const Config = struct {
             else => base,
         };
     }
+
+    /// Resolve the trusted host argv for wasm_tool. If the config still uses
+    /// the built-in default, prefer a `scoot-wasm` binary next to the running
+    /// `scoot` executable, then fall back to PATH. Explicit config is preserved.
+    pub fn resolveWasmHost(self: Config, arena: std.mem.Allocator, io: std.Io) ![]const []const u8 {
+        if (!isDefaultWasmHost(self.tools.wasm_host)) return self.tools.wasm_host;
+        const exe_dir = std.process.executableDirPathAlloc(io, arena) catch return self.tools.wasm_host;
+        return resolveDefaultWasmHostInDir(arena, io, exe_dir) catch self.tools.wasm_host;
+    }
 };
+
+fn isDefaultWasmHost(host: []const []const u8) bool {
+    return host.len == 3 and
+        std.mem.eql(u8, host[0], "scoot-wasm") and
+        std.mem.eql(u8, host[1], "wasi") and
+        std.mem.eql(u8, host[2], "{component}");
+}
+
+fn resolveDefaultWasmHostInDir(arena: std.mem.Allocator, io: std.Io, exe_dir: []const u8) ![]const []const u8 {
+    const name = if (@import("builtin").os.tag == .windows) "scoot-wasm.exe" else "scoot-wasm";
+    const sibling = try std.fs.path.join(arena, &.{ exe_dir, name });
+    _ = try std.Io.Dir.cwd().statFile(io, sibling, .{});
+    return try arena.dupe([]const u8, &.{ sibling, "wasi", "{component}" });
+}
 
 test {
     std.testing.refAllDecls(@This());
@@ -677,6 +704,7 @@ test "parseTomlConfig: TOML to FileConfig with extra_body passthrough and per-se
         \\
         \\[tools]
         \\policy = "guarded"
+        \\wasm_host = ["./zig-out/bin/scoot-wasm", "wasi", "{component}"]
         \\
         \\[skills]
         \\include_project_skills = true
@@ -689,6 +717,8 @@ test "parseTomlConfig: TOML to FileConfig with extra_body passthrough and per-se
     try std.testing.expectEqual(true, fc.backend.store);
     try std.testing.expectEqualStrings("WJT_AZURE_OPENAI_API_KEY", fc.backend.api_key_env);
     try std.testing.expectEqualStrings("guarded", fc.tools.policy);
+    try std.testing.expectEqualStrings("./zig-out/bin/scoot-wasm", fc.tools.wasm_host[0]);
+    try std.testing.expectEqualStrings("{component}", fc.tools.wasm_host[2]);
     try std.testing.expectEqual(true, fc.skills.include_project_skills);
     try std.testing.expectEqual(true, fc.skills.include_agents_skills);
     // Unspecified sections fall back to defaults.
@@ -1132,6 +1162,25 @@ test "applyEnvOverrides: integer/bool fields parse" {
     try std.testing.expectEqual(false, cfg.skills.enabled);
     try std.testing.expectEqual(true, cfg.skills.include_project_skills);
     try std.testing.expectEqual(true, cfg.skills.include_agents_skills);
+}
+
+test "resolveWasmHost: sibling scoot-wasm is preferred for default host" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const root = "/tmp/scoot_config_wasm_host";
+    cwd.deleteTree(io, root) catch {};
+    defer cwd.deleteTree(io, root) catch {};
+    try cwd.createDirPath(io, root);
+    const host_name = if (@import("builtin").os.tag == .windows) "scoot-wasm.exe" else "scoot-wasm";
+    const host_path = try std.fs.path.join(arena.allocator(), &.{ root, host_name });
+    try cwd.writeFile(io, .{ .sub_path = host_path, .data = "" });
+
+    const argv = try resolveDefaultWasmHostInDir(arena.allocator(), io, root);
+    try std.testing.expectEqualStrings(host_path, argv[0]);
+    try std.testing.expectEqualStrings("wasi", argv[1]);
+    try std.testing.expectEqualStrings("{component}", argv[2]);
 }
 
 test "applyEnvOverrides: invalid integer/bool is ignored with warning and original value remains" {

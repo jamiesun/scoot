@@ -120,6 +120,8 @@ pub fn evaluate(arena: std.mem.Allocator, command: []const u8, mode: Mode) Decis
 /// statically known. The guardrail decides by capability, keeping complexity
 /// independent of tool count. New tools in the same class reuse the same rule.
 pub const Capability = enum {
+    /// Bounded CPU/stdin/stdout work with no file, network, or environment authority.
+    compute,
     /// Read-only local state: read files, search content, list directories.
     read,
     /// Write local state: create, modify, or delete files.
@@ -145,6 +147,7 @@ pub fn evaluateTool(cap: Capability, mode: Mode) Decision {
         .unrestricted => .allow,
         .guarded => .allow,
         .readonly => switch (cap) {
+            .compute => .allow,
             .read => .allow,
             .write => .{ .deny = "readonly mode forbids writing files or changing local state" },
             .net_read => .{ .deny = "readonly mode forbids network requests by default to prevent local data exfiltration" },

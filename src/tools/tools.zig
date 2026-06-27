@@ -9,6 +9,7 @@ pub const search = @import("search.zig");
 pub const http = @import("http.zig");
 pub const outline = @import("outline.zig");
 pub const mcp = @import("mcp.zig");
+pub const wasm = @import("wasm.zig");
 
 /// Unified tool execution result.
 pub const Result = struct {

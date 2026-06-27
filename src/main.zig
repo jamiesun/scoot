@@ -2453,6 +2453,7 @@ fn setupRun(
     ag.block_internal_http = cfg.tools.block_internal_http;
     ag.skills = skills;
     ag.mcp_servers = cfg.mcp.servers;
+    ag.wasm_host = try cfg.resolveWasmHost(arena, io);
 
     sink.open(warn, arena, io, cfg.dirs.logs_dir);
     sink.setContext(session_id, null);

@@ -6,7 +6,7 @@
 { "thought": "one-line reasoning", "action": "<action>", "action_input": "<input>" }
 ```
 
-`action` 必须是下面十三个内建动作之一——Scoot 绝不执行
+`action` 必须是下面十四个内建动作之一——Scoot 绝不执行
 自由格式文本。每个工具都在带 **硬超时**（`tools.timeout_ms`，默认 30 秒）的沙盒中运行，
 其输出作为下一个 *观察* 返回给模型（会被裁剪以保持上下文精简）。某个动作是否
 被允许，取决于当前生效的 [执行策略](policy.md)。
@@ -27,6 +27,7 @@
 | `outline` | 文件结构骨架 | `{"path":...}` | 是 |
 | `http_request` | 一次 HTTP/HTTPS 请求 | `{"method":...,"url":...,"body":...}` | 取决于方法 |
 | `mcp_call` | 调用已配置 MCP server 的工具 | `{"server":...,"tool":...,"args":{...}}` | 否 |
+| `wasm_tool` | 运行本地 compute-only Wasm 包 | `{"package":...,"input":{...}}` | 是 |
 | `skill` | 读取已加载技能的文件 | `{"name":...,"path":"SKILL.md"}` | 是（原生） |
 | `recall` | 搜索当前会话 transcript 归档 | `{"query":...}` 或 `{"seq":...}` | 是（原生） |
 | `parallel` | 1–4 个并发只读调用 | `{"calls":[...]}` | 是 |
@@ -158,6 +159,22 @@
 MCP 调用按可能具有外部副作用的执行处理。`readonly` 会拒绝它；`guarded` 与
 `unrestricted` 仍要求显式 server 与工具 allowlist。MCP 调用像其他工具一样进入审计，
 并受同一个硬超时约束。
+
+## `wasm_tool`
+
+```json
+{ "package": "examples/wasm-plugin-template", "input": { "expr": "1+2" } }
+```
+
+通过配置好的 `scoot-wasm` host 运行一个本地 Wasm 工具包，不经过 shell。
+工具包必须通过同一套 `scoot wasm-tools check` 边界，使用 WASI command 入口
+（`entry = "_start"`），并且 `policy.toml` 只能授予 `compute`。模型只提供包路径
+和 JSON 输入；host argv 是可信运行时配置，不来自模型。
+
+在 `guarded` 与 `readonly` 下，包路径必须是项目相对路径，不能包含绝对路径、
+`..`、`~` 或 `$` 展开。当前 host 表面只有 stdio/args/environ/clock/random/proc-exit，
+不会授予文件系统、网络或宿主环境变量访问。Wasm 工具足够时，用它替代通过 `bash`
+拼命令。
 
 ## `skill`
 
