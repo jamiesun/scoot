@@ -15,6 +15,6 @@ The Chinese agent guide lives at:
 - Run `zig build` and `zig build test` after Zig changes.
 - Keep all project documentation bilingual.
 - Do not execute unvalidated model output.
-- Do not let skill *execution* bypass the tool sandbox (reading a skill's instructions is a native read-only capability and is intentionally not policy-gated).
+- Do not let skill *execution* bypass the tool sandbox; reading skill instructions/resources is a native read-only capability and intentionally not policy-gated.
+- Export internal subsystems from `src/internal.zig`; keep `src/root.zig` limited to the stable embedding API unless explicitly changing that API boundary.
 - Do not write secrets into config, logs, or audit output.
-

@@ -29,7 +29,7 @@ Scoot is a lightweight AI agent daemon and CLI written in pure Zig 0.16+. It is 
 The project already has the core pillars in place:
 
 - ReACT execution for `scoot -e` and the default REPL.
-- Built-in tools: `bash`, `file_read`, `file_write`, `file_edit`, `grep`, `glob`, `outline`, and `http_request`.
+- Built-in actions/tools: `bash`, `file_read`, `file_write`, `file_edit`, `grep`, `glob`, `outline`, `http_request`, `skill`, `recall`, bounded read-only `parallel`, `mcp_call`, and `wasm_tool`.
 - Execution policy: `guarded`, `readonly`, and `unrestricted`.
 - Local skill discovery with progressive disclosure.
 - Scheduled unattended jobs with effective `readonly` mode by default.
@@ -84,24 +84,29 @@ cp book/site-index.html site/index.html
 
 | Path | Responsibility |
 | --- | --- |
-| `src/main.zig` | CLI entrypoint: argument parsing, REPL, one-shot eval, config, skills, schedule |
-| `src/root.zig` | Library root and public subsystem exports |
+| `src/main.zig` | CLI entrypoint: argument parsing, setup/config/doctor commands, REPL, one-shot eval, skills, schedule, daemon, serve |
+| `src/root.zig` | Stable public package root: narrow embedding API facade only |
+| `src/internal.zig` | Internal module root for CLI/repository tests; export private subsystems here |
+| `src/api.zig` | Stable embedding lifecycle facade: `Runtime`, `Options`, `start`, `run`, `stop` |
 | `src/paths.zig` | Runtime directory resolution: `~/.scoot` or `SCOOT_HOME` |
-| `src/config.zig` | Structured config: backend, agent, tools, skills, audit, schedule |
+| `src/config.zig` | Structured config: backend, agent, tools, skills, MCP, audit, schedule |
 | `src/toml.zig` | Zero-dependency TOML subset parser |
 | `src/secret.zig` | Secret loading from env, 0600 token file, or credential command |
 | `src/llm.zig` | OpenAI-compatible Responses API (`/v1/responses`) client with strict JSON schema output |
 | `src/jsonio.zig` | Shared JSON string escaping |
-| `src/skill.zig` | Skill discovery and progressive disclosure |
+| `src/skill.zig` | Skill discovery, review metadata, packaging, and progressive disclosure |
 | `src/session.zig` | Short-term session message storage and JSONL persistence |
-| `src/agent.zig` | ReACT loop, action parsing, tool execution, observation feedback |
+| `src/compressor.zig` | Context compaction strategies and external compressor plugin boundary |
+| `src/agent.zig` | ReACT loop, action parsing, policy gates, tool execution, observation feedback |
+| `src/daemon.zig` | Foreground daemon lifecycle state, pid handling, and stop/status helpers |
 | `src/schedule.zig` | `every`, `at`, and 5-field UTC `cron` schedule triggers |
 | `src/audit.zig` | JSONL audit events |
-| `src/policy.zig` | Execution policy gate |
-| `src/tools/*.zig` | Built-in tools and execution sandbox |
+| `src/policy.zig` | Execution policy gate and path/network guardrails |
+| `src/tools/*.zig` | Built-in tools, MCP client, Wasm runner shim, and execution sandbox |
+| `src/wasm_*.zig` | Optional standalone `scoot-wasm` host/engine support; not linked into the core binary unless requested |
 | `build.zig`, `build.zig.zon` | Zig build graph and package manifest |
 
-When adding a subsystem, add a file under `src/` and export it from `src/root.zig` with `pub const name = @import("name.zig");` so it participates in the test graph.
+When adding an internal subsystem, add a file under `src/` and export it from `src/internal.zig` with `pub const name = @import("name.zig");` so it participates in the internal test graph. Do **not** export private subsystems from `src/root.zig`: that file is the stable public embedding API and has a whitelist test. Expanding it requires an explicit API-boundary decision and matching documentation.
 
 ## Zig 0.16 Habits
 
@@ -154,8 +159,9 @@ Changing these boundaries requires an explicit roadmap-level decision.
 2. Identify whether the work extends an existing subsystem or needs a new one.
 3. Add focused tests with the smallest behavioral surface that proves the change.
 4. Validate inputs before executing external effects.
-5. Run `zig build` and `zig build test`.
-6. Update English and Chinese documentation together.
+5. If you added a new internal module, export it from `src/internal.zig`; export from `src/root.zig` only when deliberately changing the stable embedding API.
+6. Run `zig build` and `zig build test`.
+7. Update English and Chinese documentation together.
 
 ## Style
 
