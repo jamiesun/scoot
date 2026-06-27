@@ -1,6 +1,6 @@
 ---
 name: playground-eval
-description: Run a multi-dimensional, multi-angle assessment of the scoot playground/ test environment and write a scored Markdown report. Use when asked to "evaluate the playground", "评估 playground", "给 playground 打分", "playground 多维度评估", or to audit how well the committed playground exercises scoot end-to-end. Goes beyond the functional pass/fail smoke in playground-evaluator: it scores functional health, capability coverage, safety boundaries, reproducibility, documentation parity, and maintainability, then recommends the highest-leverage fixes.
+description: Run a multi-dimensional, multi-angle assessment of the scoot playground/ test environment and write a scored Markdown report. Use when asked to evaluate the playground, 评估 playground, 给 playground 打分, playground 多维度评估, or to audit how well the committed playground exercises scoot end-to-end. Unlike the functional pass/fail smoke in playground-evaluator, it scores functional health, capability coverage, safety boundaries, reproducibility, documentation parity, and maintainability, then recommends the highest-leverage fixes.
 ---
 
 # Playground Multi-Dimensional Evaluation
