@@ -1,4 +1,4 @@
-# Wasm Tool Packages
+# Agent Compute Units (Wasm Tool Packages)
 
 **Status: core static validation plus a standalone host.** The core `scoot`
 binary still does **not** load or execute Wasm, but the optional
@@ -9,6 +9,45 @@ host subset when built with `-Dwasm-host=true`. The full reference is
 The goal is a small, local, **reviewable** boundary for third-party tools —
 deliberately smaller than MCP or Wassette — so a package can be inspected and
 its requested authority understood *before* any runtime is ever added.
+
+## Positioning: An Agent Compute Unit, Not "Partial Wasm"
+
+Scoot deliberately uses only a slice of Wasm, and does **not** chase full-spec
+Wasm or the Component Model as a goal. That is a **choice, not a defect**. The
+unit of extension here is an **Agent Compute Unit**: a sealed, pure
+data-transform sandbox whose only channels are stdin (input), stdout/stderr
+(output), argv (configuration), and the process exit code. It has no filesystem,
+network, environment, clock, or randomness authority — any such import traps. Its
+output is a pure function of `(stdin, argv)`; if a unit needs a timestamp, seed,
+or nonce, the host passes it as input bytes, never as an ambient syscall.
+
+"Wasm" stays the underlying mechanism and keeps the existing identifiers
+(`wasm_tool`, `wasm-tools check`, `wasm_host`). "Agent Compute Unit" is how to
+think about *what it is for*: a small, reviewable, deterministic unit of compute
+the agent can call without granting it any ambient power.
+
+## Trust Boundary & Official Stance
+
+Scoot's safety guarantee for compute units is **not** "we read your code and
+judge it." Human or LLM review is advisory and can be evaded by obfuscation or
+supply-chain tampering. The guarantee is the sandbox: even a malicious unit can
+do nothing but transform its own input, because the host grants no ambient
+authority. Blast radius is bounded by what Scoot will run, regardless of who
+wrote the package or how it reached disk.
+
+Therefore, by design:
+
+- **Scoot never fetches or executes remote code.** There is no `scoot install
+  user/repo`, no registry, and no remote code-loading path for skills or compute
+  units. Packages arrive on disk through the user's own ordinary, trusted
+  operations (clone, copy, unpack).
+- **Any third-party tool that fetches and runs code on your behalf is not Scoot**
+  and falls outside Scoot's safety guarantee. A wrapper named like
+  `scoot-installer` speaks for itself, not for this project.
+- **Transparency is deterministic, not subjective.** `scoot wasm-tools check`
+  statically validates package shape, rejects path and symlink escapes, and
+  enforces the capability-subset rule — and the audit log records every unit the
+  agent actually runs.
 
 ## Package Layout
 

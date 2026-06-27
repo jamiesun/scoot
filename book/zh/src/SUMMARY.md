@@ -13,7 +13,7 @@
 - [技能](skills.md)
 - [调度与守护进程](scheduling.md)
 - [会话与审计](sessions.md)
-- [Wasm 工具包](wasm-tools.md)
+- [Agent 计算单元](wasm-tools.md)
 - [嵌入 API](embed-api.md)
 - [最佳实践案例](best-practices.md)
 - [故障排查与 FAQ](troubleshooting.md)
