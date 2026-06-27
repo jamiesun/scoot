@@ -33,6 +33,31 @@ zig build -Doptimize=ReleaseSafe    # 嵌入式 / 生产部署推荐档（见下
 
 **部署优化档（安全决策，非纯性能）**：嵌入式 / 生产部署推荐 **`ReleaseSafe`**——它保留整数溢出、越界、`unreachable` 等 safety check，触发时是**可被审计捕获的 panic**（与铁律 #4「绝不 panic」配套：结构性不可达一旦被破坏能立刻暴露，而非静默走错）。`ReleaseFast` 会把这些变成**静默未定义行为**，最危险的生产场景反而最不安全，**不推荐用于部署**。交付前应确认 `ReleaseSafe` 构建和测试套件同样通过。
 
+## 本地 CI 与 git 钩子
+
+提 PR 前，先在本地镜像 GitHub Actions 的 `zig` 任务（格式检查、Debug 构建、测试、ReleaseSafe 构建与 `--version` 冒烟）：
+
+```sh
+make ci          # 或：./scripts/local-ci.sh
+```
+
+每个克隆启用一次受版本管理的 pre-push 钩子，让 `git push` 先跑本地 CI（按 git 设计，它不会自动安装）：
+
+```sh
+make hooks       # 设置 core.hooksPath=.githooks
+```
+
+需要绕过时用 `git push --no-verify` 或 `SKIP_LOCAL_CI=1 git push`。`LOCAL_CI_CROSS=1` 与 `LOCAL_CI_DOCS=1` 会追加交叉编译与 mdBook 任务。
+
+文档构建：
+
+```sh
+mdbook build book/en
+mdbook build book/zh
+mkdir -p site
+cp book/site-index.html site/index.html
+```
+
 ## 代码地图
 
 | 路径 | 职责 |
@@ -47,9 +72,11 @@ zig build -Doptimize=ReleaseSafe    # 嵌入式 / 生产部署推荐档（见下
 | `src/secret.zig` | 密钥管理：env → 文件(0600) → 凭证命令，脱敏 |
 | `src/llm.zig` | LLM 适配（OpenAI Responses API `/v1/responses`）：HTTP 往返 + 强制 json_schema/strict + 防弹解析 |
 | `src/jsonio.zig` | 共享 JSON 字符串转义（session / llm 复用） |
+| `src/regex.zig` | 本地 Thompson-NFA 正则引擎：线性时间、抗 ReDoS；支撑 `grep` |
 | `src/skill.zig` | Skill 机制：发现 / 审查元数据 / 打包 / 渐进式披露 |
 | `src/session.zig` | 会话：跨回合存活的消息流 + JSONL 序列化（短期记忆载体） |
 | `src/compressor.zig` | 上下文压缩策略与外部 compressor plugin 边界 |
+| `src/obs.zig` | 观察优化器：在工具输出进入会话历史前做 token 预算内的收缩 |
 | `src/agent.zig` | 认知流引擎：多轮 ReACT 闭环、动作解析、策略门、工具执行、观察回灌 |
 | `src/daemon.zig` | 前台 daemon 生命周期状态、pid 处理、stop/status 辅助逻辑 |
 | `src/schedule.zig` | 调度引擎：every / at / 5 字段 UTC cron |

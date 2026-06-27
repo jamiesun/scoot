@@ -838,3 +838,7 @@ test "fromString: unknown policy uses drop" {
     try std.testing.expectEqual(Compressor.plugin, std.meta.activeTag(fromString("plugin:tiny")));
     try std.testing.expectEqual(Compressor.drop, std.meta.activeTag(fromString("semantic")));
 }
+
+test {
+    std.testing.refAllDecls(@This());
+}
