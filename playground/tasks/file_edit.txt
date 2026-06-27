@@ -1,0 +1,32 @@
+Playground edit smoke. Exercise the `file_edit` action under the default
+`guarded` policy, which confines writes to the project root. `file_edit` replaces
+exactly one occurrence of an `old` span; it errors if `old` is missing or appears
+more than once.
+
+Hard requirements (read before acting):
+
+- Your FIRST emitted action MUST be `file_write` (to create the file), and your
+  SECOND action MUST be `file_edit`. Do not emit a `final` action before you have
+  actually performed both and received their observations.
+- Do not answer from prior knowledge or describe what you "would" do; you must
+  actually create and edit the file and read the real observations.
+- Use `file_write` then `file_edit` only — no `bash` or other actions.
+
+Actions to run, in order, exactly once each:
+
+1. `file_write` with action_input
+   {"path":"playground/tmp/edit-smoke.txt","content":"status: PENDING"}
+2. `file_edit` with action_input
+   {"path":"playground/tmp/edit-smoke.txt","old":"PENDING","new":"DONE"}
+
+The `file_edit` observation has the form
+`[Observation] edited <path>: replaced 1 occurrence; file is now N bytes.`
+
+After you receive that observation, finish with a final answer that:
+
+- quotes the exact byte count `N` from the `file_edit` observation,
+- confirms exactly one occurrence was replaced under `guarded` (allowed because
+  the path stays inside the project root), and
+- states the file's resulting content.
+
+Constraint: do not read `playground/logs/audit.jsonl` directly.

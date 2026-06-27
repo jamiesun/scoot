@@ -1,0 +1,8 @@
+kind = "tool"
+name = "byte-stats"
+description = "Compute deterministic byte/line counts and a stable checksum for the JSON payload Scoot pipes to stdin"
+entry = "_start"
+component = "component.wasm"
+input_schema = "schema/input.json"
+output_schema = "schema/output.json"
+capabilities = ["compute"]

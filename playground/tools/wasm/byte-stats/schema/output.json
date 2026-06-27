@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "required": ["bytes", "lines", "checksum"],
+  "properties": {
+    "bytes": { "type": "integer", "minimum": 0 },
+    "lines": { "type": "integer", "minimum": 0 },
+    "checksum": { "type": "integer", "minimum": 0 }
+  }
+}

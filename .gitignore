@@ -25,7 +25,9 @@
 
 # Local configuration and test state
 /config.toml
-/localtest/
+
+# Playground keeps a committed test environment but ignores its runtime state
+# and secrets via playground/.gitignore (data dirs, generated config, .env).
 
 # Logs and temporary files
 *.log
