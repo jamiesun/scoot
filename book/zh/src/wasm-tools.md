@@ -1,10 +1,26 @@
-# Wasm 工具包
+# Agent 计算单元（Wasm 工具包）
 
 **状态：核心静态校验 + 独立 host。** 核心 `scoot` 二进制依旧**不**加载或执行 Wasm；可选的
 `scoot-wasm` 二进制在使用 `-Dwasm-host=true` 构建后，可以执行当前的整数、浮点与 WASI host 子集。
 完整参考见 [`docs/WASM_TOOLS.md`](https://github.com/jamiesun/scoot/blob/main/docs/WASM_TOOLS.md)；本页是概览。
 
 目标是为第三方工具提供一个小巧、本地、**可审查**的边界 —— 刻意比 MCP 或 Wassette 更小 —— 使一个包在引入任何运行时*之前*就能被检视、其请求的权限被理解。
+
+## 定位：这是 Agent 计算单元，不是「残缺的 Wasm」
+
+Scoot 刻意只借用 Wasm 的一部分，并**不**以追求完整 Wasm 规范或 Component Model 为目标。这是**选择，不是缺陷**。这里的扩展单位是 **Agent 计算单元**：一个封闭的、纯数据变换沙箱，唯一通道只有 stdin（输入）、stdout/stderr（输出）、argv（配置）和进程退出码。它没有文件、网络、环境变量、时钟或随机数权限 —— 任何此类 import 都会 trap。它的输出是 `(stdin, argv)` 的纯函数；如果某个单元需要时间戳、种子或 nonce，由 host 以输入字节传入，绝不作为环境系统调用提供。
+
+「Wasm」仍是底层机制，并保留现有标识符（`wasm_tool`、`wasm-tools check`、`wasm_host`）。「Agent 计算单元」是用来理解*它为何而存在*的视角：一个小巧、可审查、确定性的计算单位，agent 调用它而无需授予它任何环境权力。
+
+## 信任边界与官方立场
+
+Scoot 对计算单元的安全保证**不是**「我们读你的代码并判断好坏」。人工或 LLM 审查只是建议性的，可被混淆或供应链投毒绕过。真正的保证是沙箱：即便是恶意单元，也只能变换它自己的输入，因为 host 不授予任何环境权限。爆炸半径由 Scoot 愿意运行的范围决定，与包出自谁手、如何落到磁盘无关。
+
+因此，这是设计使然：
+
+- **Scoot 永不获取或执行远程代码。** 没有 `scoot install user/repo`，没有 registry，也没有任何针对 skill 或计算单元的远程代码加载路径。包只通过用户自身的常规可信操作（clone、copy、解压）落到磁盘。
+- **任何替你获取并运行代码的第三方工具都不是 Scoot**，也不在 Scoot 的安全保证范围内。一个名为 `scoot-installer` 之类的包装器只代表它自己，不代表本项目。
+- **透明是确定性的，而非主观的。** `scoot wasm-tools check` 静态校验包结构、拒绝路径与符号链接逃逸、强制能力子集规则；审计日志则记录 agent 实际运行的每一个单元。
 
 ## 包布局
 
@@ -82,8 +98,8 @@ capabilities = ["compute"]
 ```
 
 能力名：`compute`（纯 CPU，无 I/O）、`read`、`write`、`net_read`、`net_write`。独立 host
-当前只暴露最小 WASI preview1 的 stdio/args/environ/clock/random/proc-exit 子集；文件与网络权限
-尚未实现。
+当前只暴露最小 WASI preview1 的 stdin/stdout/stderr/argv/proc-exit 子集；环境变量、时钟、
+随机数、文件与网络权限均未实现。
 
 ## Agent 调用
 

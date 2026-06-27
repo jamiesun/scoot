@@ -51,13 +51,14 @@ heading when cutting a release.
   preview1 subset (W2): `scoot-wasm wasi <module.wasm> [args...]` instantiates
   the module, runs `_start`, pipes this process's stdin to fd 0, forwards the
   module's stdout/stderr, and exits with its `proc_exit` status. The exposed
-  surface is deliberately small and capability-safe by construction:
-  `args_*`/`environ_*`, `fd_read` (fd 0), `fd_write` (fd 1/2), `fd_close`,
-  `fd_seek` (stdio → ESPIPE), `fd_fdstat_get`, `clock_time_get`, `random_get`
-  (seeded/deterministic), and `proc_exit`. No filesystem or network functions
-  are implemented (any other WASI import traps), environ is empty by default,
-  out-of-bounds guest pointers return EFAULT, and bad fds return EBADF. This is
-  the intended subprocess host for external compression plugins (#100).
+  surface is a pure data-transform sandbox: the only channels are stdin
+  (`fd_read`, fd 0), stdout/stderr (`fd_write`, fd 1/2), argv (`args_*`), and
+  `proc_exit`. No environment, clock, randomness, filesystem, or network is
+  exposed — `environ_*`, `clock_time_get`, `random_get`, and every other WASI
+  import trap by construction, so a plugin's output is a pure function of its
+  (stdin, argv). Out-of-bounds guest pointers return EFAULT and non-stdio fds
+  return EBADF. This is the intended subprocess host for external compression
+  plugins (#100).
 - `scoot-wasm` now executes integer Wasm functions (W1): a dependency-free Zig
   stack machine with structured control flow (block/loop/if/else/br/br_if/
   br_table/return/call/call_indirect), i32/i64 arithmetic, a bounds-checked

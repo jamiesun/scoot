@@ -13,7 +13,7 @@
 - [Skills](skills.md)
 - [Scheduling & Daemon](scheduling.md)
 - [Sessions & Audit](sessions.md)
-- [Wasm Tool Packages](wasm-tools.md)
+- [Agent Compute Units](wasm-tools.md)
 - [Embedding API](embed-api.md)
 - [Best Practice Cases](best-practices.md)
 - [Troubleshooting & FAQ](troubleshooting.md)

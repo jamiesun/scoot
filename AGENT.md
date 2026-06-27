@@ -151,7 +151,8 @@ Changing these boundaries requires an explicit roadmap-level decision.
 6. Every subprocess and network path must have a hard timeout.
 7. Secrets must never be compiled in, committed, printed, or written to audit logs.
 8. Skill *execution* must not bypass the registered tool sandbox. (Reading a skill's instructions/resources is a native read-only capability, confined to the skill directory and audited, and is intentionally outside the policy gate.)
-9. Documentation changes must be bilingual.
+9. Wasm plugins run in a pure data-transform sandbox. The only channels are stdin (input), stdout/stderr (output), argv (configuration), and the process exit code. The host must not expose filesystem, network/socket, database, environment, clock, or randomness authority; any such import traps. A plugin's output must be a pure function of its (stdin, argv). If a plugin needs a timestamp, seed, or nonce, the host passes it as input bytes — never as an ambient syscall.
+10. Documentation changes must be bilingual.
 
 ## Extension Workflow
 

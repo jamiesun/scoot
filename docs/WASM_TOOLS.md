@@ -78,21 +78,24 @@ the intended subprocess host for external compression plugins: the core invokes
 `scoot-wasm wasi <component>` and speaks the JSON-in/JSON-out plugin protocol
 over stdio.
 
-Only a deliberately small WASI preview1 surface is exposed, so a module gains no
-ambient authority by construction:
+The exposed WASI preview1 surface is deliberately minimal: a plugin is a pure
+data transform whose only channels are stdin, stdout/stderr, argv, and the exit
+code. By construction it gains no ambient authority:
 
-- `args_sizes_get` / `args_get`, `environ_sizes_get` / `environ_get`
-- `fd_read` (fd 0 only), `fd_write` (fd 1/2 only), `fd_close`, `fd_seek`
-  (stdio is not seekable → `ESPIPE`), `fd_fdstat_get` (stdio character device)
-- `clock_time_get` (realtime/monotonic), `random_get` (seeded, deterministic)
+- `args_sizes_get` / `args_get` (argv, the only configuration channel)
+- `fd_read` (fd 0 / stdin only), `fd_write` (fd 1/2 / stdout+stderr only)
 - `proc_exit`
 
-The host does **not** expose its own environment (environ is empty by default)
-and implements **no** filesystem or network functions: any other WASI import
-traps when called, and an out-of-bounds guest pointer returns `EFAULT` rather
-than corrupting host memory. Bad file descriptors return `EBADF`. Resource use
-stays bounded by the same fuel / call-depth / memory-page caps as `run`, and the
-core additionally wraps the subprocess with a hard wall-clock timeout.
+The host exposes **no** environment, clock, or randomness, and **no** filesystem
+or network: `environ_*`, `clock_time_get`, `random_get`, and every other WASI
+import resolve to `unsupported` and trap when called. This keeps a plugin's
+output a pure function of its (stdin, argv): if a plugin needs a timestamp,
+seed, or nonce, the host must pass it as input bytes, never as an ambient
+syscall. Writing to a non-stdio descriptor returns `EBADF`, and an
+out-of-bounds guest pointer returns `EFAULT` rather than corrupting host
+memory. Resource use stays bounded by the same fuel / call-depth / memory-page
+caps as `run`, and the core additionally wraps the subprocess with a hard
+wall-clock timeout.
 
 The repository includes runnable compressor packages and a copyable template:
 
@@ -116,8 +119,9 @@ checks.
 
 Not yet implemented (later phases): full spec-conformant validation and
 floating-point conformance against the official Wasm spec test suite beyond the
-current host subset, and the broader WASI surface (files, sockets, clocks
-beyond realtime/monotonic).
+current host subset, and the broader WASI surface (files, sockets, environment,
+clocks, randomness) — all of which the pure data-transform sandbox excludes by
+design.
 
 ## Manifest
 
@@ -170,7 +174,7 @@ Supported capability names:
 
 `compute` is the only capability expected for pure tools in the first iteration.
 Package capabilities are still admission metadata: the standalone host currently
-exposes only stdio/args/environ/clock/random/proc-exit, and it does not map
+exposes only the stdin/stdout/stderr/argv/proc-exit subset, and it does not map
 `read`, `write`, `net_read`, or `net_write` to filesystem, environment, or
 network authority.
 

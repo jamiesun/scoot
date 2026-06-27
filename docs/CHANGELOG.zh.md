@@ -42,11 +42,11 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 - `scoot-wasm` 现已能在最小 WASI preview1 子集上运行 `wasm32-wasi` 命令模块（W2）：
   `scoot-wasm wasi <module.wasm> [参数...]` 实例化模块、执行 `_start`、把本进程的
   stdin 作为 fd 0 读入、转发模块的 stdout/stderr，并以其 `proc_exit` 状态退出。暴露的
-  表面刻意收窄、按构造即具备能力安全：`args_*`/`environ_*`、`fd_read`（fd 0）、
-  `fd_write`（fd 1/2）、`fd_close`、`fd_seek`（stdio → ESPIPE）、`fd_fdstat_get`、
-  `clock_time_get`、`random_get`（带种子、确定性）与 `proc_exit`。不实现任何文件或
-  网络函数（其余 WASI import 一律 trap），environ 默认为空，越界 guest 指针返回
-  EFAULT，非法 fd 返回 EBADF。这正是外部压缩插件的子进程 host（#100）。
+  表面是纯数据变换沙箱：唯一通道是 stdin（`fd_read`，fd 0）、stdout/stderr
+  （`fd_write`，fd 1/2）、argv（`args_*`）与 `proc_exit`。不暴露环境变量、时钟、
+  随机数、文件或网络——`environ_*`、`clock_time_get`、`random_get` 以及其余所有
+  WASI import 按构造 trap，使插件输出是 `(stdin, argv)` 的纯函数。越界 guest 指针
+  返回 EFAULT，非 stdio 描述符返回 EBADF。这正是外部压缩插件的子进程 host（#100）。
 - `scoot-wasm` 现已能执行整数 Wasm 函数（W1）：一个零依赖的纯 Zig 栈机，支持结构化
   控制流（block/loop/if/else/br/br_if/br_table/return/call/call_indirect）、
   i32/i64 算术、带边界检查的 64 KiB 页线性内存（load/store、memory.size/grow）、
