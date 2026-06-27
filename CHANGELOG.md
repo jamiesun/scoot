@@ -18,6 +18,19 @@ heading when cutting a release.
 
 ### Added
 
+- `scoot-wasm` now executes floating-point Wasm (W4): f32/f64 arithmetic
+  (add/sub/mul/div), unary ops (abs/neg/ceil/floor/trunc/nearest/sqrt),
+  min/max/copysign, ordered comparisons, int/float conversions, and both
+  trapping (`iNN.trunc_fMM_s/u`) and saturating (`iNN.trunc_sat_fMM_s/u`)
+  truncation, alongside the already-supported bulk `memory.copy`/`memory.fill`.
+  NaN results are canonicalized for deterministic output across hosts, while
+  abs/neg/copysign preserve exact bit patterns; `nearest` rounds ties to even
+  and the zero sign is preserved. The static type validator now type-checks the
+  float opcodes too, so float modules load and run end-to-end. A robustness
+  suite now feeds truncated, byte-corrupted, and random/hostile module bytes
+  through the loader and asserts every input yields a structured load error or
+  trap instead of crashing. Full spec-conformant validation beyond the
+  supported subset remains a later phase (#100).
 - Added a native `wasm_tool` Agent action for compute-only local Wasm packages.
   It validates the package boundary, requires `entry = "_start"` plus
   `policy.toml` granting only `compute`, and runs the configured `scoot-wasm`
@@ -55,8 +68,8 @@ heading when cutting a release.
   limits. Invoke with `scoot-wasm run <module.wasm> <export> [int args...]`.
   The engine is compiled only into the standalone `scoot-wasm` binary
   (`-Dwasm-host=true`); the zero-dependency core never links it. Full
-  spec-conformant validation beyond the supported subset and floating-point
-  arithmetic remain later phases (#100).
+  spec-conformant validation beyond the supported subset remains a later
+  phase (#100).
 
 ## [0.4.0] - 2026-06-26
 
