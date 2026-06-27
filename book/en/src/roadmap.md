@@ -13,14 +13,15 @@ The Chinese roadmap lives at:
 Scoot should stay a small, auditable, local-first automation core:
 
 - one lightweight binary,
-- CLI and config file interaction,
-- OpenAI-compatible backend only,
+- CLI, REPL, daemon, and local stdio `serve` interaction,
+- OpenAI-compatible Responses API backend only,
 - local state and audit logs,
 - defensive validation before execution,
-- no GUI,
+- no GUI or web UI,
 - no cloud sync,
 - no secret leakage,
-- no skill privilege bypass.
+- no skill privilege bypass,
+- MCP/Wasm/other extension seams must remain configuration-gated, timeout-bound, and auditable,
+- the public package root must stay a narrow stable embedding API.
 
-Near-term work should improve diagnostics, per-run summaries, directory permission hardening, log lifecycle, and eventually plan mode.
-
+Near-term work should focus on extension-boundary audits, actionable diagnostics, documentation alignment, runtime governance, and only then plan mode.

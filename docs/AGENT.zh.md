@@ -17,7 +17,7 @@
 
 ## 一句话项目定位
 
-Scoot 是用**纯 Zig（0.16.0+）**手搓的轻量级 AI Agent 守护进程（Daemon / CLI）。基调：轻量、无冗余、本地优先、防御性编程。**当前已落地北极星五大支柱**（均有测试守护，`zig build test` 应保持全绿）：`scoot -e` 单次执行与默认 REPL 多轮交互跑完整 ReACT 闭环（结构化步骤 + 执行护栏 + 审计落盘）；**内建工具集自包含**（bash + file_read/write/edit + grep/glob + http_request，全部进程内实现、零外部命令依赖，可在裁剪/嵌入式 Linux 运行）；Skill 渐进式披露；Schedule 无人值守自主调度（强制 readonly 安全档）；密钥三来源安全管理。`grep -rn NotImplemented src` 现已无实现桩——新增能力时这是「扩展」而非「填空」。
+Scoot 是用**纯 Zig（0.16.0+）**手搓的轻量级 AI Agent 守护进程（Daemon / CLI）。基调：轻量、无冗余、本地优先、防御性编程。**当前已落地北极星五大支柱**（均有测试守护，`zig build test` 应保持全绿）：`scoot -e` 单次执行与默认 REPL 多轮交互跑完整 ReACT 闭环（结构化步骤 + 执行护栏 + 审计落盘）；**内建动作/工具集自包含**（bash + file_read/write/edit + grep/glob/outline + http_request + skill/recall/parallel + mcp_call + wasm_tool，核心读写搜索工具进程内实现，外部执行路径均经策略门与硬超时）；Skill 渐进式披露；Schedule 无人值守自主调度（强制 readonly 安全档）；密钥三来源安全管理。`grep -rn NotImplemented src` 现已无实现桩——新增能力时这是「扩展」而非「填空」。
 
 ## 常用命令
 
@@ -37,23 +37,29 @@ zig build -Doptimize=ReleaseSafe    # 嵌入式 / 生产部署推荐档（见下
 
 | 路径 | 职责 |
 | --- | --- |
-| `src/main.zig` | CLI 入口：参数解析 → REPL / 单次执行 / 守护 / `config` |
-| `src/root.zig` | `scoot` 库模块根，再导出各子系统命名空间 |
+| `src/main.zig` | CLI 入口：参数解析、setup/config/doctor、REPL、单次执行、skills、schedule、daemon、serve |
+| `src/root.zig` | 稳定公开包根：只暴露窄口径 embedding API facade |
+| `src/internal.zig` | CLI 与仓库测试使用的内部模块根；私有子系统从这里导出 |
+| `src/api.zig` | 稳定 embedding 生命周期 facade：`Runtime`、`Options`、`start`、`run`、`stop` |
 | `src/paths.zig` | 运行目录解析：`~/.scoot`（`SCOOT_HOME` 覆盖）及各子路径 |
-| `src/config.zig` | 结构化配置（backend / agent / tools / skills / audit）；TOML 优先 / JSON 回落 |
+| `src/config.zig` | 结构化配置（backend / agent / tools / skills / MCP / audit / schedule）；TOML 优先 / JSON 回落 |
 | `src/toml.zig` | 自研零依赖 TOML 子集解析器（→ `std.json.Value`，复用 JSON 类型映射） |
 | `src/secret.zig` | 密钥管理：env → 文件(0600) → 凭证命令，脱敏 |
 | `src/llm.zig` | LLM 适配（OpenAI Responses API `/v1/responses`）：HTTP 往返 + 强制 json_schema/strict + 防弹解析 |
 | `src/jsonio.zig` | 共享 JSON 字符串转义（session / llm 复用） |
-| `src/skill.zig` | Skill 机制：发现 / 选择 / 按需加载（渐进式披露） |
+| `src/skill.zig` | Skill 机制：发现 / 审查元数据 / 打包 / 渐进式披露 |
 | `src/session.zig` | 会话：跨回合存活的消息流 + JSONL 序列化（短期记忆载体） |
-| `src/agent.zig` | 认知流引擎：多轮 ReACT 闭环（structured step + bash 工具）+ 每回合 ArenaAllocator，围绕 Session 运行 |
+| `src/compressor.zig` | 上下文压缩策略与外部 compressor plugin 边界 |
+| `src/agent.zig` | 认知流引擎：多轮 ReACT 闭环、动作解析、策略门、工具执行、观察回灌 |
+| `src/daemon.zig` | 前台 daemon 生命周期状态、pid 处理、stop/status 辅助逻辑 |
 | `src/schedule.zig` | 调度引擎：every / at / 5 字段 UTC cron |
 | `src/audit.zig` | 审计日志 |
-| `src/tools/*.zig` | 执行沙盒：bash / file / search / http |
+| `src/policy.zig` | 执行策略门与路径/网络护栏 |
+| `src/tools/*.zig` | 执行沙盒：bash / file / search / http / MCP client / Wasm runner shim |
+| `src/wasm_*.zig` | 可选独立 `scoot-wasm` host/engine 支撑；除显式构建外不链接进核心二进制 |
 | `build.zig`, `build.zig.zon` | 构建与包清单 |
 
-新增子系统：在 `src/` 建文件，并在 `src/root.zig` 用 `pub const xxx = @import("xxx.zig");` 再导出，使其纳入测试图。
+新增内部子系统：在 `src/` 建文件，并在 `src/internal.zig` 用 `pub const xxx = @import("xxx.zig");` 导出，使其纳入内部测试图。不要把私有子系统导出到 `src/root.zig`：该文件是稳定公开 embedding API，并有白名单测试守护。扩展它必须先做明确的 API 边界决策并同步文档。
 
 ## Zig 0.16 关键习惯（容易踩错，务必遵守）
 
@@ -120,7 +126,8 @@ zig build -Doptimize=ReleaseSafe    # 嵌入式 / 生产部署推荐档（见下
 2. 定位落点：扩展既有子系统（如给 `agent.zig` 加一个 `Action`、给某工具加分支）还是新建文件；核心逻辑已基本无 `error.NotImplemented` 桩，多数是「在既有结构上扩展」而非「填空」。
 3. 先写最小可用实现 + 对应 `test` 块；保持函数签名稳定，必要时再扩展。
 4. 防御式编码：先校验输入与模型输出，再执行；外部交互全部加超时。
-5. `zig build && zig build test` 通过后再交付。
+5. 如果新增内部模块，从 `src/internal.zig` 导出；只有刻意改变稳定 embedding API 时才导出到 `src/root.zig`。
+6. `zig build && zig build test` 通过后再交付。
 
 ## 风格与提交
 

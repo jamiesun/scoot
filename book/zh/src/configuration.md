@@ -223,6 +223,7 @@ stderr_limit = 262144
 | `policy` | string | `guarded` | 执行策略：`guarded`、`readonly` 或 `unrestricted`（别名 `yolo`）。未知值回退到 `guarded`。 |
 | `confine_writes` | bool | `true` | 把 `file_write`/`file_edit` 限制在项目根目录内。**仅 `guarded`。** |
 | `block_internal_http` | bool | `true` | 阻止 `http_request` 访问内部/元数据主机（SSRF 防护）。**仅 `guarded`。** |
+| `wasm_host` | 字符串数组 | `["scoot-wasm", "wasi", "{component}"]` | `wasm_tool` 使用的可信 argv。使用默认值时，Scoot 会先尝试与当前 `scoot` 二进制同目录的 `scoot-wasm`，找不到再回退 PATH。占位符：`{package}`、`{entry}`、`{component}`。 |
 
 两个加固标志 **仅在 `guarded` 模式下生效**——`readonly` 已经
 fail-closes 写入与网络。`confine_writes` 拒绝绝对路径、`..`
@@ -236,6 +237,7 @@ timeout_ms = 30000
 policy = "guarded"
 confine_writes = true
 block_internal_http = true
+wasm_host = ["./zig-out/bin/scoot-wasm", "wasi", "{component}"]
 ```
 
 ---

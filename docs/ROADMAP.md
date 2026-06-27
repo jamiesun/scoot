@@ -27,8 +27,8 @@ Scoot is built for system administrators, developers, and advanced technical use
       v                                 v
  +---------------------------+    +-------------------------------------------------------+
  |        Skill Engine       |    |                  Execution Sandbox                    |
- |  discover · select · load |    |  bash · grep · glob · file_read/write/edit · http     |
- +---------------------------+    +-------------------------------------------------------+
+  |  discover · select · load |    |  bash · file · search · http · MCP · Wasm host shim    |
+  +---------------------------+    +-------------------------------------------------------+
       |                                 |
       v                                 v
  +-------------------------------+    +-------------------------------+
@@ -60,7 +60,7 @@ Priority order:
 
 ### Core Toolset
 
-Implemented tools:
+Implemented actions/tools:
 
 - `bash`
 - `file_read`
@@ -68,9 +68,15 @@ Implemented tools:
 - `file_edit`
 - `grep`
 - `glob`
+- `outline`
 - `http_request`
+- `skill`
+- `recall`
+- bounded read-only `parallel`
+- `mcp_call`
+- `wasm_tool`
 
-Most tools are implemented in-process and do not require external `cat`, `sed`, `grep`, `find`, or `curl`. Shell execution is still available through `/bin/sh`, but it is policy-checked and timeout-bound.
+Core file, search, outline, and HTTP tools are implemented in-process and do not require external `cat`, `sed`, `grep`, `find`, or `curl`. Shell execution is still available through `/bin/sh`, but it is policy-checked and timeout-bound. `mcp_call` is a configured client boundary, and `wasm_tool` runs compute-only local packages through a configured `scoot-wasm` host argv rather than through broad shell command synthesis.
 
 ### OpenAI-Compatible API Integration
 
@@ -99,26 +105,32 @@ Supported actions:
 - `file_edit`
 - `grep`
 - `glob`
+- `outline`
 - `http_request`
+- `mcp_call`
+- `wasm_tool`
+- `skill`
+- `recall`
+- `parallel`
 - `final`
 
-Each action is validated, policy-checked, executed through the tool layer, audited, and fed back as an observation.
+Each action is schema-constrained, argument-parsed, policy-checked where appropriate, executed through the tool layer or native read-only boundary, audited, and fed back as an observation. Tool observations are treated as untrusted data and must not become instructions.
 
 ### Execution Policy
 
 Modes:
 
-- `guarded`: interactive tripwire mode; blocks catastrophic shell patterns.
-- `readonly`: fail-closed unattended mode; rejects shell and network, and allows only project-relative, non-sensitive local read built-in capabilities.
+- `guarded`: interactive tripwire mode; blocks catastrophic shell patterns and applies default-on write confinement plus internal HTTP target blocking.
+- `readonly`: fail-closed unattended mode; rejects shell, writes, and network, and allows only project-relative, non-sensitive local read built-in capabilities plus compute-only boundaries.
 - `unrestricted`: no policy limit, still audited.
 
-Scheduled jobs correct `guarded` to `readonly` at execution time because unattended execution must not rely on a human tripwire.
+Scheduled jobs correct `guarded` to `readonly` at execution time because unattended execution must not rely on a human tripwire. `guarded` is not a sandbox; strong isolation remains an OS/deployment concern.
 
 ### Skills
 
-Skills are directories containing `SKILL.md`. Discovery reads front matter (`name`, `description`, and optional review metadata such as `capabilities`, `allowed_tools`, and `scope`) and injects a compact manifest into the system context. Full skill instructions are loaded only when relevant.
+Skills are directories containing `SKILL.md`. Discovery reads front matter (`name`, `description`, and optional review metadata such as `capabilities`, `allowed_tools`, and `scope`) and injects a compact manifest into the system context. Full skill instructions and resources are loaded only when relevant through the native read-only `skill` action, confined to the selected skill directory and audited.
 
-Skills do not bypass policy or the tool sandbox.
+Skills do not bypass policy or the tool sandbox. Reading instructions is native and read-only so it works in `readonly`; any skill-requested shell, write, network, MCP, or Wasm action still goes through the normal registered tool boundary.
 
 ### Schedule
 
@@ -128,13 +140,17 @@ Implemented triggers:
 - `at_unix`
 - 5-field UTC `cron` (minute/hour/day/month/weekday; `*`, lists, ranges, and steps)
 
-### Daemon Lifecycle
+### Daemon Lifecycle And Local App-Server Mode
 
 `scoot daemon run` is the foreground long-running mode for scheduled jobs. It records `state/daemon.json` and `state/daemon.pid`, handles SIGTERM/SIGINT, and treats a stale `running` state on restart as evidence of an unclean previous stop. `daemon status` reports Scoot's last recorded lifecycle state, and `daemon stop` sends SIGTERM only when the pid file and running state agree.
 
-### Sessions And Audit
+`scoot serve` is a foreground stdio NDJSON protocol for local app integrations. It remains CLI/text I/O rather than a GUI or web service, and exposes run/session/audit methods over local stdin/stdout.
 
-Sessions are persisted as JSONL under `state/sessions`. Audit logs are persisted as JSONL under `logs`.
+### Sessions, Recall, Audit, And Embedding
+
+Sessions are persisted as JSONL under `state/sessions`. The native `recall` action retrieves exact earlier messages from the current session transcript when active context has been compacted. Audit logs are persisted as JSONL under `logs` and can be queried through CLI/serve paths.
+
+The public Zig package root is intentionally narrow: an opaque `Runtime`, `Options`, `start`, `run`, `stop`, and `version`. Internal modules are exported through `src/internal.zig` for CLI/repository tests, not through the stable package root.
 
 Current audit events include:
 
@@ -155,8 +171,10 @@ These are hard boundaries unless explicitly changed in the roadmap:
 - No complex cloud synchronization.
 - No execution of unvalidated model output.
 - No heavy runtime or native plugin system that breaks the single-binary posture.
+- No remote plugin registry or remote code-loading path for skills or Wasm packages.
 - No plaintext secrets in committed config, binaries, logs, or audit output.
 - No skill privilege escalation outside the registered tools.
+- No broad public package-root export of private subsystems without an explicit API-boundary decision.
 
 ## Direction
 
@@ -176,25 +194,31 @@ Declarative config already covers the core scheduled-job case. Future work may a
 
 Skills should remain lightweight instruction/data bundles. They should not become native binary plugins or remote code loaders.
 
-### 5. Runtime Governance
+### 5. Optional Tool Boundaries
 
-Runtime state, config, secrets, logs, skills, and sessions should stay under one local runtime directory. Directory permissions and log lifecycle should be hardened further.
+MCP and Wasm are extension seams, not excuses to grow an unbounded trusted core. MCP calls must remain configuration-gated with explicit allowed tools and hard timeouts. Wasm execution must stay outside the core binary unless explicitly built as the standalone `scoot-wasm` host, with compute-only package policy for the native Agent action.
+
+### 6. Runtime Governance
+
+Runtime state, config, secrets, logs, skills, and sessions should stay under one local runtime directory. Directory permissions, log lifecycle, and audit/query ergonomics should remain part of the safety posture.
 
 ## Completion Signals
 
 The foundation is healthy when these are observable:
 
 - Invalid model JSON is caught and fed back without crashing.
-- Tool and network calls time out reliably.
-- Long-running schedule loops do not leak memory.
+- Tool, MCP, Wasm-host, subprocess, and network calls time out reliably.
+- Long-running schedule and serve loops do not leak memory.
 - A new skill can be added without recompilation.
+- Optional extension seams remain configuration-gated and auditable.
 - Audit logs can reconstruct a run.
 - Secrets are never visible in config, logs, audit events, or errors.
+- The public package root stays small and intentionally stable.
 
 ## Near-Term Work Worth Doing
 
-- Improve `BackendError` diagnostics with HTTP status and response excerpts.
-- Add compact per-run summaries for exit code, event counts, transcript path, backend status, and policy-denial count.
-- Harden runtime directory permissions.
-- Add log rotation or bounded audit retention.
-- Build plan mode only after ReACT reliability and diagnostics are stronger.
+- Keep backend and run diagnostics actionable: HTTP status, response excerpts, run summaries, transcript/audit paths, and policy-denial counts should remain easy to inspect.
+- Audit optional boundaries (`mcp_call`, `wasm_tool`, external compressor plugins, and `serve`) for total timeouts, bounded output, secret redaction, and request-scoped allocation.
+- Keep English/Chinese docs and mdBook pages aligned with the actual action set and stable API boundary.
+- Continue hardening runtime governance: permissions, bounded retention, audit query ergonomics, and failure-mode clarity.
+- Build plan mode only after ReACT reliability, diagnostics, and extension-boundary audits are stronger.

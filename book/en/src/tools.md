@@ -6,7 +6,7 @@ Every turn, the model must emit exactly one JSON step:
 { "thought": "one-line reasoning", "action": "<action>", "action_input": "<input>" }
 ```
 
-`action` must be one of the thirteen built-in actions below — Scoot never executes
+`action` must be one of the fourteen built-in actions below — Scoot never executes
 free-form text. Each tool runs inside a sandbox with a **hard timeout**
 (`tools.timeout_ms`, default 30 s) and its output is returned to the model as the
 next *observation* (clipped to keep the context small). Whether a given action is
@@ -29,6 +29,7 @@ Prefer them over shelling out.
 | `outline` | Structural skeleton of a file | `{"path":...}` | yes |
 | `http_request` | One HTTP/HTTPS request | `{"method":...,"url":...,"body":...}` | depends on method |
 | `mcp_call` | Call a configured MCP server tool | `{"server":...,"tool":...,"args":{...}}` | no |
+| `wasm_tool` | Run a compute-only local Wasm package | `{"package":...,"input":{...}}` | yes |
 | `skill` | Read a loaded skill's files | `{"name":...,"path":"SKILL.md"}` | yes (native) |
 | `recall` | Search the current session transcript archive | `{"query":...}` or `{"seq":...}` | yes (native) |
 | `parallel` | 1–4 concurrent read-only calls | `{"calls":[...]}` | yes |
@@ -167,6 +168,24 @@ MCP calls are treated as external side-effect-capable execution. `readonly`
 denies them; `guarded` and `unrestricted` still require the explicit server and
 tool allowlist. MCP calls are audited like other tool calls and run under the
 same hard timeout.
+
+## `wasm_tool`
+
+```json
+{ "package": "examples/wasm-plugin-template", "input": { "expr": "1+2" } }
+```
+
+Runs one local Wasm tool package through the configured `scoot-wasm` host
+without invoking shell. The package must pass the same
+`scoot wasm-tools check` boundary, use a WASI command entry (`entry = "_start"`),
+and grant only `compute` in `policy.toml`. The model supplies only the package
+path and JSON input; the host argv is trusted runtime configuration.
+
+In `guarded` and `readonly`, the package path must be project-relative and must
+not contain absolute paths, `..`, `~`, or `$` expansion. The current host surface
+is stdio/args/environ/clock/random/proc-exit only; it does not grant filesystem,
+network, or host environment access. Use this when a Wasm tool is enough instead
+of routing through `bash`.
 
 ## `skill`
 

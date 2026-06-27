@@ -17,6 +17,11 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 ### 新增
 
+- 新增原生 `wasm_tool` Agent 动作，用于运行 compute-only 本地 Wasm 包。它会校验
+  package 边界，要求 `entry = "_start"` 且 `policy.toml` 只能授予 `compute`，
+  并直接运行配置好的 `scoot-wasm` host argv，不再为了执行 Wasm 工具给模型宽泛的
+  `bash` 命令。使用默认 host 配置时，Scoot 会先选择与当前 `scoot` 二进制同目录的
+  `scoot-wasm`，找不到再回退 PATH。
 - 新增可复制的 Wasm compressor 插件模板、确定性的 redactor compressor 示例，以及用于
   构建、校验和 smoke-test 示例包的 `scripts/check-wasm-examples.sh`。
 - `scoot-wasm` 现在会在执行前对当前 host 子集做 W3 函数体静态类型验证。该验证会检查

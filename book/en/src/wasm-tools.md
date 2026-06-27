@@ -98,15 +98,28 @@ Capability names: `compute` (CPU-only, no I/O), `read`, `write`, `net_read`,
 stdio/args/environ/clock/random/proc-exit subset; filesystem and network
 authority are not implemented.
 
+## Agent Invocation
+
+`wasm_tool` is the native Agent action for compute-only local packages. It keeps
+Wasm execution out of `bash`: the model supplies a package path and JSON input,
+while the configured host argv remains trusted runtime configuration.
+
+```json
+{ "action": "wasm_tool", "action_input": "{\"package\":\"examples/wasm-plugin-template\",\"input\":{\"expr\":\"1+2\"}}" }
+```
+
+The action reuses package validation, requires `entry = "_start"`, and only runs
+packages whose `policy.toml` grants `compute` and nothing broader. In `guarded`
+and `readonly`, package paths must be project-relative and must not contain
+absolute paths, `..`, `~`, or `$` expansion. With the default host config, Scoot
+first tries a sibling `scoot-wasm` next to the running `scoot` binary, then falls
+back to PATH.
+
 ## Schemas
 
 `schema/input.json` and `schema/output.json` are JSON Schemas for the tool I/O.
 The validator currently checks that both exist and are valid JSON; runtime
-enforcement will build on the same files. The planned model-invocation shape:
-
-```json
-{ "action": "wasm_tool", "action_input": "{\"tool\":\"calculator\",\"input\":{\"expr\":\"1+2\"}}" }
-```
+enforcement will build on the same files.
 
 ## Non-Goals (v0)
 

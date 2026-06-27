@@ -342,6 +342,7 @@ currently covers:
 - `file_read`, `file_write`, and `file_edit` for file operations.
 - `grep`, `glob`, and `outline` for project inspection.
 - `http_request` for one bounded HTTP/HTTPS request.
+- `wasm_tool` for compute-only local Wasm packages without shell.
 - `skill` for reading trusted local skill instructions and resources.
 - `recall` for retrieving exact earlier messages from the current session transcript.
 - `parallel` for 1-4 independent read-only calls.

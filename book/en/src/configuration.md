@@ -246,6 +246,7 @@ for the full model.
 | `policy` | string | `guarded` | Execution policy: `guarded`, `readonly`, or `unrestricted` (alias `yolo`). Unknown values fall back to `guarded`. |
 | `confine_writes` | bool | `true` | Keep `file_write`/`file_edit` inside the project root. **`guarded` only.** |
 | `block_internal_http` | bool | `true` | Block `http_request` to internal/metadata hosts (SSRF guard). **`guarded` only.** |
+| `wasm_host` | string array | `["scoot-wasm", "wasi", "{component}"]` | Trusted argv used by `wasm_tool`. With the default, Scoot first tries a sibling `scoot-wasm` next to the running `scoot` binary, then falls back to PATH. Placeholders: `{package}`, `{entry}`, `{component}`. |
 
 Both hardening flags apply **only in `guarded` mode** — `readonly` already
 fail-closes writes and network. `confine_writes` rejects absolute paths, `..`
@@ -260,6 +261,7 @@ timeout_ms = 30000
 policy = "guarded"
 confine_writes = true
 block_internal_http = true
+wasm_host = ["./zig-out/bin/scoot-wasm", "wasi", "{component}"]
 ```
 
 ---

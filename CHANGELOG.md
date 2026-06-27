@@ -18,6 +18,12 @@ heading when cutting a release.
 
 ### Added
 
+- Added a native `wasm_tool` Agent action for compute-only local Wasm packages.
+  It validates the package boundary, requires `entry = "_start"` plus
+  `policy.toml` granting only `compute`, and runs the configured `scoot-wasm`
+  host argv directly instead of giving the model a broad `bash` command.
+  With the default host config, Scoot now prefers a sibling `scoot-wasm` next to
+  the running `scoot` binary before falling back to PATH.
 - Added a copyable Wasm compressor plugin template, a deterministic redactor
   compressor example, and `scripts/check-wasm-examples.sh` to build, validate,
   and smoke-test the example packages.

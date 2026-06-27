@@ -85,13 +85,23 @@ capabilities = ["compute"]
 当前只暴露最小 WASI preview1 的 stdio/args/environ/clock/random/proc-exit 子集；文件与网络权限
 尚未实现。
 
-## Schema
+## Agent 调用
 
-`schema/input.json` 与 `schema/output.json` 是工具 I/O 的 JSON Schema。校验器当前只检查两者存在且为合法 JSON；运行时强制将基于同样的文件构建。计划中的模型调用形态：
+`wasm_tool` 是 Agent 的原生动作，用于运行 compute-only 本地包。它让 Wasm 执行
+脱离 `bash`：模型只提供包路径和 JSON 输入，host argv 则保持为可信运行时配置。
 
 ```json
-{ "action": "wasm_tool", "action_input": "{\"tool\":\"calculator\",\"input\":{\"expr\":\"1+2\"}}" }
+{ "action": "wasm_tool", "action_input": "{\"package\":\"examples/wasm-plugin-template\",\"input\":{\"expr\":\"1+2\"}}" }
 ```
+
+该动作复用 package 校验，要求 `entry = "_start"`，并且只运行 `policy.toml` 仅授予
+`compute` 的包。在 `guarded` 与 `readonly` 下，包路径必须是项目相对路径，不能包含
+绝对路径、`..`、`~` 或 `$` 展开。使用默认 host 配置时，Scoot 会先尝试与当前
+`scoot` 二进制同目录的 `scoot-wasm`，找不到再回退 PATH。
+
+## Schema
+
+`schema/input.json` 与 `schema/output.json` 是工具 I/O 的 JSON Schema。校验器当前只检查两者存在且为合法 JSON；运行时强制将基于同样的文件构建。
 
 ## 非目标（v0）
 

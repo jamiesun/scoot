@@ -27,7 +27,7 @@ Scoot 是一个运行在纯文本环境下的轻量级 AI Agent 守护进程（D
       v                                 v
  +---------------------------+    +-------------------------------------------------------+
  |        Skill Engine       |    |                  Execution Sandbox                    |
- |  discover · select · load |    |  bash · grep · glob · file_read/write/edit · http     |
+ |  discover · select · load |    |  bash · file · search · http · MCP · Wasm host shim    |
  +---------------------------+    +-------------------------------------------------------+
       |                                 |
       |                                 |  (Async / Timer)
@@ -64,8 +64,8 @@ Scoot 是一个运行在纯文本环境下的轻量级 AI Agent 守护进程（D
 
 > 现状核验：本仓库已落地北极星五大支柱——ReACT 认知流 / 内建工具集（零外部命令依赖）/ 执行护栏 / Skill / Schedule，外加审计、会话、配置、密钥三大支撑，`zig build` / `zig build test` 应保持全绿（Debug 与 ReleaseSafe 双档）。`grep -rn NotImplemented src` 现已无实现桩。下列条目标注 ✅（核心逻辑已实现并有测试守护）/ 🚧（明确暂缓或增量待定，见各条尾注与「暂缓」）。
 
-- **✅ 基础工具集（Core Toolset）**
-  对 `bash`、`grep`、`glob`、`file_read`、`file_write`、`file_edit`、`http_request` 的底层封装，构成 Agent 可调用的执行原语，**全部进程内自包含、零外部命令依赖**（裁剪 / 嵌入式 Linux 可用）。`bash`（`src/tools/bash.zig`）经 `/bin/sh -c` 执行、**硬超时**强制终止、输出上限与可选 cwd 沙盒；`file_*`（`src/tools/file.zig`）进程内读 / 覆盖写 / 唯一匹配编辑，自带大小上限；`grep`/`glob`（`src/tools/search.zig`）—— grep 走**自研 Thompson NFA 正则引擎**（`src/regex.zig`，线性时间、ReDoS 免疫，不依赖第三方正则），glob 走 `std.fs` 遍历；`http_request`（`src/tools/http.zig`）发 HTTP/HTTPS、**`std.Io.Select` 竞速硬超时**（真正中断挂死连接）、可配 CA。各工具均有单元测试守护（含黑洞地址超时实测）。
+- **✅ 基础动作 / 工具集（Core Actions & Toolset）**
+  Agent 可调用动作已覆盖 `bash`、`file_read`、`file_write`、`file_edit`、`grep`、`glob`、`outline`、`http_request`、`skill`、`recall`、有界只读 `parallel`、`mcp_call`、`wasm_tool` 与 `final`。核心文件 / 搜索 / outline / HTTP 工具尽量进程内自包含、零外部 `cat`/`sed`/`grep`/`find`/`curl` 依赖；`bash`（`src/tools/bash.zig`）经 `/bin/sh -c` 执行、**硬超时**强制终止、输出上限与可选 cwd 沙盒；`file_*`（`src/tools/file.zig`）进程内读 / 覆盖写 / 唯一匹配编辑，自带大小上限；`grep`/`glob`（`src/tools/search.zig`）—— grep 走**自研 Thompson NFA 正则引擎**（`src/regex.zig`，线性时间、ReDoS 免疫，不依赖第三方正则），glob 走 `std.fs` 遍历；`http_request`（`src/tools/http.zig`）发 HTTP/HTTPS、带硬超时与可配 CA。`mcp_call` 是配置门控的 MCP client 边界；`wasm_tool` 通过受信任配置的 `scoot-wasm` host argv 运行 compute-only 本地包，而不是让模型拼宽泛 shell 命令。
 
 - **✅🚧 OpenAI 协议适配（API Integration）**
   只讲 OpenAI 兼容 Responses API（`/v1/responses`）：起始 system 消息映射为顶层 `instructions`，其余进入 `input` 数组，并强制结构化 JSON Schema 输出，从协议层把模型输出约束成结构化数据。传输默认无状态（`store=false`，每轮重发完整 `input`），让本地上下文压缩始终掌控全局。`src/llm.zig` 已实现真实 HTTP 往返（`std.http.Client.fetch`）、紧凑请求体构造（`text.format=json_schema`、`strict:true`，有测试验证）、防弹响应解析（`std.json` 容错，结构不符即 `MalformedResponse` 不 panic）与**可配 CA**（嵌入式 HTTPS-to-LLM）。可服务该接口的本地后端包括 Ollama >= 0.13.3 与 vLLM。🚧 流式（`stream`）与后端原生 Tool Calling 字段刻意不做——ReACT 经结构化输出约束推进，对本地小模型更稳健（见「方向与意图」）。
@@ -74,28 +74,28 @@ Scoot 是一个运行在纯文本环境下的轻量级 AI Agent 守护进程（D
   基于时间循环的触发器，支持 `every`（间隔）、`at`（固定时间点）与 5 字段 UTC `cron`（分钟/小时/日/月/周，支持 `*`、列表、范围和步进）——`src/schedule.zig` 已实现：`dueAt` 纯函数到点判定（时间可注入，便于防弹单测）、`tick`/`runForever` 守护循环（真实单调时钟，`--ticks N` 支持有界运行）。`scoot schedule list` 列出任务与**有效执行档**，`scoot schedule run` 进入守护循环到点唤起 Agent。**安全前置（铁律 #1）**：被调度 job 是无人在场的自主执行，故默认强制 `readonly` 安全档，`guarded` 绊线一律由 `effectiveMode` 矫正为 `readonly`（结构性保证，无人值守绝不跑在 guarded 之上）；用户可显式 `unrestricted`（自担风险，仍全程审计）。每个 job 用可重置 arena 承载 scratch，跑完即回收以保长效零泄漏。`schedule.enabled` 默认关闭，自主无人值守必须显式开启。
 
 - **✅ 认知流引擎（ReACT Loop）**
-  经典“思考–行动–观察”（Thought–Action–Observation）闭环状态机，驱动 Agent 自主推进任务。`src/agent.zig` 已实现**多轮**闭环：每回合用强制 json_schema 让模型产出结构化步骤 `{thought, action, action_input}`（`action ∈ {bash, file_read, file_write, file_edit, grep, glob, http_request, final}`），动作**先过执行护栏校验、再**经统一工具沙盒（硬超时）执行、输出作为「观察」回灌续推，`final` 即终态；非法步骤防弹捕获并回灌纠错触发重试；`max_turns` 防失控；每回合派生可重置 arena、回合末整体释放（长效零泄漏）。`scoot -e` 单次执行与默认 **REPL 多轮交互**（复用会话、每轮独立审计、出错不中断、收尾落盘）均已端到端打通（含真实工具调用）。设计上不依赖后端原生 tool_calls（对本地小模型更稳健），有脚本化大脑驱动的循环测试守护。
+  经典“思考–行动–观察”（Thought–Action–Observation）闭环状态机，驱动 Agent 自主推进任务。`src/agent.zig` 已实现**多轮**闭环：每回合用强制 json_schema 让模型产出结构化步骤 `{thought, action, action_input}`（动作枚举由 `Action` 单一事实源派生，覆盖 bash / file / search / outline / HTTP / MCP / Wasm / skill / recall / parallel / final），动作先做参数解析与策略门校验，再经统一工具沙盒、原生只读能力或受控 host 边界执行，输出作为「观察」回灌续推，`final` 即终态；非法步骤防弹捕获并回灌纠错触发重试；`max_turns` 防失控；每回合派生可重置 arena、回合末整体释放（长效零泄漏）。`scoot -e` 单次执行与默认 **REPL 多轮交互**（复用会话、每轮独立审计、出错不中断、收尾落盘）均已端到端打通（含真实工具调用）。设计上不依赖后端原生 tool_calls（对本地小模型更稳健），有脚本化大脑驱动的循环测试守护。
 
 - **✅ 执行护栏（Execution Policy）—— 兑现「安全与可控」铁律**
-  模型产出的动作在落到系统前必须穿过策略门（`src/policy.zig`），绝不直接执行未经验证的输出。`bash` 走命令串审查 `evaluate`，**内建工具按能力分类**走 `evaluateTool`（读 `file_read`/`grep`/`glob` → `.read`，写 `file_write`/`file_edit` → `.write`，`http_request` 按方法 GET/HEAD→`.net_read`、写类→`.net_write`，畸形/未知 fail-closed）。三档模式：`guarded`（拦截 `rm -rf /`、fork bomb、`| sh`、`mkfs`、`shutdown` 等灾难性命令绊线，交互默认）/ `readonly`（无人值守安全档：禁 shell、禁网络、只放行项目内相对路径且避开常见敏感片段的进程内本地读工具，写类结构性拒绝，fail-closed）/ `unrestricted`（不设限，仍被审计）。被拒动作不执行、留痕 `policy_deny`、并把拒绝理由作为「观察」回灌让模型改道。诚实边界：`guarded` 是灾难性命令**绊线**而非沙箱，`readonly` 是更保守的 fail-closed 策略，但仍需要后续明确 project-dir / OS 隔离来成为强安全边界。含单测 + 端到端冒烟（`rm -rf /` 被拦、审计可证未执行）。
+  模型产出的动作在落到系统前必须穿过策略门（`src/policy.zig`），绝不直接执行未经验证的输出。`bash` 走命令串审查 `evaluate`，**内建工具按能力分类**走 `evaluateTool`（本地读、写、本地 compute、网络读写分别归类；畸形/未知 fail-closed）。三档模式：`guarded`（拦截 `rm -rf /`、fork bomb、`| sh`、`mkfs`、`shutdown` 等灾难性命令绊线，默认附加写路径收口与 internal HTTP 目标拦截）/ `readonly`（无人值守安全档：禁 shell、禁网络、禁写，只放行项目内相对路径且避开常见敏感片段的进程内本地读工具与 compute-only 边界，fail-closed）/ `unrestricted`（不设限，仍被审计）。被拒动作不执行、留痕 `policy_deny`、并把拒绝理由作为「观察」回灌让模型改道。诚实边界：`guarded` 是灾难性命令**绊线**而非沙箱，`readonly` 是更保守的 fail-closed 策略，强隔离仍取决于 OS / 部署沙箱。含单测 + 端到端冒烟（`rm -rf /` 被拦、审计可证未执行）。
 
 - **🧱✅🚧 会话（Session）—— 短期记忆载体**
   一段有边界交互（REPL 对话 / `-e` 调用 / 被调度的 job）的消息流。承载在长寿命分配器上，使对话历史跨越认知回合的 per-turn arena 重置依然存活。内存记录（追加即复制副本）、JSONL 序列化与追加落盘（`state/sessions/<id>.jsonl`）均已实现并有测试（`src/session.zig`）。**跨会话的长期记忆不在此实现**——交由 Skill 机制（知识注入）或 `state/` 纯文本摘要 + 文件工具承载，避免引入向量库等重依赖而撞穿铁律。
 
 - **✅ Skill 机制（Skill Engine）— 必备能力**
-  以目录形式挂载"能力 + 指令集"，从 `~/.scoot/skills`（及配置的额外路径）发现、按需加载。`src/skill.zig` 已实现渐进式披露：遍历各路径子目录、**防弹解析** `SKILL.md` 的 YAML front-matter（name/description 及可选 `capabilities` / `allowed_tools` / `scope` 审查元数据，任意截断/畸形输入只得 null 绝不 panic）、按名去重建轻量索引；清单（name+描述+路径）注入 system 上下文，模型判断相关时**用既有 bash 工具读取正文激活**（正文绝不预注入，上下文恒定轻量），脚本经统一沙盒执行不获特权。`scoot skills` 可列出已发现技能，`scoot skills check/pack` 可校验和导出审查 manifest。skill 元数据仅供审查，不授予权限，真正执行仍由全局 policy gate 决定。
+  以目录形式挂载"能力 + 指令集"，从 `~/.scoot/skills`（及配置的额外路径）发现、按需加载。`src/skill.zig` 已实现渐进式披露：遍历各路径子目录、**防弹解析** `SKILL.md` 的 YAML front-matter（name/description 及可选 `capabilities` / `allowed_tools` / `scope` 审查元数据，任意截断/畸形输入只得 null 绝不 panic）、按名去重建轻量索引；清单（name+描述+路径）注入 system 上下文，模型判断相关时通过原生只读 `skill` 动作读取正文或资源（收口在对应 skill 目录内并审计，正文绝不预注入，上下文恒定轻量）。`scoot skills` 可列出已发现技能，`scoot skills check/pack` 可校验和导出审查 manifest。skill 元数据仅供审查，不授予权限；读取技能指令是原生只读能力，skill 请求的 shell / 写入 / 网络 / MCP / Wasm 动作仍必须经统一沙盒、策略门和硬超时。
 
-- **🧱🚧 运行目录与配置（Runtime & Config）**
-  统一运行目录 `~/.scoot/`（`SCOOT_HOME` 可覆盖），含 `config.toml`（或 `config.json`）/ `token` / `skills/` / `logs/` / `state/`。结构化配置（backend / agent / tools / skills / audit / schedule）见 `src/config.zig`；路径解析、`scoot config` 命令、配置文件加载（**TOML 优先、JSON 回落**：自研零依赖 TOML 子集解析→`std.json.Value`，复用 std.json 按节合并——缺省回落默认、未知字段忽略、畸形配置清晰报错）、启动时幂等建目录树（`paths.ensure`）均已可用。🚧 目录权限收紧（home 0700 / token 0600 的 mkdir 强制）仍用系统默认权限，待硬化（非阻断）。
+- **✅🚧 运行目录与配置（Runtime & Config）**
+  统一运行目录 `~/.scoot/`（`SCOOT_HOME` 可覆盖），含 `config.toml`（或 `config.json`）/ `token` / `skills/` / `logs/` / `state/`。结构化配置（backend / agent / tools / skills / MCP / audit / schedule）见 `src/config.zig`；路径解析、`scoot config` 命令、配置文件加载（**TOML 优先、JSON 回落**：自研零依赖 TOML 子集解析→`std.json.Value`，复用 std.json 按节合并——缺省回落默认、未知字段/移除字段/无效环境覆盖给出诊断）、启动时幂等建目录树（`paths.ensure`）均已可用。运行目录、session/audit JSONL 权限与轮转已经进入治理面，后续重点是持续保持权限、保留期与故障提示清晰。
 
-- **✅ Daemon 生命周期（Daemon Lifecycle）**
-  `scoot daemon run` 是 scheduled job 的前台长运行模式：复用 schedule 循环，写入 `state/daemon.json` / `state/daemon.pid`，安装 SIGTERM/SIGINT 处理器，正常停止时记录 stopped 状态并清理 pid 文件。`daemon status` 报告 Scoot 最近写入的生命周期状态，`daemon stop` 只有在 pid 文件与 running state 一致时才发送 SIGTERM。若上次状态仍是 `running`，新的 `daemon run` 会打印未干净停止的重启恢复提示并覆盖状态。恢复策略保守：已完成 session/audit 保留，执行到一半的模型回合不做恢复，job 列表仍以 config 为事实来源。
+- **✅ Daemon 生命周期与本地 app-server 模式（Daemon Lifecycle & Serve）**
+  `scoot daemon run` 是 scheduled job 的前台长运行模式：复用 schedule 循环，写入 `state/daemon.json` / `state/daemon.pid`，安装 SIGTERM/SIGINT 处理器，正常停止时记录 stopped 状态并清理 pid 文件。`daemon status` 报告 Scoot 最近写入的生命周期状态，`daemon stop` 只有在 pid 文件与 running state 一致时才发送 SIGTERM。若上次状态仍是 `running`，新的 `daemon run` 会打印未干净停止的重启恢复提示并覆盖状态。`scoot serve` 提供前台 stdio NDJSON 协议，服务本地 app 集成的 run / session / audit 查询；它保持纯文本本地 I/O，不变成 GUI、Web UI 或常驻网络服务。
 
 - **✅ 密钥安全管理（Secret）**
   token 解析优先级 env → 文件(0600) → 凭证命令，明文绝不入库、绝不进日志。`src/secret.zig` 已实现逐源解析：env（非空）→ token 文件（`assertPrivate` 仿 SSH 私钥，`mode & 0o077 != 0` 即拒读，**读文件前先校验**绝不把世界可读密钥读进内存）→ 凭证命令（复用 bash 沙盒，**10s 硬超时**，stdout 即 token）。权限过宽明示提示 `chmod 600`，`redact` 脱敏，config 刻意不暴露内联明文字段。含 7 项单测 + 二进制四例冒烟守护。
 
-- **✅🚧 可审计日志与本地状态**
-  每轮思考与工具调用以 JSONL 写入审计日志（`logs/audit.jsonl`），会话快照落 `state/sessions/`，状态严格本地、纯文本可回放（`src/audit.zig` + `src/session.zig` 已实现并有测试）。🚧 SQLite 索引 / 日志轮转 / 时间戳等增强待定。
+- **✅🚧 可审计日志、本地状态与召回**
+  每轮思考与工具调用以 JSONL 写入审计日志（`logs/`），会话快照落 `state/sessions/`，状态严格本地、纯文本可回放（`src/audit.zig` + `src/session.zig` 已实现并有测试）。`recall` 动作可在上下文压缩后从当前 session transcript 找回早期原文；CLI / serve 也提供只读 session 与 audit 查询入口。🚧 后续增强重点是查询体验、保留策略、审计链路可读性，而不是引入远程追踪系统。
 
 ## 非目标（铁律）
 
@@ -108,6 +108,8 @@ Scoot 是一个运行在纯文本环境下的轻量级 AI Agent 守护进程（D
 - **绝不为功能数量牺牲单体简洁。** 不堆叠重型运行时、不做需要动态链接 / 加载原生代码的二进制插件体系；新增能力若会破坏“单文件、零臃肿依赖”的底盘，就不做。（注：Skill 机制加载的是**指令与数据**及经沙盒执行的脚本，不是可动态链接的原生插件，二者不冲突。）
 - **绝不把明文密钥固化或外泄。** API token 绝不编译进二进制、绝不内联进随仓库提交的配置、绝不打印进日志或审计。不强依赖特定 OS 钥匙串（避免平台耦合）；需要安全存储时通过外部凭证命令（如 `pass`/`gpg`）接入。
 - **Skill 绝不绕过沙盒。** skill 携带的脚本与动作一律经统一工具沙盒执行，受同样的硬超时与防御校验约束；skill 不得获得超出已注册工具的能力，也不得自动联网拉取远程代码执行。
+- **扩展边界必须配置门控、可审计。** MCP 只能调用已配置 server 且显式 allow 的工具；Wasm 通过独立 `scoot-wasm` host 与 compute-only 包策略收口，不允许发展成远程插件市场或任意代码加载器。
+- **稳定公开 API 保持窄口径。** `src/root.zig` 只暴露 embedding 生命周期 facade；私有子系统从 `src/internal.zig` 给 CLI/测试使用。未经明确 API 边界决策，不得把内部模块直接导出给外部依赖者。
 
 ## 方向与意图
 
@@ -127,7 +129,10 @@ Scoot 是一个运行在纯文本环境下的轻量级 AI Agent 守护进程（D
 - **方向四：本地 Skill 机制（渐进式披露）。**
   服务于“Skill 即能力扩展”与“轻量化”两个画像。意图是让用户把"能力 + 指令集"做成 `~/.scoot/skills` 下的目录（`SKILL.md` 描述 + 可选脚本/资源），Scoot 启动时只读取 name/description 建轻量索引并注入上下文，模型选中后才加载该 skill 的正文与资源。如此既能无限扩展能力，又不会让所有 skill 的正文一次性挤爆上下文，也无需为加新能力重新编译。skill 自带脚本必须经统一沙盒执行。
 
-- **方向五：本地优先的密钥与运行目录治理。**
+- **方向五：扩展工具边界治理（MCP / Wasm / 外部 compressor）。**
+  服务于“能力可扩展但核心可信面不膨胀”的画像。MCP 与 Wasm 是受控扩展缝，不是扩大 trusted core 的理由：MCP 必须配置门控、显式 allow tool、硬超时；Wasm 执行默认留在独立 `scoot-wasm` host，Agent 原生 `wasm_tool` 只接受 compute-only 本地包；外部 compressor plugin 同样走包边界、策略门、超时与回退。
+
+- **方向六：本地优先的密钥与运行目录治理。**
   服务于“密钥默认不落盘明文”画像与“本地优先”边界。意图是把配置、密钥、日志、状态统一收敛到 `~/.scoot/`（`SCOOT_HOME` 可覆盖），并对密钥采取分层来源（环境变量 → 0600 权限文件 → 外部凭证命令），对权限过宽的密钥文件直接拒绝读取，让“安全”成为默认而非附加项。
 
 ## 完成的样子
