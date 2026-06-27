@@ -154,11 +154,109 @@ absolute paths, `..`, `~`, or `$` expansion. With the default host config, Scoot
 first tries a sibling `scoot-wasm` next to the running `scoot` binary, then falls
 back to PATH.
 
+## How Units Are Triggered (And Discovered)
+
+There are two distinct trigger paths, and they differ in *who* decides to run a
+unit:
+
+**1. `kind = "tool"` — model-driven, on demand.** A tool package runs only when
+the model emits a `wasm_tool` step inside the ReACT loop (see above). Scoot then
+guards, validates, and executes it. The model is the trigger.
+
+This has an important consequence: **Scoot does not auto-discover or advertise
+individual packages.** The system prompt describes the generic `wasm_tool`
+action, but it never lists concrete package names or paths. Unlike skills — whose
+`name` and `description` are injected into context for progressive disclosure — a
+Wasm package has no such advertising layer. The model will only call a package
+whose path it has been *told about*, through one of:
+
+- the user's prompt naming the path ("use the package at `./wasm/json-query`"),
+- a **skill** whose `SKILL.md` instructs the agent to call `wasm_tool` with a
+  specific package path and explains when to use it, or
+- existing context/instructions that already carry the path.
+
+In practice this means a `tool` package is most useful when **shipped together
+with a skill that advertises it**: the skill provides the name, the description,
+and the "when to use this" trigger that the bare `wasm_tool` action lacks. A
+package installed on disk with no skill and no prompt mention will simply never
+be invoked, because nothing tells the model it exists.
+
+**2. `kind = "compressor"` — host-driven, automatic.** A compressor package is
+*not* chosen by the model. Scoot's context-compaction logic runs it
+automatically when the session exceeds its budget and `agent.compactor =
+"plugin:<name>"` is configured, falling back to `extractive`/`drop` on failure.
+The model never sees it; configuration alone wires it in.
+
+| Package kind | Triggered by | When | Needs advertising? |
+| --- | --- | --- | --- |
+| `tool` (via `wasm_tool`) | the model | a ReACT turn | **Yes** — via prompt or a skill, or it is never called |
+| `compressor` | Scoot host | context over budget | No — only the `agent.compactor` config |
+
 ## Schemas
 
 `schema/input.json` and `schema/output.json` are JSON Schemas for the tool I/O.
 The validator currently checks that both exist and are valid JSON; runtime
 enforcement will build on the same files.
+
+## Recommended Compute Units (What's Worth Building)
+
+A compute unit only earns its place when it sits at the intersection of three
+properties a built-in tool or a shell one-liner cannot offer together:
+**deterministic** output (a pure function of `(stdin, argv)`, safe to audit and
+replay), **usable under `readonly`** and in scheduled jobs (where `bash` is
+rejected), and **dependency-free** (no `jq`, `python`, or `node` required on the
+target machine). If `bash` can do it trivially and determinism does not matter,
+it is not a good compute unit.
+
+By that test, the highest-leverage units to build first are:
+
+**Tier 1 — broadest, most reusable:**
+
+- **Structured-data query & convert** — a `jq`-style subset plus
+  JSON ↔ YAML ↔ TOML ↔ CSV conversion, field extraction, pretty/minify. The
+  agent touches structured data nearly every turn, and `jq` is often missing on
+  the target host.
+- **Safe expression / calculator** — evaluate an arithmetic or logical
+  expression to a deterministic result. This backstops the one thing models are
+  unreliable at and must not get wrong (budgets, unit conversions, sums), with a
+  tiny pure implementation.
+- **Hash & encode/decode** — `sha256`/`sha1`, base64, hex, URL encode/decode,
+  checksum comparison. Useful for verifying downloaded artifacts and decoding
+  config; pure and dependency-free.
+
+**Tier 2 — aligned with Scoot's defensive posture:**
+
+- **Secret redactor** built as a `kind = "compressor"` plugin (not a `tool`),
+  reusing the existing compressor boundary to scrub tokens, keys, and PII before
+  text enters session history or audit logs. This is the unit type most aligned
+  with Scoot's secret-safety rules.
+- **Unified diff / patch** — compute a diff between two inputs, or apply a patch
+  to text, so the agent reasons about edits deterministically instead of
+  "hand-computing" them.
+- **Token counter / context budgeter** — estimate token counts and line/word/byte
+  statistics, giving the agent a concrete measure that mirrors Scoot's own
+  observation-shrinking and context-compaction discipline.
+
+**Not recommended — these fight the sandbox or duplicate built-ins:**
+
+- **Anything that needs the network** (fetchers, API clients, webhooks). The
+  sandbox has no socket authority and traps such imports; the built-in
+  `http_request` action already owns outbound HTTP under policy and SSRF guards.
+- **Anything that traverses or mutates the filesystem** (directory walkers, file
+  movers, bulk editors). The sandbox grants no filesystem access, and the
+  built-in `grep`, `glob`, `outline`, and `file_*` tools already cover discovery
+  and edits with path confinement.
+- **Clock, timestamp, UUID, or randomness generators.** The sandbox traps
+  `clock_time_get` and `random_get`, so their output cannot be a pure function of
+  `(stdin, argv)`. If a unit genuinely needs a timestamp, seed, or nonce, the
+  host must pass it in as input bytes — never read it as an ambient syscall.
+- **A grep or regex engine.** Scoot already ships a built-in, linear-time,
+  ReDoS-immune regex engine behind `grep`; a Wasm reimplementation would be
+  larger and weaker, not better.
+- **Stateful or "installer" units** that try to cache, fetch, or persist data
+  between runs. A compute unit is a stateless transform; persistence and
+  retrieval belong to the user's ordinary trusted operations, not to the
+  sandbox.
 
 ## Non-Goals (v0)
 
