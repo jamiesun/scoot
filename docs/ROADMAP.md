@@ -168,7 +168,7 @@ These are hard boundaries unless explicitly changed in the roadmap:
 
 - No GUI, web UI, tray UI, or desktop UI.
 - No provider-specific non-OpenAI protocol adapters.
-- No complex cloud synchronization.
+- No complex cloud synchronization. Optional, opt-in, append-only fleet telemetry and schema'd job dispatch through the standalone `scoot-edge` companion (see Direction 7 and [EDGE.md](EDGE.md)) is not cloud sync: it must never do bidirectional state reconciliation, treat the center as a writable source of truth, or raise the local policy ceiling.
 - No execution of unvalidated model output.
 - No heavy runtime or native plugin system that breaks the single-binary posture.
 - No remote plugin registry or remote code-loading path for skills or Wasm packages.
@@ -201,6 +201,12 @@ MCP and Wasm are extension seams, not excuses to grow an unbounded trusted core.
 ### 6. Runtime Governance
 
 Runtime state, config, secrets, logs, skills, and sessions should stay under one local runtime directory. Directory permissions, log lifecycle, and audit/query ergonomics should remain part of the safety posture.
+
+### 7. Optional Fleet Edge (`scoot-edge`)
+
+A management center may need to observe and (opt-in) dispatch tasks to a fleet of Scoot instances. This belongs in an **optional, standalone, not-installed-by-default** companion binary `scoot-edge`, following the same posture as `scoot-wasm`: never linked into core, driving Scoot only through public launch interfaces (`scoot -e`, `scoot serve` NDJSON, `scoot schedule`, exit codes) and read-only `logs/*.jsonl`. Default install stays core-only, with no outbound connection and no listener.
+
+The boundary is fixed in [EDGE.md](EDGE.md): the edge dials outbound to the center over HTTPS (mandatory even on an internal VPC) with a per-node bearer token; telemetry is append-only and never re-applied to local state; job dispatch carries only schema'd `kind`s where the goal is data Scoot still validates; and edge-dispatched jobs default to `readonly` with a ceiling the center can never raise. The authority model and red lines must be signed off before any code (phase E0).
 
 ## Completion Signals
 
