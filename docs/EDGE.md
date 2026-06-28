@@ -135,6 +135,39 @@ Source: `daemon status`, audit counts, and the local config policy.
 - `audit_stats` is derived: the edge tallies it by scanning `logs/*.jsonl`, since
   `audit.Stats` is in-memory per `Logger` and is not persisted.
 
+### node descriptor (identity and capability, opt-in)
+
+The bare heartbeat above is liveness only. Capability-aware dispatch needs to know
+what a node *is for*, so the status body may carry an optional `node` descriptor — on
+the same fail-closed terms as audit shipping: **off by default**
+(`edge.report_capabilities`), because a capability / skill list is also a fleet-recon
+surface, and **advisory, never authority**.
+
+```json
+"node":{
+  "labels":["role:db","env:prod","focus:log-triage"],
+  "os":"linux","arch":"x86_64",
+  "capabilities":{
+    "max_job_policy":"readonly",
+    "tools":["file_read","grep","glob","http_request"],
+    "skills":["log-triage","cert-check"]
+  }
+}
+```
+
+- **Advertising is not authority.** The descriptor only helps the center *decide what
+  to send*; execution is still gated by the local `policy_ceiling`. Claiming a
+  capability never expands what the edge will do, and over- or under-claiming degrades
+  to a job reject, never to unsafe execution.
+- **Three sources.** `labels` is operator-declared local config (`edge.labels`) for
+  routing intent the center cannot infer; `os` / `arch` / `tools` / `max_job_policy`
+  are auto-derived local facts; `skills` reuses the existing skill manifest —
+  installed skill *names* are the node's self-describing focus signal (skill
+  instructions are never shipped).
+- **Default off, opt-in richer.** Bare status ships liveness only; anything that
+  leaves the host beyond liveness — audit bodies, capability / identity metadata — is
+  an explicit local opt-in.
+
 ### audit_batch (append-only log shipping)
 
 Source: read-only `logs/*.jsonl`.
@@ -202,6 +235,11 @@ Authorization: Bearer <token>
 }}
 ```
 
+The center routes by matching a job against the node's last-known `node` descriptor
+(its `capabilities` and `labels`); the edge does not negotiate capabilities on the
+wire. A job the node cannot satisfy is rejected with `no_matching_capability`, so a
+capability mismatch degrades to a reject, never to unsafe execution.
+
 The entire security model lives in these rules:
 
 | Rule | Mechanism | Constraint preserved |
@@ -229,7 +267,7 @@ Job lifecycle is reported back over the same append-only telemetry channel:
 {"v":1,"type":"job_event","node_id":"n-7a3","sent_ts":1719600000000,"body":{
   "job_id":"j-91","phase":"accepted|running|done|failed|rejected",
   "session_id":"...","effective_policy":"readonly",
-  "reject_reason":"policy_ceiling|bad_schema|at_capacity"
+  "reject_reason":"policy_ceiling|bad_schema|at_capacity|no_matching_capability"
 }}
 ```
 
@@ -273,7 +311,7 @@ public package root (`src/root.zig`) stays the contract.
 
 | Wire op | Public surface used |
 | --- | --- |
-| `status` | `daemon status` (and a future `--json` form), config read |
+| `status` | `daemon status` (and a future `--json` form), config read, skill discovery (names / descriptions only) |
 | `audit_batch` | read-only `logs/*.jsonl` |
 | `job kind=run` | child process `scoot -e "<goal>"` launched **through the unattended one-shot clamp** (ceiling enforced in-child against local config), with cwd pinned to `edge.job_root` |
 | job result | child exit code + stdout + the resulting session / audit |
@@ -317,6 +355,10 @@ separate, independently-useful core changes, but E1/E2 are gated on them.
   `observation` / `tool_call` bodies ship only behind explicit `edge.ship_audit` plus
   an allowlist, because they can carry file contents and command output. Read-only
   never means "nothing leaves the host."
+- **No capability claim grants authority.** The `node` descriptor is declarative,
+  advisory routing metadata; the local `policy_ceiling` still gates every job, and
+  `edge.report_capabilities` is opt-in. Advertising a capability never widens what the
+  edge will execute.
 
 ## Phasing
 
@@ -326,10 +368,13 @@ separate, independently-useful core changes, but E1/E2 are gated on them.
   heartbeat over HTTPS. Requires prerequisite #1 (`daemon status --json`). Audit-log
   shipping is **deferred within E1** until prerequisite #3 (shipping-aware rotation)
   lands; until then E1 ships counts, not bodies, and `edge.ship_audit` is off by
-  default.
+  default. An opt-in `node` capability descriptor (`edge.report_capabilities`, off by
+  default) may ride the heartbeat for later capability-aware routing.
 - **E2:** schema'd, idempotent job dispatch behind explicit config + policy ceiling +
   provenance auditing. **Hard-gated on prerequisite #2** (the in-child unattended
   policy clamp) and on cwd confinement (`edge.job_root`). Edge jobs default
   `readonly`; the only raise is local `edge.max_job_policy = unrestricted`.
+  Capability-aware routing consumes the E1 `node` descriptor; a job a node cannot
+  satisfy rejects with `no_matching_capability`.
 - **E3:** packaging (install-script opt-in, Homebrew, apt) and
   reconnect/backpressure hardening.
