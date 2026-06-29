@@ -20,6 +20,24 @@ pub const State = struct {
     note: []const u8 = "daemon run is foreground; scheduled jobs keep using effective readonly mode unless explicitly unrestricted",
 };
 
+pub const status_format = "scoot.daemon.status.v1";
+
+pub const Liveness = enum {
+    alive,
+    dead,
+    unknown,
+};
+
+pub const StatusSnapshot = struct {
+    format: []const u8 = status_format,
+    state_path: []const u8,
+    pid_path: []const u8,
+    state: ?State,
+    pid_file: ?i64,
+    liveness: Liveness,
+    probed_pid: ?i64,
+};
+
 pub fn statePath(arena: std.mem.Allocator, state_dir: []const u8) ![]const u8 {
     return std.fs.path.join(arena, &.{ state_dir, "daemon.json" });
 }
@@ -67,6 +85,29 @@ pub fn readPid(arena: std.mem.Allocator, io: std.Io, state_dir: []const u8) !?i6
 pub fn clearPid(arena: std.mem.Allocator, io: std.Io, state_dir: []const u8) void {
     const path = pidPath(arena, state_dir) catch return;
     std.Io.Dir.cwd().deleteFile(io, path) catch {};
+}
+
+pub fn statusSnapshot(arena: std.mem.Allocator, io: std.Io, state_dir: []const u8) !StatusSnapshot {
+    const state = try readState(arena, io, state_dir);
+    const pid_file = try readPid(arena, io, state_dir);
+    const probe_pid: ?i64 = if (pid_file) |p| p else if (state) |s| s.pid else null;
+    const liveness: Liveness = if (probe_pid) |p|
+        if (pidAlive(p)) .alive else .dead
+    else
+        .unknown;
+    return .{
+        .state_path = try statePath(arena, state_dir),
+        .pid_path = try pidPath(arena, state_dir),
+        .state = state,
+        .pid_file = pid_file,
+        .liveness = liveness,
+        .probed_pid = probe_pid,
+    };
+}
+
+pub fn writeStatusJson(out: *std.Io.Writer, snapshot: StatusSnapshot) !void {
+    try std.json.Stringify.value(snapshot, .{}, out);
+    try out.writeByte('\n');
 }
 
 pub fn previousRunWasUnclean(state: ?State) bool {
@@ -138,6 +179,12 @@ test "write/read daemon state and pid" {
     try std.testing.expect(previousRunWasUnclean(state));
     try std.testing.expectEqual(@as(?i64, 123), try readPid(arena, io, root));
 
+    const snapshot = try statusSnapshot(arena, io, root);
+    try std.testing.expectEqualStrings("scoot.daemon.status.v1", snapshot.format);
+    try std.testing.expectEqual(@as(?i64, 123), snapshot.pid_file);
+    try std.testing.expectEqual(@as(?i64, 123), snapshot.probed_pid);
+    try std.testing.expectEqual(Liveness.dead, snapshot.liveness);
+
     clearPid(arena, io, root);
     try std.testing.expect((try readPid(arena, io, root)) == null);
 }
@@ -164,6 +211,33 @@ test "previousRunWasUnclean only flags running state" {
         .jobs = 1,
         .poll_ms = 1000,
     }));
+}
+
+test "status snapshot serializes as machine-readable JSON" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const root = "/tmp/scoot_daemon_status_json_test";
+    cwd.deleteTree(io, root) catch {};
+    defer cwd.deleteTree(io, root) catch {};
+    try cwd.createDirPath(io, root);
+
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const snapshot = try statusSnapshot(arena, io, root);
+    var aw: std.Io.Writer.Allocating = .init(gpa);
+    defer aw.deinit();
+    try writeStatusJson(&aw.writer, snapshot);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, aw.writer.buffered(), .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try std.testing.expectEqualStrings("scoot.daemon.status.v1", obj.get("format").?.string);
+    try std.testing.expectEqualStrings("unknown", obj.get("liveness").?.string);
+    try std.testing.expect(obj.get("state").? == .null);
+    try std.testing.expect(obj.get("pid_file").? == .null);
 }
 
 test "pidAlive: current process alive, invalid and unused pids dead (issue #53)" {
