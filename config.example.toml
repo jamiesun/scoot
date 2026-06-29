@@ -119,6 +119,11 @@ confine_writes = true
 #   readonly for real isolation.
 block_internal_http = true
 
+# Trusted argv used by wasm_tool. Supported placeholders: {package}, {entry},
+# and {component}. With the default config, Scoot first tries a sibling
+# scoot-wasm next to the running scoot binary, then falls back to PATH.
+# wasm_host = ["scoot-wasm", "wasi", "{component}"]
+
 [skills]
 # Enable local Skill discovery.
 enabled = true
