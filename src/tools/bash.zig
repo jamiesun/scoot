@@ -3,12 +3,15 @@
 //! an absolute deadline. On timeout, `error.Timeout` is returned and the child
 //! is force-killed, so one command cannot stall the main loop.
 const std = @import("std");
+const proc = @import("proc.zig");
 const Result = @import("tools.zig").Result;
+
+pub const default_timeout_ms: u64 = 30_000;
 
 /// Bash execution options. Defaults are sandbox guardrails: bounded time and output.
 pub const Options = struct {
-    /// Hard timeout in milliseconds. 0 disables it, which is not recommended.
-    timeout_ms: u64 = 30_000,
+    /// Hard timeout in milliseconds. 0 means use the module default.
+    timeout_ms: u64 = default_timeout_ms,
     /// Stdout byte limit; exceeding it terminates with an error.
     stdout_limit: usize = 1 << 20,
     /// Stderr byte limit.
@@ -27,15 +30,12 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, command: []const u8, opts: Option
     // Convert to an absolute deadline so every read in std.process.run shares
     // the same wall-clock cap. Use the .awake monotonic clock so clock changes
     // cannot disable the timeout.
-    const timeout: std.Io.Timeout = if (opts.timeout_ms == 0) blk: {
-        break :blk .none;
-    } else blk: {
-        const base: std.Io.Timeout = .{ .duration = .{
-            .clock = .awake,
-            .raw = std.Io.Duration.fromMilliseconds(@intCast(opts.timeout_ms)),
-        } };
-        break :blk base.toDeadline(io);
-    };
+    const effective_timeout_ms = proc.effectiveTimeoutMs(opts.timeout_ms, default_timeout_ms);
+    const base: std.Io.Timeout = .{ .duration = .{
+        .clock = .awake,
+        .raw = std.Io.Duration.fromMilliseconds(@intCast(effective_timeout_ms)),
+    } };
+    const timeout = base.toDeadline(io);
 
     const cwd: std.process.Child.Cwd = if (opts.cwd) |p| .{ .path = p } else .inherit;
 

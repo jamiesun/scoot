@@ -4,9 +4,10 @@
 //! Built-in strategies stay limited: `drop` is the old fallback floor, while `extractive` is a deterministic rolling summary.
 const std = @import("std");
 const llm = @import("llm.zig");
-const jsonio = @import("jsonio.zig");
 const session = @import("session.zig");
 const wasm_tool = @import("wasm_tool.zig");
+const jsonio = @import("jsonio.zig");
+const proc = @import("tools/proc.zig");
 
 const untrusted_tool_open = "<scoot_untrusted_tool_output>";
 const untrusted_tool_close = "</scoot_untrusted_tool_output>";
@@ -20,11 +21,13 @@ pub const Options = struct {
     io: ?std.Io = null,
 };
 
+pub const default_plugin_timeout_ms: u64 = 30_000;
+
 pub const PluginConfig = struct {
     name: []const u8 = "",
     package: []const u8 = "",
     host: []const []const u8 = &.{},
-    timeout_ms: u64 = 30_000,
+    timeout_ms: u64 = default_plugin_timeout_ms,
     stdout_limit: usize = 1 << 20,
     stderr_limit: usize = 256 * 1024,
 };
@@ -281,7 +284,11 @@ fn runPlugin(
     });
     defer child.kill(io);
 
-    child.stdin.?.writeStreamingAll(io, stdin) catch return error.PluginWriteFailed;
+    const effective_timeout_ms = proc.effectiveTimeoutMs(plugin_config.timeout_ms, default_plugin_timeout_ms);
+    proc.writeStreamingAllWithTimeout(io, child.stdin.?, stdin, effective_timeout_ms) catch |err| switch (err) {
+        error.Timeout => return error.Timeout,
+        else => return error.PluginWriteFailed,
+    };
     child.stdin.?.close(io);
     child.stdin = null;
 
@@ -292,7 +299,7 @@ fn runPlugin(
 
     const stdout_reader = multi_reader.reader(0);
     const stderr_reader = multi_reader.reader(1);
-    const timeout = deadline(io, plugin_config.timeout_ms);
+    const timeout = deadline(io, effective_timeout_ms);
     while (multi_reader.fill(64, timeout)) |_| {
         if (plugin_config.stdout_limit != 0 and stdout_reader.buffered().len > plugin_config.stdout_limit)
             return error.PluginOutputTooLarge;
@@ -316,7 +323,6 @@ fn runPlugin(
 }
 
 fn deadline(io: std.Io, timeout_ms: u64) std.Io.Timeout {
-    if (timeout_ms == 0) return .none;
     const base: std.Io.Timeout = .{ .duration = .{
         .clock = .awake,
         .raw = std.Io.Duration.fromMilliseconds(@intCast(timeout_ms)),
@@ -740,6 +746,22 @@ test "plugin: external compressor marker replaces folded span" {
     try std.testing.expectEqual(@as(usize, 5), s.count());
     try std.testing.expectEqualStrings("PLUGIN-MARKER", s.items()[2].content);
     try std.testing.expectEqual(@as(usize, 6), s.archiveItems().len);
+}
+
+test "plugin: stdin write is bounded when child does not drain" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const input = try arena.alloc(u8, 8 * 1024 * 1024);
+    @memset(input, 'x');
+
+    try std.testing.expectError(error.Timeout, runPlugin(
+        arena,
+        std.testing.io,
+        &.{ "/bin/sh", "-c", "sleep 5" },
+        input,
+        .{ .timeout_ms = 200 },
+    ));
 }
 
 test "plugin: non-compute policy capability falls back to extractive" {

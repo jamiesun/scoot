@@ -1,14 +1,16 @@
 //! Wasm tool runner: validates a local Wasm tool package and executes it
 //! through a configured host argv without going through `/bin/sh -c`.
 const std = @import("std");
+const proc = @import("proc.zig");
 const wasm_tool = @import("../wasm_tool.zig");
 const Result = @import("tools.zig").Result;
 
 pub const default_host = &.{ "scoot-wasm", "wasi", "{component}" };
+pub const default_timeout_ms: u64 = 30_000;
 
 pub const Options = struct {
     host: []const []const u8 = default_host,
-    timeout_ms: u64 = 30_000,
+    timeout_ms: u64 = default_timeout_ms,
     stdout_limit: usize = 1 << 20,
     stderr_limit: usize = 256 * 1024,
 };
@@ -117,7 +119,11 @@ fn runHost(
     });
     defer child.kill(io);
 
-    child.stdin.?.writeStreamingAll(io, stdin) catch return error.WasmToolWriteFailed;
+    const effective_timeout_ms = proc.effectiveTimeoutMs(opts.timeout_ms, default_timeout_ms);
+    proc.writeStreamingAllWithTimeout(io, child.stdin.?, stdin, effective_timeout_ms) catch |err| switch (err) {
+        error.Timeout => return .{ .timed_out = true },
+        else => return error.WasmToolWriteFailed,
+    };
     child.stdin.?.close(io);
     child.stdin = null;
 
@@ -128,7 +134,7 @@ fn runHost(
 
     const stdout_reader = multi_reader.reader(0);
     const stderr_reader = multi_reader.reader(1);
-    const timeout = deadline(io, opts.timeout_ms);
+    const timeout = deadline(io, effective_timeout_ms);
     while (multi_reader.fill(64, timeout)) |_| {
         if (opts.stdout_limit != 0 and stdout_reader.buffered().len > opts.stdout_limit)
             return error.WasmToolOutputTooLarge;
@@ -149,7 +155,6 @@ fn runHost(
 }
 
 fn deadline(io: std.Io, timeout_ms: u64) std.Io.Timeout {
-    if (timeout_ms == 0) return .none;
     const base: std.Io.Timeout = .{ .duration = .{
         .clock = .awake,
         .raw = std.Io.Duration.fromMilliseconds(@intCast(timeout_ms)),
@@ -171,6 +176,17 @@ test "safePackagePath rejects shell-like and escaping paths" {
     try std.testing.expect(!safePackagePath("../tool"));
     try std.testing.expect(!safePackagePath("~/tool"));
     try std.testing.expect(!safePackagePath("$HOME/tool"));
+}
+
+test "runHost bounds stdin writes when child does not drain" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const input = try arena.alloc(u8, 8 * 1024 * 1024);
+    @memset(input, 'x');
+
+    const result = try runHost(arena, std.testing.io, &.{ "/bin/sh", "-c", "sleep 5" }, input, .{ .timeout_ms = 200 });
+    try std.testing.expect(result.timed_out);
 }
 
 test {

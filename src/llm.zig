@@ -18,8 +18,10 @@
 //! long-lived storage before the arena is released.
 const std = @import("std");
 const jsonio = @import("jsonio.zig");
+const proc = @import("tools/proc.zig");
 
 pub const Role = enum { system, user, assistant, tool };
+pub const default_timeout_ms: u64 = 120_000;
 
 pub const Message = struct {
     role: Role,
@@ -82,8 +84,8 @@ pub const Client = struct {
     model: []const u8,
     /// API token. Empty means no Authorization header for local unauthenticated backends.
     api_key: []const u8 = "",
-    /// Hard timeout for one backend request. 0 disables the deadline.
-    timeout_ms: u64 = 120_000,
+    /// Hard timeout for one backend request. 0 means use the module default.
+    timeout_ms: u64 = default_timeout_ms,
     /// Absolute custom CA bundle path (PEM); null scans system roots.
     ca_file: ?[]const u8 = null,
     /// Dynamic extra request-body fields, merged into the top-level body. See
@@ -211,19 +213,18 @@ fn fetchResponsesWithTimeout(
     resp: *std.Io.Writer.Allocating,
     timeout_ms: u64,
 ) FetchResult {
-    if (timeout_ms == 0)
-        return doFetchResponses(http_client, url, body, has_key, auth, resp);
+    const effective_timeout_ms = proc.effectiveTimeoutMs(timeout_ms, default_timeout_ms);
 
     const Outcome = union(enum) { done: FetchResult, timed_out: void };
     var buf: [2]Outcome = undefined;
     var sel = std.Io.Select(Outcome).init(io, &buf);
 
-    sel.concurrent(.done, doFetchResponses, .{ http_client, url, body, has_key, auth, resp }) catch {
-        return doFetchResponses(http_client, url, body, has_key, auth, resp);
+    sel.concurrent(.done, doFetchResponses, .{ http_client, url, body, has_key, auth, resp }) catch |err| {
+        return .{ .err = @errorName(err) };
     };
-    sel.concurrent(.timed_out, sleepDeadline, .{ io, timeout_ms }) catch {
+    sel.concurrent(.timed_out, sleepDeadline, .{ io, effective_timeout_ms }) catch |err| {
         sel.cancelDiscard();
-        return doFetchResponses(http_client, url, body, has_key, auth, resp);
+        return .{ .err = @errorName(err) };
     };
 
     const winner = sel.await() catch |err| {
