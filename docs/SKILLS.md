@@ -27,6 +27,10 @@ name collision):
 
 Project-local skills are disabled by default because repositories can carry
 untrusted instructions. Enable them only for workspaces you trust.
+`extra_paths` is not a broad read grant: each entry must be a dedicated skill
+root containing only reviewed skill directories. Do not point it at `$HOME`, `/`,
+a repository root, `~/.scoot`, runtime `logs/` / `state/`, or any directory that
+may contain secrets or unrelated project files.
 
 `scoot skills` prints the resolved search paths and everything discovered.
 
@@ -131,3 +135,7 @@ install skills you trust.** A malicious or compromised skill package can expose
 the contents of its own directory to the model even under `readonly` — this is an
 intended part of the read boundary, not a bypass, so do not treat `readonly` as a
 sandbox against untrusted skills.
+
+Warning: broad `extra_paths` values turn this deliberate read boundary into a
+large disclosure surface. Treat any non-dedicated skill root as invalid
+configuration and narrow it before unattended runs.

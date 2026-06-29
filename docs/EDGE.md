@@ -6,10 +6,10 @@ Status: **E1 implementation started.** The E0 boundary has been signed off and a
 standalone, opt-in `scoot-edge` skeleton now exists behind `zig build -Dedge=true`.
 It can emit one report-only status heartbeat locally and can `post-once` that
 heartbeat to an HTTPS endpoint with a per-node bearer token. A deliberately
-named `--allow-insecure-http` switch exists only for local/dev testing against a
-plain-HTTP center; production remains HTTPS-only. Audit-body shipping and E2 job
-dispatch remain intentionally unimplemented and gated by the prerequisites
-below.
+named `--allow-insecure-http` switch exists only for local/dev loopback testing
+against a plain-HTTP center; non-loopback HTTP is rejected even with the switch,
+and production remains HTTPS-only. Audit-body shipping and E2 job dispatch remain
+intentionally unimplemented and gated by the prerequisites below.
 
 ## The idea in plain terms
 
@@ -93,7 +93,8 @@ trusted network is treated as untrusted for privilege purposes (defense in depth
   client identity is carried by a token (below), not a client certificate, which
   keeps certificate management to a single server cert. The E1 `post-once`
   command has an explicit `--allow-insecure-http` escape hatch for local/dev
-  loopback testing only; it is not a production transport mode.
+  loopback testing only; non-loopback `http://` URLs are rejected even with the
+  switch. It is not a production transport mode.
 - **Per-node bearer token.** Each edge node carries its **own** token, sent as
   `Authorization: Bearer <token>`. Per-node (not fleet-shared) tokens let the center
   identify, rate-limit, and revoke a single node without rotating the whole fleet.
@@ -375,7 +376,7 @@ separate, independently-useful core changes, but E1/E2 are gated on them.
   `scoot-edge status` prints one NDJSON status envelope gathered through
   `scoot daemon status --json`, and `scoot-edge post-once` sends that envelope to a
   caller-provided HTTPS endpoint using a bearer token from an environment variable
-  (`--allow-insecure-http` is available only for local/dev HTTP center testing).
+  (`--allow-insecure-http` is available only for local/dev loopback HTTP center testing).
   Audit-log shipping is **deferred within E1** until prerequisite #3
   (shipping-aware rotation) lands; until then E1 ships counts, not bodies, and
   `edge.ship_audit` is off by default. An opt-in `node` capability descriptor
