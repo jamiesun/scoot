@@ -45,11 +45,29 @@ step "zig build (Debug)"
 step "zig build test"
 "$ZIG" build test
 
-# 4. ReleaseSafe build.
+# 4. Clean Git archive smoke.
+#
+# This catches regressions where the checked-out worktree builds only because an
+# untracked file exists locally. GitHub Actions starts from tracked files only, so
+# local CI should prove that the committed tree is self-contained too.
+step "clean git archive build/test"
+clean_tmp="$(mktemp -d "${TMPDIR:-/tmp}/scoot-local-ci-clean.XXXXXX")"
+cleanup_clean_tmp() {
+  rm -rf "$clean_tmp"
+}
+trap cleanup_clean_tmp EXIT
+git archive HEAD | tar -x -C "$clean_tmp"
+(
+  cd "$clean_tmp"
+  "$ZIG" build
+  "$ZIG" build test
+)
+
+# 5. ReleaseSafe build.
 step "zig build -Doptimize=ReleaseSafe"
 "$ZIG" build -Doptimize=ReleaseSafe
 
-# 5. CLI smoke — matches CI `zig build run -- --version`.
+# 6. CLI smoke — matches CI `zig build run -- --version`.
 step "CLI smoke (--version)"
 "$ZIG" build run -- --version
 
