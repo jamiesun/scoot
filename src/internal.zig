@@ -27,6 +27,7 @@ pub const schedule = @import("schedule.zig");
 pub const daemon = @import("daemon.zig");
 pub const audit = @import("audit.zig");
 pub const policy = @import("policy.zig");
+pub const policy_hook = @import("policy_hook.zig");
 pub const regex = @import("regex.zig");
 
 test {

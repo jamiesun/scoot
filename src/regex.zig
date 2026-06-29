@@ -396,7 +396,7 @@ const Parser = struct {
             'd' => &.{.{ .lo = '0', .hi = '9' }},
             'w' => &predef_word,
             's' => &predef_space,
-            else => unreachable,
+            else => return error.InvalidPattern, // Forward-proof: callers only pass d/w/s.
         };
         const id: u32 = @intCast(self.classes.items.len);
         try self.classes.append(self.arena, .{
