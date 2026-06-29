@@ -106,6 +106,7 @@ cp book/site-index.html site/index.html
 | `src/policy.zig` | Execution policy gate and path/network guardrails |
 | `src/tools/*.zig` | Built-in tools, MCP client, Wasm runner shim, and execution sandbox |
 | `src/wasm_*.zig` | Optional standalone `scoot-wasm` host/engine support; not linked into the core binary unless requested |
+| `src/edge_main.zig` | Optional standalone `scoot-edge` fleet companion; disabled by default and not linked into the core binary |
 | `build.zig`, `build.zig.zon` | Zig build graph and package manifest |
 
 When adding an internal subsystem, add a file under `src/` and export it from `src/internal.zig` with `pub const name = @import("name.zig");` so it participates in the internal test graph. Do **not** export private subsystems from `src/root.zig`: that file is the stable public embedding API and has a whitelist test. Expanding it requires an explicit API-boundary decision and matching documentation.

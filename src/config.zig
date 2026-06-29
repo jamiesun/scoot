@@ -1,6 +1,6 @@
-//! Runtime configuration. By default, loads from ~/.scoot/config.json and falls
-//! back to built-in defaults when absent. State stays strictly local, and secrets
-//! are not inlined by default; see secret.zig.
+//! Runtime configuration. By default, loads ~/.scoot/config.toml first, then
+//! config.json for compatibility, and falls back to built-in defaults when absent.
+//! State stays strictly local, and secrets are not inlined by default; see secret.zig.
 const std = @import("std");
 const Environ = std.process.Environ;
 const paths = @import("paths.zig");
@@ -18,7 +18,7 @@ pub const default_context_budget_bytes: usize = 80_000;
 pub const Backend = struct {
     base_url: []const u8 = "http://127.0.0.1:11434/v1",
     model: []const u8 = "qwen2.5",
-    /// Hard timeout for one backend Responses API call. 0 disables the deadline.
+    /// Hard timeout for one backend Responses API call. 0 means use the built-in default.
     timeout_ms: u64 = 120_000,
     /// Environment variable name used to read the token. Plaintext is not stored here.
     api_key_env: []const u8 = "OPENAI_API_KEY",

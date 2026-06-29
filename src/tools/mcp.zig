@@ -2,10 +2,15 @@
 //! `mcp_call`, while transports stay behind this module so stdio can ship first
 //! and Streamable HTTP / legacy SSE can be added without changing agent flow.
 const std = @import("std");
+const proc = @import("proc.zig");
 const jsonio = @import("../jsonio.zig");
 const obs = @import("../obs.zig");
 
 pub const protocol_version = "2025-06-18";
+pub const default_timeout_ms: u64 = 30_000;
+/// Internal SSE sentinel: nested operations run blocking while an outer Select
+/// owns the cumulative hard deadline. Public `call` normalizes user 0 to default.
+const nested_timeout_disabled: u64 = 0;
 
 pub const TransportKind = enum {
     stdio,
@@ -58,7 +63,8 @@ pub const CallArgs = struct {
 };
 
 pub const Options = struct {
-    timeout_ms: u64 = 30_000,
+    /// Hard timeout in milliseconds. 0 means use the module default at the public call boundary.
+    timeout_ms: u64 = default_timeout_ms,
     stdout_limit: usize = 1 << 20,
     stderr_limit: usize = 1 << 20,
     ca_file: ?[]const u8 = null,
@@ -92,13 +98,16 @@ pub fn call(
     if (!toolAllowed(server, tool)) return error.McpToolNotAllowed;
     if (args) |v| if (v != .object) return error.McpArgsMustBeObject;
 
+    var effective_opts = opts;
+    effective_opts.timeout_ms = proc.effectiveTimeoutMs(opts.timeout_ms, default_timeout_ms);
+
     const kind = TransportKind.fromString(server.transport) orelse return error.UnsupportedMcpTransport;
     const transport: Transport = switch (kind) {
         .stdio => .{ .stdio = .{} },
         .http => .{ .http = .{} },
         .sse => .{ .sse = .{} },
     };
-    return transport.call(arena, io, server, tool, args, opts);
+    return transport.call(arena, io, server, tool, args, effective_opts);
 }
 
 const Transport = union(TransportKind) {
@@ -174,20 +183,18 @@ const SseTransport = struct {
         // readSseResponse re-arm a fresh per-event timeout indefinitely against a
         // slow or hostile server. Running the inner session with timeout_ms = 0
         // keeps it blocking (no nested Select); the deadline arm cancels it.
-        if (opts.timeout_ms == 0) return sseSession(arena, io, server, tool, args, opts);
+        if (opts.timeout_ms == nested_timeout_disabled) return sseSession(arena, io, server, tool, args, opts);
 
         var inner_opts = opts;
-        inner_opts.timeout_ms = 0;
+        inner_opts.timeout_ms = nested_timeout_disabled;
 
         const Outcome = union(enum) { done: SseCallAttempt, timed_out: void };
         var buf: [2]Outcome = undefined;
         var sel = std.Io.Select(Outcome).init(io, &buf);
-        sel.concurrent(.done, sseSessionAttempt, .{ arena, io, server, tool, args, inner_opts }) catch {
-            return sseSession(arena, io, server, tool, args, opts);
-        };
-        sel.concurrent(.timed_out, sleepDeadline, .{ io, opts.timeout_ms }) catch {
+        sel.concurrent(.done, sseSessionAttempt, .{ arena, io, server, tool, args, inner_opts }) catch |err| return err;
+        sel.concurrent(.timed_out, sleepDeadline, .{ io, opts.timeout_ms }) catch |err| {
             sel.cancelDiscard();
-            return sseSession(arena, io, server, tool, args, opts);
+            return err;
         };
 
         const winner = sel.await() catch {
@@ -310,7 +317,10 @@ const StdioTransport = struct {
         defer child.kill(io);
 
         const input = try requestStream(arena, tool, args);
-        try writeStdinWithTimeout(io, child.stdin.?, input, opts.timeout_ms);
+        proc.writeStreamingAllWithTimeout(io, child.stdin.?, input, opts.timeout_ms) catch |err| switch (err) {
+            error.Timeout => return error.Timeout,
+            else => return error.McpWriteFailed,
+        };
         child.stdin.?.close(io);
         child.stdin = null;
 
@@ -341,60 +351,8 @@ const StdioTransport = struct {
     }
 };
 
-const StdinWriteAttempt = union(enum) {
-    ok: void,
-    err: anyerror,
-};
-
-fn writeStdin(io: std.Io, file: std.Io.File, input: []const u8) !void {
-    file.writeStreamingAll(io, input) catch |err| switch (err) {
-        // The server closed its stdin read end: it does not consume the request
-        // (or exited early). That is not fatal here; fall through and read
-        // whatever it produced so the response/error path stays authoritative.
-        error.BrokenPipe => {},
-        else => return error.McpWriteFailed,
-    };
-}
-
-fn writeStdinAttempt(io: std.Io, file: std.Io.File, input: []const u8) StdinWriteAttempt {
-    writeStdin(io, file, input) catch |err| return .{ .err = err };
-    return .{ .ok = {} };
-}
-
-// Bound the stdin write with a hard timeout. Without it a server that stays
-// alive but never drains its stdin blocks writeStreamingAll forever once the OS
-// pipe buffer fills (the request is model-controlled and uncapped), and the
-// `defer child.kill` can never run because we are stuck inside the write.
-fn writeStdinWithTimeout(io: std.Io, file: std.Io.File, input: []const u8, timeout_ms: u64) !void {
-    if (timeout_ms == 0) return writeStdin(io, file, input);
-
-    const Outcome = union(enum) { done: StdinWriteAttempt, timed_out: void };
-    var buf: [2]Outcome = undefined;
-    var sel = std.Io.Select(Outcome).init(io, &buf);
-    sel.concurrent(.done, writeStdinAttempt, .{ io, file, input }) catch {
-        return writeStdin(io, file, input);
-    };
-    sel.concurrent(.timed_out, sleepDeadline, .{ io, timeout_ms }) catch {
-        sel.cancelDiscard();
-        return writeStdin(io, file, input);
-    };
-
-    const winner = sel.await() catch {
-        sel.cancelDiscard();
-        return error.Canceled;
-    };
-    sel.cancelDiscard();
-    return switch (winner) {
-        .done => |r| switch (r) {
-            .ok => {},
-            .err => |err| err,
-        },
-        .timed_out => error.Timeout,
-    };
-}
-
 fn deadline(io: std.Io, timeout_ms: u64) std.Io.Timeout {
-    if (timeout_ms == 0) return .none;
+    if (timeout_ms == nested_timeout_disabled) return .none;
     const base: std.Io.Timeout = .{ .duration = .{
         .clock = .awake,
         .raw = std.Io.Duration.fromMilliseconds(@intCast(timeout_ms)),
@@ -465,17 +423,15 @@ fn postJson(
     session_id: ?[]const u8,
     opts: Options,
 ) !HttpExchange {
-    if (opts.timeout_ms == 0) return doPostJson(arena, io, server, url, payload, session_id, opts);
+    if (opts.timeout_ms == nested_timeout_disabled) return doPostJson(arena, io, server, url, payload, session_id, opts);
 
     const Outcome = union(enum) { done: PostAttempt, timed_out: void };
     var buf: [2]Outcome = undefined;
     var sel = std.Io.Select(Outcome).init(io, &buf);
-    sel.concurrent(.done, doPostJsonAttempt, .{ arena, io, server, url, payload, session_id, opts }) catch {
-        return doPostJson(arena, io, server, url, payload, session_id, opts);
-    };
-    sel.concurrent(.timed_out, sleepDeadline, .{ io, opts.timeout_ms }) catch {
+    sel.concurrent(.done, doPostJsonAttempt, .{ arena, io, server, url, payload, session_id, opts }) catch |err| return err;
+    sel.concurrent(.timed_out, sleepDeadline, .{ io, opts.timeout_ms }) catch |err| {
         sel.cancelDiscard();
-        return doPostJson(arena, io, server, url, payload, session_id, opts);
+        return err;
     };
 
     const winner = sel.await() catch {
@@ -792,17 +748,15 @@ fn readSseEvent(
     reader: *std.Io.Reader,
     opts: Options,
 ) !SseEvent {
-    if (opts.timeout_ms == 0) return readSseEventBlocking(arena, reader, opts.stdout_limit);
+    if (opts.timeout_ms == nested_timeout_disabled) return readSseEventBlocking(arena, reader, opts.stdout_limit);
 
     const Outcome = union(enum) { event: SseAttempt, timed_out: void };
     var buf: [2]Outcome = undefined;
     var sel = std.Io.Select(Outcome).init(io, &buf);
-    sel.concurrent(.event, readSseEventAttempt, .{ arena, reader, opts.stdout_limit }) catch {
-        return readSseEventBlocking(arena, reader, opts.stdout_limit);
-    };
-    sel.concurrent(.timed_out, sleepDeadline, .{ io, opts.timeout_ms }) catch {
+    sel.concurrent(.event, readSseEventAttempt, .{ arena, reader, opts.stdout_limit }) catch |err| return err;
+    sel.concurrent(.timed_out, sleepDeadline, .{ io, opts.timeout_ms }) catch |err| {
         sel.cancelDiscard();
-        return readSseEventBlocking(arena, reader, opts.stdout_limit);
+        return err;
     };
 
     const winner = sel.await() catch {

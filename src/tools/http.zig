@@ -9,16 +9,18 @@
 //! `std.Io.Select` races fetch against a timed sleeper. The loser is canceled
 //! and joined with `cancelDiscard`. Fetch is cancelable at blocking socket/TLS
 //! reads, so timeouts interrupt hung connections instead of stalling the agent.
-//! If concurrency is unavailable, this falls back to synchronous fetch, keeping
-//! functionality while losing the hard timeout.
+//! If concurrency is unavailable, the call fails closed instead of falling back
+//! to an unbounded synchronous fetch.
 //!
 //! CA: by default, `std.http.Client` scans system roots. Embedded systems may
 //! not have them, so `ca_file` accepts an absolute PEM bundle path. Preloading
 //! `ca_bundle` and setting `now` suppresses system scanning, trusting only the
 //! user-provided CA.
 const std = @import("std");
+const proc = @import("proc.zig");
 
 pub const Method = enum { GET, POST, PUT, DELETE, HEAD, PATCH };
+pub const default_timeout_ms: u64 = 30_000;
 
 /// Result for one request. `status==0` means a transport failure such as
 /// connection, TLS, or DNS; `err` carries the error name. `timed_out=true`
@@ -31,8 +33,8 @@ pub const Response = struct {
 };
 
 pub const Options = struct {
-    /// Hard timeout in milliseconds.
-    timeout_ms: u64 = 30_000,
+    /// Hard timeout in milliseconds. 0 means use the module default.
+    timeout_ms: u64 = default_timeout_ms,
     /// Optional absolute PEM CA bundle path; null uses system root scanning.
     ca_file: ?[]const u8 = null,
     /// Reported response-body byte limit; larger bodies are truncated.
@@ -49,21 +51,21 @@ pub fn request(
     body: ?[]const u8,
     opts: Options,
 ) !Response {
-    if (opts.timeout_ms == 0)
-        return doFetch(arena, io, method, url, body, opts);
+    const effective_timeout_ms = proc.effectiveTimeoutMs(opts.timeout_ms, default_timeout_ms);
 
     const Outcome = union(enum) { done: Response, timed_out: void };
     var buf: [2]Outcome = undefined;
     var sel = std.Io.Select(Outcome).init(io, &buf);
 
-    // Run fetch concurrently; if concurrency is unavailable, fall back to sync.
-    sel.concurrent(.done, doFetch, .{ arena, io, method, url, body, opts }) catch {
-        return doFetch(arena, io, method, url, body, opts);
+    // Run fetch concurrently. If concurrency setup is unavailable, fail closed
+    // instead of falling back to an unbounded synchronous network call.
+    sel.concurrent(.done, doFetch, .{ arena, io, method, url, body, opts }) catch |err| {
+        return .{ .err = @errorName(err) };
     };
     // Timed sleeper wins when the request times out.
-    sel.concurrent(.timed_out, sleepDeadline, .{ io, opts.timeout_ms }) catch {
+    sel.concurrent(.timed_out, sleepDeadline, .{ io, effective_timeout_ms }) catch |err| {
         sel.cancelDiscard();
-        return doFetch(arena, io, method, url, body, opts);
+        return .{ .err = @errorName(err) };
     };
 
     const winner = sel.await() catch {

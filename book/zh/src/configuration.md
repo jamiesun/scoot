@@ -120,7 +120,7 @@ token 用量。
 | `base_url` | string | `http://127.0.0.1:11434/v1` | OpenAI 兼容端点的基础 URL。 |
 | `model` | string | `qwen2.5` | 发送给后端的模型名。 |
 | `api_key_env` | string | `OPENAI_API_KEY` | 作为 **第一** token 来源的环境变量名。 |
-| `timeout_ms` | u64 | `120000` | 单次后端 Responses API 调用的硬超时，单位毫秒。`0` 表示关闭超时。 |
+| `timeout_ms` | u64 | `120000` | 单次后端 Responses API 调用的硬超时，单位毫秒。`0` 会被矫正为内建默认值，绝不表示“无 deadline”。 |
 | `api_key_file` | string? | unset → `~/.scoot/token` | `0600` token 文件的路径。在环境变量来源之后使用。 |
 | `api_key_cmd` | string? | unset | 打印 token 的命令（如 `pass show openai`）。最后使用。它会由 Scoot 执行，因此应视为可信配置。 |
 | `ca_file` | string? | unset → system roots | 用于 HTTPS 的 PEM CA bundle。在缺少根证书的系统上设置它。 |
@@ -192,7 +192,7 @@ context_budget_bytes = 80000      # 0 表示关闭；按后端窗口调小
 | --- | --- | --- | --- |
 | `package` | string | 必填 | 由 `wasm_tool.validatePackage` 校验的目录。 |
 | `host` | list of string | unset | 命令 argv 模板。占位符：`{package}`、`{component}`、`{entry}`。若未设置，Scoot 尝试 `{package}/{entry}`。 |
-| `timeout_ms` | u64? | `tools.timeout_ms` | 子进程硬超时。`0` 表示关闭 deadline。 |
+| `timeout_ms` | u64? | `tools.timeout_ms` | 子进程硬超时。`0` 会被矫正为内建默认值，绝不表示“无 deadline”。 |
 | `stdout_limit` | usize? | `1048576` | 接受的最大 stdout 字节数。 |
 | `stderr_limit` | usize? | `262144` | 接受的最大 stderr 字节数。 |
 

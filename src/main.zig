@@ -788,7 +788,7 @@ fn checkBackendConfig(d: *Doctor, arena: std.mem.Allocator, io: std.Io, cfg: sco
         try d.ok("backend.model", cfg.backend.model);
     }
     if (cfg.backend.timeout_ms == 0) {
-        try d.warn("backend.timeout_ms", "0 means no backend hard timeout and is not recommended for agent runs");
+        try d.warn("backend.timeout_ms", "0 is coerced to the built-in backend hard timeout");
     } else {
         try d.ok("backend.timeout_ms", try std.fmt.allocPrint(arena, "{d}ms", .{cfg.backend.timeout_ms}));
     }
@@ -808,7 +808,7 @@ fn checkPolicyConfig(d: *Doctor, arena: std.mem.Allocator, cfg: scoot.config.Con
         try d.fail("tools.policy", "unknown policy mode; expected guarded / readonly / unrestricted");
     }
     if (cfg.tools.timeout_ms == 0) {
-        try d.warn("tools.timeout_ms", "0 means no tool hard timeout and is not recommended for agent runs");
+        try d.warn("tools.timeout_ms", "0 is coerced to the built-in tool hard timeout");
     } else {
         try d.ok("tools.timeout_ms", try std.fmt.allocPrint(arena, "{d}ms", .{cfg.tools.timeout_ms}));
     }
