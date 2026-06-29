@@ -6,6 +6,7 @@
 //! `scoot daemon status --json`.
 const std = @import("std");
 const build_options = @import("build_options");
+const proc = @import("tools/proc.zig");
 
 const usage =
     \\scoot-edge - optional report-only Scoot fleet messenger (E1 skeleton)
@@ -32,6 +33,8 @@ const usage =
 
 const Command = enum { status, post_once };
 
+const default_timeout_ms: u64 = 30_000;
+
 const Options = struct {
     command: Command = .status,
     node_id: ?[]const u8 = null,
@@ -39,7 +42,7 @@ const Options = struct {
     scoot_home: ?[]const u8 = null,
     center_url: ?[]const u8 = null,
     token_env: []const u8 = "SCOOT_EDGE_TOKEN",
-    timeout_ms: u64 = 30_000,
+    timeout_ms: u64 = default_timeout_ms,
     allow_insecure_http: bool = false,
 };
 
@@ -266,13 +269,12 @@ fn runScootVersion(arena: std.mem.Allocator, io: std.Io, opts: Options) ![]const
 }
 
 fn runChild(arena: std.mem.Allocator, io: std.Io, argv: []const []const u8, timeout_ms: u64) !ChildOutput {
-    const timeout: std.Io.Timeout = if (timeout_ms == 0) .none else blk: {
-        const base: std.Io.Timeout = .{ .duration = .{
-            .clock = .awake,
-            .raw = std.Io.Duration.fromMilliseconds(@intCast(timeout_ms)),
-        } };
-        break :blk base.toDeadline(io);
-    };
+    const effective_timeout_ms = proc.effectiveTimeoutMs(timeout_ms, default_timeout_ms);
+    const base: std.Io.Timeout = .{ .duration = .{
+        .clock = .awake,
+        .raw = std.Io.Duration.fromMilliseconds(@intCast(effective_timeout_ms)),
+    } };
+    const timeout = base.toDeadline(io);
     const res = std.process.run(arena, io, .{
         .argv = argv,
         .timeout = timeout,
@@ -331,15 +333,15 @@ fn fetchWithTimeout(
     resp: *std.Io.Writer.Allocating,
     timeout_ms: u64,
 ) FetchResult {
-    if (timeout_ms == 0) return doPost(client, url, auth, payload, resp);
+    const effective_timeout_ms = proc.effectiveTimeoutMs(timeout_ms, default_timeout_ms);
 
     const Outcome = union(enum) { done: FetchResult, timed_out: void };
     var buf: [2]Outcome = undefined;
     var sel = std.Io.Select(Outcome).init(io, &buf);
-    sel.concurrent(.done, doPost, .{ client, url, auth, payload, resp }) catch return doPost(client, url, auth, payload, resp);
-    sel.concurrent(.timed_out, sleepDeadline, .{ io, timeout_ms }) catch {
+    sel.concurrent(.done, doPost, .{ client, url, auth, payload, resp }) catch |err| return .{ .err = @errorName(err) };
+    sel.concurrent(.timed_out, sleepDeadline, .{ io, effective_timeout_ms }) catch |err| {
         sel.cancelDiscard();
-        return doPost(client, url, auth, payload, resp);
+        return .{ .err = @errorName(err) };
     };
     const winner = sel.await() catch |err| {
         sel.cancelDiscard();

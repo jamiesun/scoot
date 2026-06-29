@@ -130,7 +130,7 @@ stays effective and token use stays bounded.
 | --- | --- | --- | --- |
 | `base_url` | string | `http://127.0.0.1:11434/v1` | OpenAI-compatible endpoint base URL. |
 | `model` | string | `qwen2.5` | Model name sent to the backend. |
-| `timeout_ms` | u64 | `120000` | Hard timeout for one backend Responses API call, in milliseconds. `0` disables the deadline. |
+| `timeout_ms` | u64 | `120000` | Hard timeout for one backend Responses API call, in milliseconds. `0` is coerced to the built-in default, never to “no deadline”. |
 | `api_key_env` | string | `OPENAI_API_KEY` | Environment variable used as the **first** token source. |
 | `api_key_file` | string? | unset → `~/.scoot/token` | Path to a `0600` token file. Used after the env source. |
 | `api_key_cmd` | string? | unset | Command that prints a token (e.g. `pass show openai`). Used last. Treat as trusted config because it is executed by Scoot. |
@@ -214,7 +214,7 @@ falls through to the built-in fallback chain.
 | --- | --- | --- | --- |
 | `package` | string | required | Directory validated by `wasm_tool.validatePackage`. |
 | `host` | list of string | unset | Command argv template. Placeholders: `{package}`, `{component}`, `{entry}`. If unset, Scoot tries `{package}/{entry}`. |
-| `timeout_ms` | u64? | `tools.timeout_ms` | Hard child-process timeout. `0` disables the deadline. |
+| `timeout_ms` | u64? | `tools.timeout_ms` | Hard child-process timeout. `0` is coerced to the built-in default, never to “no deadline”. |
 | `stdout_limit` | usize? | `1048576` | Maximum stdout bytes accepted from the plugin. |
 | `stderr_limit` | usize? | `262144` | Maximum stderr bytes accepted from the plugin. |
 

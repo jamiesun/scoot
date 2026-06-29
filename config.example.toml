@@ -19,7 +19,7 @@ base_url = "http://127.0.0.1:11434/v1"
 model = "qwen2.5"
 
 # Hard timeout for each backend Responses API call, in milliseconds.
-# Set to 0 only if you intentionally want no backend deadline.
+# A value of 0 is treated as the built-in default, never as "no deadline".
 timeout_ms = 120000
 
 # Ask the backend to persist the response server-side via the Responses API
@@ -118,6 +118,11 @@ confine_writes = true
 #   internal names; it does NOT resolve DNS, so DNS-rebinding can still bypass — use
 #   readonly for real isolation.
 block_internal_http = true
+
+# Trusted argv used by wasm_tool. Supported placeholders: {package}, {entry},
+# and {component}. With the default config, Scoot first tries a sibling
+# scoot-wasm next to the running scoot binary, then falls back to PATH.
+# wasm_host = ["scoot-wasm", "wasi", "{component}"]
 
 [skills]
 # Enable local Skill discovery.

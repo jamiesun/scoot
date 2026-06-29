@@ -84,6 +84,7 @@ cp book/site-index.html site/index.html
 | `src/policy.zig` | 执行策略门与路径/网络护栏 |
 | `src/tools/*.zig` | 执行沙盒：bash / file / search / http / MCP client / Wasm runner shim |
 | `src/wasm_*.zig` | 可选独立 `scoot-wasm` host/engine 支撑；除显式构建外不链接进核心二进制 |
+| `src/edge_main.zig` | 可选独立 `scoot-edge` 舰队伴生程序；默认关闭且不链接进核心二进制 |
 | `build.zig`, `build.zig.zon` | 构建与包清单 |
 
 新增内部子系统：在 `src/` 建文件，并在 `src/internal.zig` 用 `pub const xxx = @import("xxx.zig");` 导出，使其纳入内部测试图。不要把私有子系统导出到 `src/root.zig`：该文件是稳定公开 embedding API，并有白名单测试守护。扩展它必须先做明确的 API 边界决策并同步文档。
@@ -129,7 +130,7 @@ cp book/site-index.html site/index.html
 ## 运行目录 / 配置 / 密钥 / Skill 约定
 
 - **运行目录**：一切配置、密钥、技能、状态收敛在 `~/.scoot/`（`SCOOT_HOME` 可覆盖）。解析逻辑在 `src/paths.zig`；新写盘的东西放对应子目录（`config.toml`（或 `config.json`）/ `token` / `skills/` / `logs/` / `state/`），不要散落到别处或 `$HOME` 根下。`scoot config` 可打印解析结果。
-- **配置**：结构化分节（backend / agent / tools / skills / audit）在 `src/config.zig`，默认值即可用；加 JSON 加载时用 `std.json` 并与默认值合并，**不要**改默认值的含义。
+- **配置**：结构化分节（backend / agent / tools / skills / MCP / audit / schedule）在 `src/config.zig`，`config.toml` 优先、`config.json` 兼容回落；默认值即可用，**不要**改默认值的含义。
 - **密钥**：解析在 `src/secret.zig`，优先级 env → 文件(0600) → 凭证命令。实现文件分支时**必须**先 `assertPrivate` 校验 0600，权限过宽要拒绝。任何日志 / 错误 / 审计输出 token 前先过 `secret.redact`。
 - **Skill**：机制在 `src/skill.zig`。坚持渐进式披露——发现阶段只读 front-matter（name+description），正文按需在 `activate` 时加载（搜索优先级：可选的 `<cwd>/.agents/skills`（`skills.include_project_skills=true`，默认关闭）> 可选的 `~/.agents/skills`（`skills.include_agents_skills=true`）> `~/.scoot/skills` > 配置的 `extra_paths`）。读取技能指令/资源是原生只读能力（`skill` 动作），收口在技能目录内、照常审计，刻意不受策略门控制——故 `readonly` 下技能仍可激活。但 skill 携带的**脚本/命令**必须经 `src/tools/` 沙盒执行（带硬超时），不得新开绕过沙盒的执行路径。
 - **会话 / 记忆**：`src/session.zig` 持有单次交互的消息流，**用 backing/gpa 拥有**（追加时复制内容），使其跨回合存活——绝不把对话历史放进会被 `deinit` 的 per-turn arena。持久化用 JSONL 追加写到 `state/sessions/<id>.jsonl`（纯文本、可回溯）。**跨会话长期记忆不做成子系统**：用 Skill 注入知识或 `state/` 摘要文件 + 文件工具承载，不引入向量库 / embedding（撞「单体简洁」铁律）。
@@ -140,13 +141,14 @@ cp book/site-index.html site/index.html
 
 1. **不引入图形界面**：只有 CLI + 配置文件。不写 Web UI / GUI / 托盘。
 2. **只对接 OpenAI 协议**：仅支持 OpenAI 兼容 Responses API（`/v1/responses`），强制结构化 JSON Schema 输出。Chat Completions 已移除；**不要**为 Chat Completions 或 Anthropic / Google 等非 OpenAI 格式写胶水代码。
-3. **不搞复杂云端同步**：状态严格本地（`~/.scoot/`，SQLite 或纯文本）。不引入远程数据库、E2E 同步，不与特定网络栈强耦合。
+3. **不搞复杂云端同步**：状态严格本地（`~/.scoot/`，JSONL / 纯文本本地状态）。不引入远程数据库、E2E 同步，不与特定网络栈强耦合。
 4. **绝不信任模型输出**：任何未经 Schema 校验的模型响应都不得直接执行；解析失败要包装成 System Error 回灌触发重试，**不准 panic**。
 5. **不为功能数量牺牲单体简洁**：不堆重型运行时、不做需要动态链接 / 加载原生代码的二进制插件体系。新增依赖前先问：它会破坏“单文件、零臃肿依赖”吗？（Skill 加载的是指令 + 数据 + 沙盒脚本，不是原生插件，不在此列。）
 6. **工具必须有硬超时**：任何子进程 / 网络调用超时即猎杀（SIGKILL 或等效）并记录，绝不让单个任务卡死拖垮主循环。
 7. **密钥零泄漏**：token 绝不编译进二进制、绝不内联进随仓库提交的配置、绝不打印进日志 / 审计 / 报错。不强依赖特定 OS 钥匙串；安全存储通过外部凭证命令接入。
 8. **Skill 执行不越权**：skill 的**脚本/命令执行**不得绕过工具沙盒、不得自动联网拉取远程代码执行、不得获得超出已注册工具的能力。（读取技能指令/资源是原生只读能力，收口在技能目录内、照常审计，刻意置于策略门之外，使技能在 `readonly` 下仍可用。）
 9. **Wasm 插件只做纯数据变换**：插件运行在纯数据变换沙箱中，唯一通道是 stdin（输入）、stdout/stderr（输出）、argv（配置）以及进程退出码。host 不得暴露文件系统、网络/套接字、数据库、环境变量、时钟或随机数能力；任何此类 import 一律 trap。插件输出必须是 `(stdin, argv)` 的纯函数；若插件需要时间戳、种子或 nonce，由 host 作为输入字节传入——绝不通过环境 syscall 提供。
+10. **文档必须双语同步**：修改项目文档时，英文与中文对应版本必须一起更新；mdBook 的导航、范围、命令和安全规则必须保持一致。
 
 ## 新增 / 扩展一个能力的推荐流程
 
