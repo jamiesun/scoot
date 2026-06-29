@@ -21,6 +21,7 @@ const compressor = @import("compressor.zig");
 const tools = @import("tools/tools.zig");
 const audit = @import("audit.zig");
 const policy = @import("policy.zig");
+const policy_hook = @import("policy_hook.zig");
 const pathsafe = @import("paths.zig");
 const jsonio = @import("jsonio.zig");
 const obs = @import("obs.zig");
@@ -264,6 +265,11 @@ pub const Agent = struct {
     /// Host argv for wasm_tool. This is trusted runtime configuration, not
     /// model input. Placeholders: {package}, {entry}, {component}.
     wasm_host: []const []const u8 = tools.wasm.default_host,
+    /// Optional PreToolUse-style policy hook (issue #136). Default-off: when set,
+    /// `guard` consults it AFTER the built-in checks for actions the built-in
+    /// policy already allowed. The hook may only further restrict (allow -> deny),
+    /// never relax a built-in deny, and any hook failure fails closed to deny.
+    policy_hook_config: ?policy_hook.HookConfig = null,
 
     /// Constructs an Agent backed by a real LLM client.
     pub fn initClient(client: *llm.Client) Agent {
@@ -428,7 +434,36 @@ pub const Agent = struct {
     /// arbitrary shell execution and must be reviewed per string. Built-in tool
     /// read/write/network semantics are statically known and classified by
     /// capability. readonly local reads also apply path policy.
+    ///
+    /// When an optional policy hook is configured, it is consulted only after the
+    /// built-in checks ALLOW the action. The hook can tighten an allow into a
+    /// deny, never relax a built-in deny, and any hook failure fails closed.
     pub fn guard(self: *Agent, arena: std.mem.Allocator, action: Action, input: []const u8) policy.Decision {
+        const base = self.guardBuiltin(arena, action, input);
+        switch (base) {
+            .deny => return base, // Built-in deny is final; the hook cannot loosen it.
+            .allow => {},
+        }
+        const hook = self.policy_hook_config orelse return base;
+        if (!hook.enabled()) return base;
+        // `final` is a terminal answer, not an executable tool action; `run`
+        // handles it before guard, so it is never offered to the hook. `parallel`
+        // is a fan-out, not a concrete execution: `guardParallel` already routes
+        // each leaf child through this same `guard` path, so each real action is
+        // hook-checked exactly once. Consulting the hook again for the synthetic
+        // `parallel` aggregate would double-invoke it on an action that never runs.
+        if (action == .final or action == .parallel) return base;
+
+        const cwd = std.Io.Dir.cwd().realPathFileAlloc(self.io, ".", arena) catch ".";
+        return policy_hook.consult(arena, self.io, hook, .{
+            .action = @tagName(action),
+            .input = input,
+            .mode = @tagName(self.policy_mode),
+            .cwd = cwd,
+        });
+    }
+
+    fn guardBuiltin(self: *Agent, arena: std.mem.Allocator, action: Action, input: []const u8) policy.Decision {
         return switch (action) {
             .bash => policy.evaluate(arena, input, self.policy_mode),
             .file_read, .grep, .glob, .outline => self.guardLocalRead(arena, action, input),
@@ -1798,6 +1833,176 @@ test "guard: wasm_tool allows compute package and denies broader policy" {
         .deny => |reason| try std.testing.expect(std.mem.indexOf(u8, reason, "compute") != null),
         .allow => return error.ExpectedDeny,
     }
+}
+
+test "guard: policy hook can tighten an allowed action to deny (issue #136)" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const pid = std.posix.system.getpid();
+
+    const deny_root = try std.fmt.allocPrint(arena, ".zig-cache/scoot_policy_hook_deny_{d}", .{pid});
+    const allow_root = try std.fmt.allocPrint(arena, ".zig-cache/scoot_policy_hook_allow_{d}", .{pid});
+    cwd.deleteTree(io, deny_root) catch {};
+    cwd.deleteTree(io, allow_root) catch {};
+    defer cwd.deleteTree(io, deny_root) catch {};
+    defer cwd.deleteTree(io, allow_root) catch {};
+    try writePolicyHookPackage(io, deny_root, "cat >/dev/null\nprintf '%s\\n' '{\"decision\":\"deny\",\"reason\":\"org denylist\"}'\n");
+    try writePolicyHookPackage(io, allow_root, "cat >/dev/null\nprintf '%s\\n' '{\"decision\":\"allow\"}'\n");
+
+    var brain = ScriptedBrain{ .steps = &.{} };
+    var ag = testAgent(&brain, 16);
+    ag.policy_mode = .guarded;
+
+    // The hook denies a command the built-in policy would otherwise allow.
+    ag.policy_hook_config = .{
+        .package = deny_root,
+        .host = &.{ "/bin/sh", try std.fs.path.join(arena, &.{ deny_root, "host.sh" }) },
+        .timeout_ms = 5_000,
+    };
+    switch (ag.guard(arena, .bash, "echo hi")) {
+        .deny => |reason| try std.testing.expect(std.mem.indexOf(u8, reason, "org denylist") != null),
+        .allow => return error.ExpectedDeny,
+    }
+
+    // An allowing hook leaves the built-in allow intact.
+    ag.policy_hook_config = .{
+        .package = allow_root,
+        .host = &.{ "/bin/sh", try std.fs.path.join(arena, &.{ allow_root, "host.sh" }) },
+        .timeout_ms = 5_000,
+    };
+    try std.testing.expectEqual(policy.Decision.allow, ag.guard(arena, .bash, "echo hi"));
+}
+
+test "guard: built-in deny short-circuits the policy hook (issue #136)" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const root = try std.fmt.allocPrint(arena, ".zig-cache/scoot_policy_hook_shortcircuit_{d}", .{std.posix.system.getpid()});
+    cwd.deleteTree(io, root) catch {};
+    defer cwd.deleteTree(io, root) catch {};
+    // This hook would allow everything; it must never run because the built-in
+    // readonly policy denies file_write first.
+    try writePolicyHookPackage(io, root, "cat >/dev/null\nprintf '%s\\n' '{\"decision\":\"allow\"}'\n");
+
+    var brain = ScriptedBrain{ .steps = &.{} };
+    var ag = testAgent(&brain, 16);
+    ag.policy_mode = .readonly;
+    ag.policy_hook_config = .{
+        .package = root,
+        .host = &.{ "/bin/sh", try std.fs.path.join(arena, &.{ root, "host.sh" }) },
+        .timeout_ms = 5_000,
+    };
+    switch (ag.guard(arena, .file_write, "{\"path\":\"out.txt\",\"content\":\"x\"}")) {
+        // Reason is the built-in readonly deny, never a "policy hook:" verdict.
+        .deny => |reason| try std.testing.expect(std.mem.indexOf(u8, reason, "policy hook") == null),
+        .allow => return error.ExpectedDeny,
+    }
+}
+
+test "guard: policy hook failure fails closed to deny (issue #136)" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const root = try std.fmt.allocPrint(arena, ".zig-cache/scoot_policy_hook_failclosed_{d}", .{std.posix.system.getpid()});
+    cwd.deleteTree(io, root) catch {};
+    defer cwd.deleteTree(io, root) catch {};
+    try writePolicyHookPackage(io, root, "cat >/dev/null\nexit 3\n");
+
+    var brain = ScriptedBrain{ .steps = &.{} };
+    var ag = testAgent(&brain, 16);
+    ag.policy_mode = .guarded;
+    ag.policy_hook_config = .{
+        .package = root,
+        .host = &.{ "/bin/sh", try std.fs.path.join(arena, &.{ root, "host.sh" }) },
+        .timeout_ms = 5_000,
+    };
+    switch (ag.guard(arena, .bash, "echo hi")) {
+        .deny => |reason| try std.testing.expect(std.mem.indexOf(u8, reason, "policy hook") != null),
+        .allow => return error.ExpectedDeny,
+    }
+}
+
+test "guard: parallel routes each leaf child through the hook once (issue #136)" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const pid = std.posix.system.getpid();
+
+    const deny_root = try std.fmt.allocPrint(arena, ".zig-cache/scoot_policy_hook_par_deny_{d}", .{pid});
+    const allow_root = try std.fmt.allocPrint(arena, ".zig-cache/scoot_policy_hook_par_allow_{d}", .{pid});
+    cwd.deleteTree(io, deny_root) catch {};
+    cwd.deleteTree(io, allow_root) catch {};
+    defer cwd.deleteTree(io, deny_root) catch {};
+    defer cwd.deleteTree(io, allow_root) catch {};
+    try writePolicyHookPackage(io, deny_root, "cat >/dev/null\nprintf '%s\\n' '{\"decision\":\"deny\",\"reason\":\"blocked leaf\"}'\n");
+    try writePolicyHookPackage(io, allow_root, "cat >/dev/null\nprintf '%s\\n' '{\"decision\":\"allow\"}'\n");
+
+    var brain = ScriptedBrain{ .steps = &.{} };
+    var ag = testAgent(&brain, 16);
+    ag.policy_mode = .guarded;
+    const batch = "{\"calls\":[{\"action\":\"file_read\",\"input\":\"{\\\"path\\\":\\\"README.md\\\"}\"}]}";
+
+    // A denying hook reaches the leaf child and the parallel decision surfaces it.
+    ag.policy_hook_config = .{
+        .package = deny_root,
+        .host = &.{ "/bin/sh", try std.fs.path.join(arena, &.{ deny_root, "host.sh" }) },
+        .timeout_ms = 5_000,
+    };
+    switch (ag.guard(arena, .parallel, batch)) {
+        .deny => |reason| {
+            try std.testing.expect(std.mem.indexOf(u8, reason, "parallel subcall #1 denied") != null);
+            try std.testing.expect(std.mem.indexOf(u8, reason, "blocked leaf") != null);
+        },
+        .allow => return error.ExpectedDeny,
+    }
+
+    // An allowing hook leaves the parallel batch allowed (no spurious aggregate deny).
+    ag.policy_hook_config = .{
+        .package = allow_root,
+        .host = &.{ "/bin/sh", try std.fs.path.join(arena, &.{ allow_root, "host.sh" }) },
+        .timeout_ms = 5_000,
+    };
+    try std.testing.expectEqual(policy.Decision.allow, ag.guard(arena, .parallel, batch));
+}
+
+fn writePolicyHookPackage(io: std.Io, root: []const u8, host_script: []const u8) !void {
+    const cwd = std.Io.Dir.cwd();
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const schema_dir = try std.fs.path.join(arena, &.{ root, "schema" });
+    try cwd.createDirPath(io, schema_dir);
+    try cwd.writeFile(io, .{
+        .sub_path = try std.fs.path.join(arena, &.{ root, "manifest.toml" }),
+        .data =
+        \\kind = "policy"
+        \\name = "test-policy-hook"
+        \\description = "Test policy hook."
+        \\entry = "_start"
+        \\component = "component.wasm"
+        \\input_schema = "schema/input.json"
+        \\output_schema = "schema/output.json"
+        \\capabilities = ["compute"]
+        \\
+        ,
+    });
+    try cwd.writeFile(io, .{
+        .sub_path = try std.fs.path.join(arena, &.{ root, "policy.toml" }),
+        .data = "capabilities = [\"compute\"]\n",
+    });
+    try cwd.writeFile(io, .{ .sub_path = try std.fs.path.join(arena, &.{ root, "component.wasm" }), .data = "\x00asm\x01\x00\x00\x00" });
+    try cwd.writeFile(io, .{ .sub_path = try std.fs.path.join(arena, &.{ root, "schema", "input.json" }), .data = "{\"type\":\"object\"}\n" });
+    try cwd.writeFile(io, .{ .sub_path = try std.fs.path.join(arena, &.{ root, "schema", "output.json" }), .data = "{\"type\":\"object\"}\n" });
+    try cwd.writeFile(io, .{ .sub_path = try std.fs.path.join(arena, &.{ root, "host.sh" }), .data = host_script });
 }
 
 test "run: wasm_tool executes configured host without bash action" {

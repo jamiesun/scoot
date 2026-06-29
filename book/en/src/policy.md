@@ -145,6 +145,35 @@ Two complementary checks share the same `Mode` semantics:
   tools are added: a new read tool reuses the `read` decision. It also
   guarantees built-in tools **cannot bypass `readonly`**.
 
+## Policy Hook (opt-in, defense-in-depth)
+
+By default the gate is entirely built in. For org denylists, secret scanning, or
+a central policy engine you can attach an **optional external policy hook**
+(issue #136) without recompiling. It is **off unless configured**:
+
+```toml
+[tools.policy_hook]
+package = "/opt/scoot/policy/org-guard"   # local Wasm tool package, manifest kind = "policy"
+host = ["scoot-wasm", "wasi", "{component}"]  # defaults to the resolved wasm_host
+timeout_ms = 5000                          # defaults to tools.timeout_ms
+```
+
+The hook reuses the same data-transform plugin boundary as `wasm_tool` and the
+compressor plugin — `manifest.toml` + argv host template + a realpath-validated
+package — rather than a raw `/bin/sh` callout, preserving determinism and the
+small attack surface. It receives the pending decision as JSON on stdin
+(`{"version":1,"kind":"policy","action","input","mode","cwd"}`) and prints
+`{"decision":"allow"}` or `{"decision":"deny","reason":"..."}`.
+
+Its posture is deliberately one-directional and fail-closed:
+
+- **Consulted only after a built-in `allow`.** The hook can turn an `allow` into
+  a `deny`; it can **never relax a built-in `deny`**. A built-in deny
+  short-circuits before the hook runs.
+- **Fail closed.** Missing/invalid package, wrong manifest kind, any non-`compute`
+  capability, spawn failure, timeout, non-zero exit, oversized or malformed
+  output — all are treated as `deny`, and the denial is audited like any other.
+
 ## Honest Threat Model
 
 Read this before relying on Scoot in a hostile setting:

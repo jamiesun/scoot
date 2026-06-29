@@ -11,6 +11,7 @@ const tomlmod = @import("toml.zig");
 const mcp_tool = @import("tools/mcp.zig");
 const wasm_runner = @import("tools/wasm.zig");
 const compressor = @import("compressor.zig");
+const policy_hook_mod = @import("policy_hook.zig");
 
 pub const default_context_budget_bytes: usize = 80_000;
 
@@ -99,6 +100,23 @@ pub const Tools = struct {
     /// Trusted host argv for wasm_tool; supports {package}, {entry}, and
     /// {component}. This is config, not model-controlled input.
     wasm_host: []const []const u8 = wasm_runner.default_host,
+    /// Optional PreToolUse-style policy hook (issue #136). Default-off: when
+    /// `policy_hook.package` is set, `guard()` consults the hook AFTER built-in
+    /// checks for actions the built-in policy already allowed. The hook may only
+    /// further restrict (allow -> deny); any failure/timeout/invalid output fails
+    /// closed to deny. The hook package is a local Wasm tool package with
+    /// manifest kind "policy" and compute-only capability.
+    policy_hook: ?PolicyHook = null,
+
+    /// Static `[tools.policy_hook]` sub-table. `host` and the limits fall back to
+    /// the resolved wasm host / `tools.timeout_ms` when omitted.
+    pub const PolicyHook = struct {
+        package: []const u8 = "",
+        host: []const []const u8 = &.{},
+        timeout_ms: ?u64 = null,
+        stdout_limit: ?usize = null,
+        stderr_limit: ?usize = null,
+    };
 };
 
 /// Skill mechanism configuration.
@@ -636,6 +654,22 @@ pub const Config = struct {
         const exe_dir = std.process.executableDirPathAlloc(io, arena) catch return self.tools.wasm_host;
         return resolveDefaultWasmHostInDir(arena, io, exe_dir) catch self.tools.wasm_host;
     }
+
+    /// Resolve the optional policy hook (issue #136). Returns null when no hook
+    /// package is configured. The host argv defaults to the resolved wasm host
+    /// and the timeout defaults to `tools.timeout_ms`, mirroring wasm_tool.
+    pub fn resolvePolicyHook(self: Config, arena: std.mem.Allocator, io: std.Io) !?policy_hook_mod.HookConfig {
+        const hook = self.tools.policy_hook orelse return null;
+        if (hook.package.len == 0) return null;
+        const host = if (hook.host.len != 0) hook.host else try self.resolveWasmHost(arena, io);
+        return .{
+            .package = hook.package,
+            .host = host,
+            .timeout_ms = hook.timeout_ms orelse self.tools.timeout_ms,
+            .stdout_limit = hook.stdout_limit orelse (1 << 20),
+            .stderr_limit = hook.stderr_limit orelse (256 * 1024),
+        };
+    }
 };
 
 fn isDefaultWasmHost(host: []const []const u8) bool {
@@ -767,6 +801,37 @@ test "parseTomlConfig: agent compactor plugin tables are dynamic by name" {
             try std.testing.expectEqual(@as(u64, 2500), p.timeout_ms);
         },
         else => return error.TestUnexpectedResult,
+    }
+}
+
+test "parseTomlConfig: tools.policy_hook resolves with timeout fallback (issue #136)" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Unconfigured: no hook.
+    {
+        const fc = try parseTomlConfig(a, "[tools]\npolicy = \"guarded\"\n", null);
+        const cfg: Config = .{ .dirs = undefined, .tools = fc.tools };
+        try std.testing.expect((try cfg.resolvePolicyHook(a, std.testing.io)) == null);
+    }
+
+    // Configured sub-table: package + host, timeout falls back to tools.timeout_ms.
+    {
+        const src =
+            \\[tools]
+            \\timeout_ms = 7000
+            \\
+            \\[tools.policy_hook]
+            \\package = "/opt/scoot/policy/org-guard"
+            \\host = ["/bin/sh", "{package}/host.sh"]
+        ;
+        const fc = try parseTomlConfig(a, src, null);
+        const cfg: Config = .{ .dirs = undefined, .tools = fc.tools };
+        const hook = (try cfg.resolvePolicyHook(a, std.testing.io)).?;
+        try std.testing.expectEqualStrings("/opt/scoot/policy/org-guard", hook.package);
+        try std.testing.expectEqualStrings("/bin/sh", hook.host[0]);
+        try std.testing.expectEqual(@as(u64, 7000), hook.timeout_ms);
     }
 }
 

@@ -683,6 +683,7 @@ fn runPolicyCheck(out: *Io.Writer, arena: std.mem.Allocator, io: std.Io, cfg: sc
     ag.confine_writes = cfg.tools.confine_writes;
     ag.block_internal_http = cfg.tools.block_internal_http;
     ag.mcp_servers = cfg.mcp.servers;
+    ag.policy_hook_config = try cfg.resolvePolicyHook(arena, io);
     const decision = ag.guard(arena, action, pc.input);
 
     try out.print("mode={s}\n", .{@tagName(mode)});
@@ -2476,6 +2477,7 @@ fn setupRun(
     ag.skills = skills;
     ag.mcp_servers = cfg.mcp.servers;
     ag.wasm_host = try cfg.resolveWasmHost(arena, io);
+    ag.policy_hook_config = try cfg.resolvePolicyHook(arena, io);
 
     sink.open(warn, arena, io, cfg.dirs.logs_dir);
     sink.setContext(session_id, null);

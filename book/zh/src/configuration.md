@@ -240,6 +240,23 @@ block_internal_http = true
 wasm_host = ["./zig-out/bin/scoot-wasm", "wasi", "{component}"]
 ```
 
+### `[tools.policy_hook]`（可选）
+
+可选的外部策略钩子，在内建策略门放行某个 action *之后* 被咨询；它只能把 `allow` 收紧为 `deny`，永不放松内建的 deny，任何错误都 fail-closed 拒绝。未设置 `package` 即不启用。参见 [执行策略](policy.md#策略钩子可选纵深防御)。
+
+| 键 | 类型 | 默认值 | 含义 |
+| --- | --- | --- | --- |
+| `package` | string | _(空)_ | 本地 Wasm 工具包（manifest kind 为 `policy`，仅 `compute`）。为空表示不启用钩子。 |
+| `host` | 字符串数组 | 解析后的 `wasm_host` | argv 模板。占位符：`{package}`、`{entry}`、`{component}`。 |
+| `timeout_ms` | u64 | `tools.timeout_ms` | 钩子每次调用的硬超时。 |
+
+```toml
+[tools.policy_hook]
+package = "/opt/scoot/policy/org-guard"
+host = ["scoot-wasm", "wasi", "{component}"]
+timeout_ms = 5000
+```
+
 ---
 
 ## `[skills]`

@@ -107,8 +107,10 @@ pub fn validatePackage(arena: std.mem.Allocator, io: std.Io, dir: []const u8) !V
 }
 
 fn validateManifest(arena: std.mem.Allocator, m: Manifest) ?[]const u8 {
-    if (!std.mem.eql(u8, m.kind, "tool") and !std.mem.eql(u8, m.kind, "compressor"))
-        return "kind must be `tool` or `compressor`";
+    if (!std.mem.eql(u8, m.kind, "tool") and
+        !std.mem.eql(u8, m.kind, "compressor") and
+        !std.mem.eql(u8, m.kind, "policy"))
+        return "kind must be `tool`, `compressor`, or `policy`";
     if (!skill.isValidName(m.name)) return "name must use only ASCII letters, digits, '.', '_' or '-'";
     if (m.description.len == 0) return "description is required";
     if (!isValidEntry(m.entry)) return "entry must be a non-empty ASCII identifier";

@@ -264,6 +264,25 @@ block_internal_http = true
 wasm_host = ["./zig-out/bin/scoot-wasm", "wasi", "{component}"]
 ```
 
+### `[tools.policy_hook]` (opt-in)
+
+Optional external policy hook consulted after the built-in gate allows an action;
+it can only tighten `allow`→`deny`, never relax a built-in deny, and fails closed
+on any error. Off unless `package` is set. See [Execution Policy](policy.md#policy-hook-opt-in-defense-in-depth).
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `package` | string | _(empty)_ | Local Wasm tool package (manifest kind `policy`, compute-only). Empty = no hook. |
+| `host` | string array | resolved `wasm_host` | argv template. Placeholders: `{package}`, `{entry}`, `{component}`. |
+| `timeout_ms` | u64 | `tools.timeout_ms` | Hard per-call timeout for the hook. |
+
+```toml
+[tools.policy_hook]
+package = "/opt/scoot/policy/org-guard"
+host = ["scoot-wasm", "wasi", "{component}"]
+timeout_ms = 5000
+```
+
 ---
 
 ## `[skills]`

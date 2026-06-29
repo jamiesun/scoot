@@ -124,6 +124,22 @@ block_internal_http = true
 # scoot-wasm next to the running scoot binary, then falls back to PATH.
 # wasm_host = ["scoot-wasm", "wasi", "{component}"]
 
+# Optional PreToolUse-style policy hook (issue #136). Default OFF.
+# When configured, guard() consults this hook AFTER the built-in checks, but only
+# for actions the built-in policy already ALLOWED. The hook may only further
+# restrict (turn an allow into a deny) — it can never relax a built-in deny.
+# Any hook failure (missing/invalid package, wrong kind, non-compute capability,
+# timeout, non-zero exit, oversized or malformed output) fails CLOSED to deny.
+# The hook is a local Wasm tool package (manifest kind = "policy", compute-only
+# capability). It receives JSON on stdin: {"version":1,"kind":"policy","action",
+# "input","mode","cwd"} and must print {"decision":"allow"} or
+# {"decision":"deny","reason":"..."} on stdout. Defaults: host -> resolved
+# wasm_host, timeout_ms -> tools.timeout_ms.
+# [tools.policy_hook]
+# package = "/opt/scoot/policy/org-guard"
+# host = ["scoot-wasm", "wasi", "{component}"]
+# timeout_ms = 5000
+
 [skills]
 # Enable local Skill discovery.
 enabled = true

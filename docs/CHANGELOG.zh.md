@@ -15,6 +15,10 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 ## [未发布]
 
+### 新增
+
+- 在统一的 `guard()` 收口处新增可选的 PreToolUse 式**策略钩子**（`[tools.policy_hook]`）。当内建检查放行某个 action 后，外部 Wasm 策略包（manifest kind 为 `policy`，仅 `compute` 能力）可进一步收紧判定 —— 只能把 allow 改为 deny，永不放松内建的 deny。任何失败/超时/非法输出都 fail-closed 拒绝，写入审计，并由 `scoot policy check` 反映。默认关闭（#136）。
+
 ## [0.5.0] - 2026-06-27
 
 ### 新增

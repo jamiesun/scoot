@@ -16,6 +16,15 @@ heading when cutting a release.
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in PreToolUse-style **policy hook** at the unified `guard()` chokepoint
+  (`[tools.policy_hook]`). After built-in checks allow an action, an external
+  Wasm policy package (manifest kind `policy`, compute-only) may further restrict
+  it — allow→deny only, never relaxing a built-in deny. Fail-closed on any
+  failure/timeout/invalid output, audited, and reflected by `scoot policy check`.
+  Default off (#136).
+
 ## [0.5.0] - 2026-06-27
 
 ### Added

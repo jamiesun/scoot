@@ -96,6 +96,24 @@ block_internal_http = true
 - **Shell 命令**（`bash`）按字符串分析：归一化、与灾难性拒绝清单比对，然后放行（`guarded`）或拒绝（`readonly`）。
 - **内建工具**按*能力*分类 —— `read`、`write`、`net_read`、`net_write` —— 因为它们的语义无需解析命令字符串即静态已知。这正是策略门不随工具增多而变复杂的原因：新增的读工具复用同一条 `read` 判定。它也保证内建工具**无法绕过 `readonly`**。
 
+## 策略钩子（可选，纵深防御）
+
+默认情况下策略门完全内建。若需要组织级拒绝清单、密钥扫描或对接中央策略引擎，可以挂载一个**可选的外部策略钩子**（issue #136），无需重新编译。它**不配置即不启用**：
+
+```toml
+[tools.policy_hook]
+package = "/opt/scoot/policy/org-guard"   # 本地 Wasm 工具包，manifest kind = "policy"
+host = ["scoot-wasm", "wasi", "{component}"]  # 默认取解析后的 wasm_host
+timeout_ms = 5000                          # 默认取 tools.timeout_ms
+```
+
+该钩子复用与 `wasm_tool`、压缩器插件相同的纯数据变换插件边界 —— `manifest.toml` + argv 宿主模板 + 经 realpath 校验的包 —— 而非裸 `/bin/sh` 调用，从而保持确定性与小攻击面。它从 stdin 接收待决判定的 JSON（`{"version":1,"kind":"policy","action","input","mode","cwd"}`），并打印 `{"decision":"allow"}` 或 `{"decision":"deny","reason":"..."}`。
+
+它的姿态刻意是单向且 fail-closed 的：
+
+- **仅在内建判定为 `allow` 后才被咨询。** 钩子只能把 `allow` 收紧为 `deny`，**永远不能放松内建的 `deny`**。内建拒绝会在钩子运行前短路返回。
+- **失败即拒绝。** 包缺失/非法、manifest kind 不符、任何非 `compute` 能力、进程启动失败、超时、非零退出、输出过大或格式错误 —— 一律按 `deny` 处理，并像其他拒绝一样写入审计。
+
 ## 坦诚的威胁模型
 
 在敌对环境中依赖 Scoot 前请先读这段：
