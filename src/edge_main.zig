@@ -22,12 +22,12 @@ const usage =
     \\  --center-url <https>    exact HTTPS telemetry endpoint for post-once
     \\  --token-env <name>      env var containing the per-node bearer token (default: SCOOT_EDGE_TOKEN)
     \\  --timeout-ms <N>        hard timeout for child/network operations (default: 30000)
-    \\  --allow-insecure-http   allow http:// center URLs for local/dev testing only
+    \\  --allow-insecure-http   allow http:// loopback center URLs for local/dev testing only
     \\  -h, --help             show this help
     \\  -v, --version          show version
     \\
     \\No outbound network happens in `status`; `post-once` requires HTTPS and a non-empty token
-    \\unless --allow-insecure-http is explicitly set for local/dev testing.
+    \\unless --allow-insecure-http is explicitly set for local/dev loopback testing.
     \\
 ;
 
@@ -135,7 +135,7 @@ pub fn main(init: std.process.Init) !void {
                 die(err_out, 2);
             };
             if (!centerUrlAllowed(center_url, opts.allow_insecure_http)) {
-                try err_out.writeAll("error: --center-url must use https://; http:// is allowed only with --allow-insecure-http for local/dev testing\n");
+                try err_out.writeAll("error: --center-url must use https://; http:// is allowed only with --allow-insecure-http for local/dev loopback testing\n");
                 die(err_out, 2);
             }
             const token = env.get(opts.token_env) orelse {
@@ -320,8 +320,53 @@ fn postJson(arena: std.mem.Allocator, io: std.Io, url: []const u8, token: []cons
 }
 
 fn centerUrlAllowed(url: []const u8, allow_insecure_http: bool) bool {
-    return std.mem.startsWith(u8, url, "https://") or
-        (allow_insecure_http and std.mem.startsWith(u8, url, "http://"));
+    if (std.mem.startsWith(u8, url, "https://")) return true;
+    if (!allow_insecure_http or !std.mem.startsWith(u8, url, "http://")) return false;
+    const host = urlHost(url) orelse return false;
+    return isLoopbackHost(host);
+}
+
+fn urlHost(url: []const u8) ?[]const u8 {
+    const sep = std.mem.indexOf(u8, url, "://") orelse return null;
+    const rest = url[sep + 3 ..];
+    if (rest.len == 0) return null;
+    var auth_end: usize = rest.len;
+    for (rest, 0..) |c, i| {
+        if (c == '/' or c == '?' or c == '#') {
+            auth_end = i;
+            break;
+        }
+    }
+    var authority = rest[0..auth_end];
+    if (authority.len == 0) return null;
+    if (std.mem.lastIndexOfScalar(u8, authority, '@')) |at| authority = authority[at + 1 ..];
+    if (authority.len == 0) return null;
+    if (authority[0] == '[') {
+        const close = std.mem.indexOfScalar(u8, authority, ']') orelse return null;
+        return authority[1..close];
+    }
+    if (std.mem.indexOfScalar(u8, authority, ':')) |colon| return authority[0..colon];
+    return authority;
+}
+
+fn isLoopbackHost(host: []const u8) bool {
+    if (std.ascii.eqlIgnoreCase(host, "localhost") or std.ascii.eqlIgnoreCase(host, "localhost.")) return true;
+    if (std.mem.eql(u8, host, "::1")) return true;
+    var parts = std.mem.splitScalar(u8, host, '.');
+    const first = parts.next() orelse return false;
+    if (!std.mem.eql(u8, first, "127")) return false;
+    var n: usize = 1;
+    while (parts.next()) |part| {
+        n += 1;
+        if (part.len == 0 or part.len > 3) return false;
+        var value: u16 = 0;
+        for (part) |c| {
+            if (c < '0' or c > '9') return false;
+            value = value * 10 + (c - '0');
+        }
+        if (value > 255) return false;
+    }
+    return n == 4;
 }
 
 fn fetchWithTimeout(
@@ -413,11 +458,15 @@ test "summarizeDaemonStatus flags stale running daemon" {
     try std.testing.expect(!got.clean_prev_stop);
 }
 
-test "post-once requires HTTPS URL by parser-level convention" {
+test "post-once requires HTTPS or explicitly insecure loopback URL" {
     try std.testing.expect(centerUrlAllowed("https://center.example/telemetry", false));
     try std.testing.expect(centerUrlAllowed("https://center.example/telemetry", true));
     try std.testing.expect(!centerUrlAllowed("http://localhost:8080/telemetry", false));
     try std.testing.expect(centerUrlAllowed("http://localhost:8080/telemetry", true));
+    try std.testing.expect(centerUrlAllowed("http://127.0.0.1:8080/telemetry", true));
+    try std.testing.expect(centerUrlAllowed("http://[::1]:8080/telemetry", true));
+    try std.testing.expect(!centerUrlAllowed("http://center.example/telemetry", true));
+    try std.testing.expect(!centerUrlAllowed("http://10.0.0.5/telemetry", true));
     try std.testing.expect(!centerUrlAllowed("ftp://center.example/telemetry", true));
 }
 

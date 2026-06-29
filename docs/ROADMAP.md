@@ -122,7 +122,7 @@ Modes:
 
 - `guarded`: interactive tripwire mode; blocks catastrophic shell patterns and applies default-on write confinement plus internal HTTP target blocking.
 - `readonly`: fail-closed unattended mode; rejects shell, writes, and network, and allows only project-relative, non-sensitive local read built-in capabilities plus compute-only boundaries.
-- `unrestricted`: no policy limit, still audited.
+- `unrestricted`: no policy limit, still audited. This is a high-risk operator exception, not a normal unattended mode; fleet/edge dispatch must not rely on it, and scheduled use must be surfaced with explicit warnings until a stronger local sign-off primitive exists.
 
 Scheduled jobs correct `guarded` to `readonly` at execution time because unattended execution must not rely on a human tripwire. `guarded` is not a sandbox; strong isolation remains an OS/deployment concern.
 
@@ -184,7 +184,7 @@ Keep per-turn scratch allocations short-lived, and keep session history in delib
 
 ### 2. Dual Cognitive Modes
 
-The current mode is goal-oriented ReACT. A future plan mode should produce a bounded plan or DAG first, then execute after confirmation or review.
+The current mode is goal-oriented ReACT. It is suitable for bounded local tasks, not an excuse for unlimited autonomous exploration. Broad goals that cross repositories or directories, change many files, delete data, perform network writes, enter unattended execution, or arrive through fleet/edge dispatch must escalate to a reviewed plan boundary instead of continuing as an open-ended goal. A future plan mode should produce a bounded plan or DAG first, then execute after confirmation or review.
 
 ### 3. Schedule Management
 

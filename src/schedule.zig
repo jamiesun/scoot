@@ -6,9 +6,9 @@
 //! to the `readonly` policy gate, a fail-closed local-read allowlist, rather than
 //! the interactive `guarded` tripwire. `guarded` is useful only when someone is
 //! watching; for unattended jobs it is corrected to `readonly` by
-//! `effectiveMode`. Users may explicitly choose `unrestricted` for a job at
-//! their own risk, still fully audited. Unattended execution must never rest on
-//! `guarded`.
+//! `effectiveMode`. `unrestricted` remains a high-risk local operator exception,
+//! still fully audited and surfaced with runtime warnings. Unattended execution
+//! must never rest on `guarded`.
 //!
 //! Testability: time-looping is separated from due decisions.
 //!   - `dueAt(now_unix)` is a pure function with injected time.

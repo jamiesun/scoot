@@ -83,7 +83,8 @@ pub const Tools = struct {
     /// Tool-call hard timeout in milliseconds.
     timeout_ms: u64 = 30_000,
     /// Execution policy mode: guarded by default, readonly fail-closed allowlist,
-    /// or unrestricted. See policy.zig. Unattended scenarios should use readonly.
+    /// or unrestricted. See policy.zig. Unattended scenarios should use readonly;
+    /// unrestricted is a high-risk local operator exception.
     policy: []const u8 = "guarded",
     /// Default-on hardening, only active in guarded: confines
     /// file_write/file_edit to the project root and rejects absolute paths, `..`
@@ -110,6 +111,8 @@ pub const Skills = struct {
     /// by default to avoid global skills polluting this agent.
     include_agents_skills: bool = false,
     /// Extra skill search paths; defaults already include ~/.scoot/skills.
+    /// Entries must be dedicated skill roots, not broad directories like $HOME,
+    /// a repository root, ~/.scoot, logs/, state/, or any secret-bearing path.
     extra_paths: []const []const u8 = &.{},
 };
 
@@ -143,8 +146,8 @@ pub const JobConfig = struct {
     /// Cron expression.
     cron: ?[]const u8 = null,
     /// Execution policy: readonly by default for unattended safety, or
-    /// unrestricted at user's risk with auditing. guarded is corrected to
-    /// readonly at execution via schedule.Job.effectiveMode.
+    /// unrestricted as a high-risk local operator exception with auditing.
+    /// guarded is corrected to readonly at execution via schedule.Job.effectiveMode.
     mode: []const u8 = "readonly",
 
     /// Collapses mutually exclusive optional trigger fields into schedule.Trigger.

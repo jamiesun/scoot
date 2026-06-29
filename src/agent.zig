@@ -1674,16 +1674,21 @@ test "run: repeated file_read is deduplicated (issue #73)" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     const cwd = std.Io.Dir.cwd();
-    const root = "/tmp/scoot_run_read_dedup";
+    const root = try std.fmt.allocPrint(gpa, "/tmp/scoot_run_read_dedup_{d}", .{std.posix.system.getpid()});
+    defer gpa.free(root);
+    const note_path = try std.fs.path.join(gpa, &.{ root, "note.txt" });
+    defer gpa.free(note_path);
     cwd.deleteTree(io, root) catch {};
     defer cwd.deleteTree(io, root) catch {};
     try cwd.createDirPath(io, root);
     // Content must meet dedup_min_bytes; use a unique marker to count full observations.
-    try cwd.writeFile(io, .{ .sub_path = root ++ "/note.txt", .data = "UNIQUE-DEDUP-MARKER-Q7\n" ** 20 });
+    try cwd.writeFile(io, .{ .sub_path = note_path, .data = "UNIQUE-DEDUP-MARKER-Q7\n" ** 20 });
 
+    const read_step = try std.fmt.allocPrint(gpa, "{{\"thought\":\"sample\",\"action\":\"file_read\",\"action_input\":\"{{\\\"path\\\":\\\"{s}\\\"}}\"}}", .{note_path});
+    defer gpa.free(read_step);
     var brain = ScriptedBrain{ .steps = &.{
-        "{\"thought\":\"sample\",\"action\":\"file_read\",\"action_input\":\"{\\\"path\\\":\\\"/tmp/scoot_run_read_dedup/note.txt\\\"}\"}",
-        "{\"thought\":\"sample\",\"action\":\"file_read\",\"action_input\":\"{\\\"path\\\":\\\"/tmp/scoot_run_read_dedup/note.txt\\\"}\"}",
+        read_step,
+        read_step,
         "{\"thought\":\"sample\",\"action\":\"final\",\"action_input\":\"done\"}",
     } };
     var ag = testAgent(&brain, 16);
@@ -1771,8 +1776,9 @@ test "guard: wasm_tool allows compute package and denies broader policy" {
     const arena = arena_state.allocator();
     const io = std.testing.io;
     const cwd = std.Io.Dir.cwd();
-    const good = ".zig-cache/scoot_agent_wasm_guard_good";
-    const bad = ".zig-cache/scoot_agent_wasm_guard_bad";
+    const pid = std.posix.system.getpid();
+    const good = try std.fmt.allocPrint(arena, ".zig-cache/scoot_agent_wasm_guard_good_{d}", .{pid});
+    const bad = try std.fmt.allocPrint(arena, ".zig-cache/scoot_agent_wasm_guard_bad_{d}", .{pid});
     cwd.deleteTree(io, good) catch {};
     cwd.deleteTree(io, bad) catch {};
     defer cwd.deleteTree(io, good) catch {};
@@ -1798,7 +1804,8 @@ test "run: wasm_tool executes configured host without bash action" {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     const cwd = std.Io.Dir.cwd();
-    const root = ".zig-cache/scoot_agent_wasm_run";
+    const root = try std.fmt.allocPrint(gpa, ".zig-cache/scoot_agent_wasm_run_{d}", .{std.posix.system.getpid()});
+    defer gpa.free(root);
     cwd.deleteTree(io, root) catch {};
     defer cwd.deleteTree(io, root) catch {};
     try writeWasmToolPackage(
@@ -1821,7 +1828,10 @@ test "run: wasm_tool executes configured host without bash action" {
         "{\"thought\":\"finish\",\"action\":\"final\",\"action_input\":\"done\"}",
     } };
     var ag = testAgent(&brain, 8);
-    ag.wasm_host = &.{ "/bin/sh", root ++ "/host.sh" };
+    const host_path = try std.fs.path.join(gpa, &.{ root, "host.sh" });
+    defer gpa.free(host_path);
+    const host_argv = [_][]const u8{ "/bin/sh", host_path };
+    ag.wasm_host = &host_argv;
 
     var sess = session.Session.init("wasm-tool");
     defer sess.deinit(gpa);

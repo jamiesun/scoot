@@ -68,8 +68,12 @@ first (it is not auto-installed, by git design):
 make hooks       # sets core.hooksPath=.githooks
 ```
 
-Bypass when needed with `git push --no-verify` or `SKIP_LOCAL_CI=1 git push`.
-`LOCAL_CI_CROSS=1` and `LOCAL_CI_DOCS=1` add the cross-compile and mdBook jobs.
+Bypassing local CI with `git push --no-verify` or `SKIP_LOCAL_CI=1 git push`
+is an exception, not a convenience path. Use it only for documented CI
+infrastructure failure, docs-only changes with mdBook checked separately, or an
+already-run equivalent validation path. Record the reason and substitute
+validation in the PR or handoff. `LOCAL_CI_CROSS=1` and `LOCAL_CI_DOCS=1` add
+the cross-compile and mdBook jobs.
 
 For documentation:
 
@@ -138,7 +142,7 @@ Long-running stability matters more than feature count.
 - Config files are `config.toml` first, `config.json` second.
 - Never add inline plaintext API keys to config.
 - Secret priority is env, then 0600 token file, then credential command.
-- Skill directories contain `SKILL.md` with front matter. Discovery reads only name and description; full instructions are loaded only when relevant. Search order: optional `<cwd>/.agents/skills` (`skills.include_project_skills=true`, default off) > optional `~/.agents/skills` (`skills.include_agents_skills=true`) > `~/.scoot/skills` > configured `extra_paths`.
+- Skill directories contain `SKILL.md` with front matter. Discovery reads only name and description; full instructions are loaded only when relevant. Search order: optional `<cwd>/.agents/skills` (`skills.include_project_skills=true`, default off) > optional `~/.agents/skills` (`skills.include_agents_skills=true`) > `~/.scoot/skills` > configured `extra_paths`. `extra_paths` must point to dedicated skill-root directories only; never point them at `$HOME`, a repository root, `~/.scoot`, runtime `logs/` / `state/`, or any directory that may contain secrets or unrelated project files.
 - Reading a skill's instructions/resources is a native, read-only capability (the `skill` action), confined to the skill directory and audited, and is intentionally not policy-gated — so skills stay usable in `readonly`. Skill *scripts and commands* get no special privileges: they run through the same tool sandbox and policy gates as normal actions.
 - Sessions are short-term memory only. Do not introduce vector databases or long-term semantic memory without first revisiting the roadmap.
 

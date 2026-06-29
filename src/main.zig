@@ -1962,6 +1962,9 @@ fn printSchedule(out: *Io.Writer, cfg: scoot.config.Config) !void {
             try out.print("  - {s}  [{s}]  mode={s}{s}  goal={s}\n", .{
                 jc.id, triggerLabel(&tbuf, job.trigger), @tagName(eff), coerced, job.goal,
             });
+            if (eff == .unrestricted) {
+                try out.writeAll("    WARN unrestricted unattended job: no policy limit; use only with explicit operator sign-off and a constrained runtime environment\n");
+            }
         } else {
             try out.print("  - {s}  WARN invalid trigger (exactly one of every_sec/at_unix/cron must be set); will be skipped at runtime\n", .{jc.id});
         }
@@ -1993,6 +1996,9 @@ const RunCtx = struct {
         // Unattended execution forces the safe mode: guarded tripwire is
         // meaningless unattended, so correct it to readonly.
         const eff = job.effectiveMode();
+        if (eff == .unrestricted) {
+            self.out.print("[scoot] WARN job {s} is running unrestricted in unattended mode; this is a high-risk explicit operator exception.\n", .{job.id}) catch {};
+        }
 
         const sid = std.fmt.allocPrint(a, "job-{s}", .{job.id}) catch return;
         // schedule/daemon stdout is the run log, so degradation warnings go to self.out.

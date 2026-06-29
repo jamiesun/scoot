@@ -22,6 +22,7 @@ Scoot should stay a small, auditable, local-first automation core:
 - no secret leakage,
 - no skill privilege bypass,
 - MCP/Wasm/other extension seams must remain configuration-gated, timeout-bound, and auditable,
+- unattended `unrestricted` execution is a high-risk operator exception, not a default workflow,
 - the public package root must stay a narrow stable embedding API.
 
 Near-term work should focus on extension-boundary audits, actionable diagnostics, documentation alignment, runtime governance, and only then plan mode.

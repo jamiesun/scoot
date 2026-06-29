@@ -71,13 +71,13 @@ Scoot 是一个运行在纯文本环境下的轻量级 AI Agent 守护进程（D
   只讲 OpenAI 兼容 Responses API（`/v1/responses`）：起始 system 消息映射为顶层 `instructions`，其余进入 `input` 数组，并强制结构化 JSON Schema 输出，从协议层把模型输出约束成结构化数据。传输默认无状态（`store=false`，每轮重发完整 `input`），让本地上下文压缩始终掌控全局。`src/llm.zig` 已实现真实 HTTP 往返（`std.http.Client.fetch`）、紧凑请求体构造（`text.format=json_schema`、`strict:true`，有测试验证）、防弹响应解析（`std.json` 容错，结构不符即 `MalformedResponse` 不 panic）与**可配 CA**（嵌入式 HTTPS-to-LLM）。可服务该接口的本地后端包括 Ollama >= 0.13.3 与 vLLM。🚧 流式（`stream`）与后端原生 Tool Calling 字段刻意不做——ReACT 经结构化输出约束推进，对本地小模型更稳健（见「方向与意图」）。
 
 - **✅ 调度引擎（Scheduler）**
-  基于时间循环的触发器，支持 `every`（间隔）、`at`（固定时间点）与 5 字段 UTC `cron`（分钟/小时/日/月/周，支持 `*`、列表、范围和步进）——`src/schedule.zig` 已实现：`dueAt` 纯函数到点判定（时间可注入，便于防弹单测）、`tick`/`runForever` 守护循环（真实单调时钟，`--ticks N` 支持有界运行）。`scoot schedule list` 列出任务与**有效执行档**，`scoot schedule run` 进入守护循环到点唤起 Agent。**安全前置（铁律 #1）**：被调度 job 是无人在场的自主执行，故默认强制 `readonly` 安全档，`guarded` 绊线一律由 `effectiveMode` 矫正为 `readonly`（结构性保证，无人值守绝不跑在 guarded 之上）；用户可显式 `unrestricted`（自担风险，仍全程审计）。每个 job 用可重置 arena 承载 scratch，跑完即回收以保长效零泄漏。`schedule.enabled` 默认关闭，自主无人值守必须显式开启。
+  基于时间循环的触发器，支持 `every`（间隔）、`at`（固定时间点）与 5 字段 UTC `cron`（分钟/小时/日/月/周，支持 `*`、列表、范围和步进）——`src/schedule.zig` 已实现：`dueAt` 纯函数到点判定（时间可注入，便于防弹单测）、`tick`/`runForever` 守护循环（真实单调时钟，`--ticks N` 支持有界运行）。`scoot schedule list` 列出任务与**有效执行档**，`scoot schedule run` 进入守护循环到点唤起 Agent。**安全前置（铁律 #1）**：被调度 job 是无人在场的自主执行，故默认强制 `readonly` 安全档，`guarded` 绊线一律由 `effectiveMode` 矫正为 `readonly`（结构性保证，无人值守绝不跑在 guarded 之上）；`unrestricted` 只能作为高风险的本地操作者例外，不是正常无人值守模式，当前运行时必须显式告警，后续应补更强的本地签字 / 专用运行根门控。每个 job 用可重置 arena 承载 scratch，跑完即回收以保长效零泄漏。`schedule.enabled` 默认关闭，自主无人值守必须显式开启。
 
 - **✅ 认知流引擎（ReACT Loop）**
   经典“思考–行动–观察”（Thought–Action–Observation）闭环状态机，驱动 Agent 自主推进任务。`src/agent.zig` 已实现**多轮**闭环：每回合用强制 json_schema 让模型产出结构化步骤 `{thought, action, action_input}`（动作枚举由 `Action` 单一事实源派生，覆盖 bash / file / search / outline / HTTP / MCP / Wasm / skill / recall / parallel / final），动作先做参数解析与策略门校验，再经统一工具沙盒、原生只读能力或受控 host 边界执行，输出作为「观察」回灌续推，`final` 即终态；非法步骤防弹捕获并回灌纠错触发重试；`max_turns` 防失控；每回合派生可重置 arena、回合末整体释放（长效零泄漏）。`scoot -e` 单次执行与默认 **REPL 多轮交互**（复用会话、每轮独立审计、出错不中断、收尾落盘）均已端到端打通（含真实工具调用）。设计上不依赖后端原生 tool_calls（对本地小模型更稳健），有脚本化大脑驱动的循环测试守护。
 
 - **✅ 执行护栏（Execution Policy）—— 兑现「安全与可控」铁律**
-  模型产出的动作在落到系统前必须穿过策略门（`src/policy.zig`），绝不直接执行未经验证的输出。`bash` 走命令串审查 `evaluate`，**内建工具按能力分类**走 `evaluateTool`（本地读、写、本地 compute、网络读写分别归类；畸形/未知 fail-closed）。三档模式：`guarded`（拦截 `rm -rf /`、fork bomb、`| sh`、`mkfs`、`shutdown` 等灾难性命令绊线，默认附加写路径收口与 internal HTTP 目标拦截）/ `readonly`（无人值守安全档：禁 shell、禁网络、禁写，只放行项目内相对路径且避开常见敏感片段的进程内本地读工具与 compute-only 边界，fail-closed）/ `unrestricted`（不设限，仍被审计）。被拒动作不执行、留痕 `policy_deny`、并把拒绝理由作为「观察」回灌让模型改道。诚实边界：`guarded` 是灾难性命令**绊线**而非沙箱，`readonly` 是更保守的 fail-closed 策略，强隔离仍取决于 OS / 部署沙箱。含单测 + 端到端冒烟（`rm -rf /` 被拦、审计可证未执行）。
+  模型产出的动作在落到系统前必须穿过策略门（`src/policy.zig`），绝不直接执行未经验证的输出。`bash` 走命令串审查 `evaluate`，**内建工具按能力分类**走 `evaluateTool`（本地读、写、本地 compute、网络读写分别归类；畸形/未知 fail-closed）。三档模式：`guarded`（拦截 `rm -rf /`、fork bomb、`| sh`、`mkfs`、`shutdown` 等灾难性命令绊线，默认附加写路径收口与 internal HTTP 目标拦截）/ `readonly`（无人值守安全档：禁 shell、禁网络、禁写，只放行项目内相对路径且避开常见敏感片段的进程内本地读工具与 compute-only 边界，fail-closed）/ `unrestricted`（不设限，仍被审计；只能作为高风险本地操作者例外，不能被当成无人值守或舰队派发的常规档）。被拒动作不执行、留痕 `policy_deny`、并把拒绝理由作为「观察」回灌让模型改道。诚实边界：`guarded` 是灾难性命令**绊线**而非沙箱，`readonly` 是更保守的 fail-closed 策略，强隔离仍取决于 OS / 部署沙箱。含单测 + 端到端冒烟（`rm -rf /` 被拦、审计可证未执行）。
 
 - **🧱✅🚧 会话（Session）—— 短期记忆载体**
   一段有边界交互（REPL 对话 / `-e` 调用 / 被调度的 job）的消息流。承载在长寿命分配器上，使对话历史跨越认知回合的 per-turn arena 重置依然存活。内存记录（追加即复制副本）、JSONL 序列化与追加落盘（`state/sessions/<id>.jsonl`）均已实现并有测试（`src/session.zig`）。**跨会话的长期记忆不在此实现**——交由 Skill 机制（知识注入）或 `state/` 纯文本摘要 + 文件工具承载，避免引入向量库等重依赖而撞穿铁律。
@@ -120,7 +120,7 @@ Scoot 是一个运行在纯文本环境下的轻量级 AI Agent 守护进程（D
 
 - **方向二：双轨认知模式（Goal & Plan）。**
   服务于“适配不同任务复杂度”的体验目标。
-  - **目标模式（Goal Mode）**：给出宏大指令，允许 Agent 自主探索与纠错（ReACT 闭环）。
+  - **目标模式（Goal Mode）**：只适合有边界的本地任务，允许 Agent 在 ReACT 闭环内自主探索与纠错，但不允许无限扩大行动面。跨仓库 / 跨目录大改、批量删除、外部网络写入、无人值守执行、舰队 / edge 派发，或明显超过局部任务的目标，必须升级到可审查的计划边界，而不是继续裸跑 Goal Mode。
   - **计划模式（Plan Mode）**：Agent 先产出一份固定的执行 DAG（有向无环图），经用户确认或审计后，再严格按步骤执行——把“可审计、可干预”落到任务编排层。
 
 - **方向三：CLI 交互式的 Schedule 管理。**
