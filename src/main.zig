@@ -33,6 +33,7 @@ const usage =
     \\  schedule [list|run]  list / run scheduled jobs (unattended, forced readonly safety mode)
     \\  daemon [run|status|stop]
     \\                       run scheduled jobs as a foreground daemon, recording pid/state and supporting SIGTERM stop
+    \\                       `daemon status --json` prints a machine-readable status snapshot
     \\
     \\Options:
     \\  -e, --eval <prompt>  run one goal and exit
@@ -81,6 +82,7 @@ pub fn main(init: std.process.Init) !void {
     var cmd_serve = false;
     var cmd_schedule: ?[]const u8 = null; // null means not requested; otherwise list/run.
     var cmd_daemon: ?[]const u8 = null; // null means not requested; otherwise run/status/stop.
+    var daemon_status_json = false;
     var schedule_ticks: usize = 0; // 0 means run continuously.
     var i: usize = 1; // args[0] is program name.
     while (i < args.len) : (i += 1) {
@@ -118,6 +120,12 @@ pub fn main(init: std.process.Init) !void {
             scoot_home_override = args[i];
         } else if (eql(arg, "--trace")) {
             trace = true;
+        } else if (eql(arg, "--json")) {
+            if (cmd_daemon == null) {
+                try out.writeAll("error: --json currently only supports `daemon status --json`\n");
+                die(out, 2);
+            }
+            daemon_status_json = true;
         } else if (eql(arg, "--ticks")) {
             i += 1;
             if (i >= args.len) {
@@ -247,6 +255,10 @@ pub fn main(init: std.process.Init) !void {
     }
     if (eval_retries_set and eval_prompt == null) {
         try out.writeAll("error: --retries currently only supports -e/--eval one-shot mode\n");
+        die(out, 2);
+    }
+    if (daemon_status_json and !(cmd_daemon != null and eql(cmd_daemon.?, "status"))) {
+        try out.writeAll("error: --json currently only supports `daemon status --json`\n");
         die(out, 2);
     }
 
@@ -414,7 +426,7 @@ pub fn main(init: std.process.Init) !void {
             try runDaemon(out, arena, io, env, cfg, schedule_ticks);
             return;
         } else if (eql(action, "status")) {
-            try printDaemonStatus(out, arena, io, cfg);
+            try printDaemonStatus(out, arena, io, cfg, daemon_status_json);
             return;
         } else if (eql(action, "stop")) {
             try stopDaemon(out, arena, io, cfg);
@@ -2216,13 +2228,17 @@ fn printDaemonStatus(
     arena: std.mem.Allocator,
     io: std.Io,
     cfg: scoot.config.Config,
+    json: bool,
 ) !void {
-    const state = try scoot.daemon.readState(arena, io, cfg.dirs.state_dir);
-    const pid = try scoot.daemon.readPid(arena, io, cfg.dirs.state_dir);
-    const state_path = try scoot.daemon.statePath(arena, cfg.dirs.state_dir);
-    const pid_path = try scoot.daemon.pidPath(arena, cfg.dirs.state_dir);
+    var snapshot = try scoot.daemon.statusSnapshot(arena, io, cfg.dirs.state_dir);
+    const reconciled = try reconcileStaleDaemonStatus(arena, io, cfg, snapshot);
+    if (json) {
+        if (reconciled) snapshot = try scoot.daemon.statusSnapshot(arena, io, cfg.dirs.state_dir);
+        try scoot.daemon.writeStatusJson(out, snapshot);
+        return;
+    }
 
-    if (state) |s| {
+    if (snapshot.state) |s| {
         try out.print("daemon status={s} pid={d} jobs={d} poll_ms={d}\n", .{ s.status, s.pid, s.jobs, s.poll_ms });
         try out.print("started_at={d} updated_at={d}\n", .{ s.started_at_unix, s.updated_at_unix });
         if (s.stopped_at_unix) |t| try out.print("stopped_at={d}\n", .{t});
@@ -2230,34 +2246,34 @@ fn printDaemonStatus(
     } else {
         try out.writeAll("daemon status=unknown (no daemon state file yet)\n");
     }
-    if (pid) |p| {
-        try out.print("pid_file={s} pid={d}\n", .{ pid_path, p });
+    if (snapshot.pid_file) |p| {
+        try out.print("pid_file={s} pid={d}\n", .{ snapshot.pid_path, p });
     } else {
-        try out.print("pid_file={s} missing\n", .{pid_path});
+        try out.print("pid_file={s} missing\n", .{snapshot.pid_path});
     }
-    try out.print("state_file={s}\n", .{state_path});
+    try out.print("state_file={s}\n", .{snapshot.state_path});
 
-    // issue #53: real liveness probe, replacing the old "not_probed" placeholder.
-    // Prefer pid file value, then fall back to state pid.
-    const probe_pid: ?i64 = if (pid) |p| p else if (state) |s| s.pid else null;
-    if (probe_pid) |pp| {
-        const alive = scoot.daemon.pidAlive(pp);
-        try out.print("liveness={s} probed_pid={d}\n", .{ if (alive) "alive" else "dead", pp });
-        // If state still says running but the process is dead, reconcile by
-        // writing stopped state and clearing stale pid file to avoid persistent
-        // false running status.
-        if (!alive) {
-            if (state) |s| {
-                if (std.mem.eql(u8, s.status, "running")) {
-                    try writeDaemonStoppedAfterFailedStop(arena, io, cfg, pp, "stale_pid_reconciled");
-                    scoot.daemon.clearPid(arena, io, cfg.dirs.state_dir);
-                    try out.writeAll("[scoot] reconciled stale running state to stopped and removed pid file.\n");
-                }
-            }
-        }
+    if (snapshot.probed_pid) |pp| {
+        try out.print("liveness={s} probed_pid={d}\n", .{ @tagName(snapshot.liveness), pp });
+        if (reconciled) try out.writeAll("[scoot] reconciled stale running state to stopped and removed pid file.\n");
     } else {
         try out.writeAll("liveness=unknown (no pid to probe)\n");
     }
+}
+
+fn reconcileStaleDaemonStatus(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    cfg: scoot.config.Config,
+    snapshot: scoot.daemon.StatusSnapshot,
+) !bool {
+    if (snapshot.liveness != .dead) return false;
+    const pp = snapshot.probed_pid orelse return false;
+    const s = snapshot.state orelse return false;
+    if (!std.mem.eql(u8, s.status, "running")) return false;
+    try writeDaemonStoppedAfterFailedStop(arena, io, cfg, pp, "stale_pid_reconciled");
+    scoot.daemon.clearPid(arena, io, cfg.dirs.state_dir);
+    return true;
 }
 
 fn stopDaemon(

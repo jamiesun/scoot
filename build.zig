@@ -4,6 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const build_wasm_host = b.option(bool, "wasm-host", "Build the standalone scoot-wasm Wasm host (disabled by default)") orelse false;
+    const build_edge = b.option(bool, "edge", "Build the standalone scoot-edge fleet companion (disabled by default)") orelse false;
 
     // `scoot` library module: the stable public API for external embedders.
     const mod = b.addModule("scoot", .{
@@ -61,6 +62,21 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(wasm_host);
     }
 
+    if (build_edge) {
+        const edge = b.addExecutable(.{
+            .name = "scoot-edge",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/edge_main.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "build_options", .module = build_options_mod },
+                },
+            }),
+        });
+        b.installArtifact(edge);
+    }
+
     const wasm32_wasi = b.resolveTargetQuery(.{
         .cpu_arch = .wasm32,
         .os_tag = .wasi,
@@ -110,6 +126,17 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_wasm_host_tests = b.addRunArtifact(wasm_host_tests);
+    const edge_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/edge_main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "build_options", .module = build_options_mod },
+            },
+        }),
+    });
+    const run_edge_tests = b.addRunArtifact(edge_tests);
 
     const embed_example = b.addExecutable(.{
         .name = "scoot-embed-minimal",
@@ -147,6 +174,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_wasm_engine_tests.step);
     test_step.dependOn(&run_wasm_host_tests.step);
+    test_step.dependOn(&run_edge_tests.step);
     test_step.dependOn(&embed_example.step);
 }
 
