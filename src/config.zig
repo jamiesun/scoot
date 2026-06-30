@@ -231,6 +231,20 @@ pub const Schedule = struct {
     jobs: []const JobConfig = &.{},
 };
 
+/// Edge / unattended-job configuration. The local ceiling for any unattended
+/// one-shot (`scoot -e --unattended`) or future edge-dispatched job. This is a
+/// deliberately separate knob from `tools.policy` (the interactive default) so
+/// that raising the interactive policy never silently raises the unattended
+/// ceiling. It is enforced in-child against local config, so a command line or
+/// wire request can only ever LOWER policy below this ceiling, never raise it.
+pub const Edge = struct {
+    /// Ceiling for unattended jobs. Defaults to the fail-closed `readonly`; the
+    /// only meaningful raise is `unrestricted`, a high-risk fully-audited local
+    /// operator choice. `guarded` is accepted but corrected to `readonly` at
+    /// execution because a tripwire is meaningless without a human present.
+    max_job_policy: []const u8 = "readonly",
+};
+
 /// Serializable mirror of config.json: persisted configuration sections only,
 /// excluding runtime paths. Each section has defaults, so missing sections/fields
 /// naturally merge back to defaults.
@@ -242,6 +256,7 @@ const FileConfig = struct {
     mcp: Mcp = .{},
     audit: Audit = .{},
     schedule: Schedule = .{},
+    edge: Edge = .{},
 };
 
 /// Config file size cap: 1 MiB, far above typical config files.
@@ -488,6 +503,7 @@ pub const Config = struct {
     mcp: Mcp = .{},
     audit: Audit = .{},
     schedule: Schedule = .{},
+    edge: Edge = .{},
     /// Resolved runtime directories.
     dirs: paths.Paths,
     /// Actual loaded config path, with config.toml preferred over config.json.
@@ -549,6 +565,7 @@ pub const Config = struct {
             .mcp = fc.mcp,
             .audit = fc.audit,
             .schedule = fc.schedule,
+            .edge = fc.edge,
             .dirs = dirs,
             .active_config_file = active,
         };
@@ -609,6 +626,9 @@ pub const Config = struct {
         // Audit.
         try overrideEnvEnumString(env, "SCOOT_AUDIT_LEVEL", &self.audit.level, &.{ "debug", "info", "warn", "error" }, &warnings, arena);
         try overrideEnvBool(env, "SCOOT_AUDIT_TO_FILE", &self.audit.to_file, &warnings, arena);
+
+        // Edge: the unattended-job policy ceiling. Same accepted values as tools.policy.
+        try overrideEnvEnumString(env, "SCOOT_EDGE_MAX_JOB_POLICY", &self.edge.max_job_policy, &.{ "guarded", "readonly", "unrestricted", "yolo" }, &warnings, arena);
 
         if (report) |r| r.env_warnings = warnings.items;
     }
@@ -1136,6 +1156,19 @@ test "parseFileConfig: schedule section defaults to disabled" {
     try std.testing.expect(!fc.schedule.enabled);
     try std.testing.expectEqual(@as(u64, 1000), fc.schedule.poll_ms);
     try std.testing.expectEqual(@as(usize, 0), fc.schedule.jobs.len);
+}
+
+test "parseFileConfig: edge.max_job_policy defaults to readonly and parses overrides" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    // Missing [edge] -> fail-closed default ceiling.
+    const def = try parseFileConfig(arena.allocator(), "{}", null);
+    try std.testing.expectEqualStrings("readonly", def.edge.max_job_policy);
+    // Explicit raise is honored as the local ceiling.
+    const raised = try parseFileConfig(arena.allocator(),
+        \\{ "edge": { "max_job_policy": "unrestricted" } }
+    , null);
+    try std.testing.expectEqualStrings("unrestricted", raised.edge.max_job_policy);
 }
 
 test "parseFileConfig: schedule jobs parse" {

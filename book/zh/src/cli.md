@@ -13,6 +13,8 @@ scoot [options] [command]
 | --- | --- |
 | `-e, --eval <prompt>` | 运行单个目标至完成，打印答复，然后退出。 |
 | `--retries <N>` | `-e` 模式下针对瞬时后端错误的重试次数（默认 `2`，`0` 禁用）。 |
+| `--unattended` | `-e` 一次性运行表示**无人值守**：把策略钳制到 `edge.max_job_policy`（默认 `readonly`），并把 `guarded` 矫正为 `readonly`。 |
+| `--policy <mode>` | `-e` 一次性策略覆盖（`guarded`/`readonly`/`unrestricted`）；带 `--unattended` 时只能降到 `edge.max_job_policy` 天花板以下。 |
 | `--scoot-home <dir>` | 覆盖运行目录。优先于 `SCOOT_HOME`。 |
 | `--trace` | 把 ReACT 执行轨迹打印到 **stderr**（答复/对话仍在 stdout）。`-e` 与交互式 REPL 模式均可用。 |
 | `--ticks <N>` | 用于 `schedule run` / `daemon run`：运行 `N` 个轮询周期后退出（默认 `0` = 永久运行）。 |
@@ -59,6 +61,13 @@ scoot --trace -e "list the largest files under src/"
 stderr 上附加逐步轨迹，便于调试而不污染答复。轨迹会在每个阻塞步骤**之前**先打印实时进度
 标记——调用模型前打印 `thinking:`，执行工具前打印 `running: <工具>`——这样等待期间也能看到
 agent 当前在做什么，轨迹不会显得卡死。`--retries` 控制对瞬时后端失败（限流、5xx）的重试。
+
+对于**无人值守**（无人在场）的运行，请加上 `--unattended`。它会**在子进程内**把有效策略计算为 `correctUnattended(privilegeMin(requested, edge.max_job_policy))`：本地的 `[edge].max_job_policy` 天花板（默认 `readonly`）封顶，`guarded` 被矫正为 `readonly`，命令行永远只能把策略*降*下来，绝不能抬到天花板之上。可选的 `--policy <mode>` 覆盖请求的 mode——带 `--unattended` 时会被钳制到天花板，不带 `--unattended`（有人在场）时则作用于交互式 `tools.policy` 默认值且可以抬高。这正是可选的 `scoot-edge` fleet 伴生程序启动任务所经的钳制，因此一个有 bug 或受中心影响的 edge 无法越权。抬高无人值守天花板需要刻意设置本地 `edge.max_job_policy = unrestricted`。
+
+```sh
+scoot --unattended -e "总结所有未完成的 TODO"                   # 钳制到 readonly
+scoot --unattended --policy unrestricted -e "..."             # 除非 edge.max_job_policy=unrestricted，否则仍是 readonly
+```
 
 ### `serve` — stdio app-server
 

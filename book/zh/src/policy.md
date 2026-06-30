@@ -122,9 +122,14 @@ timeout_ms = 5000                          # 默认取 tools.timeout_ms
 - **`readonly` 才是 fail-closed 原语。** 它在构造上禁 shell、禁写、禁网络，是让无人值守执行站得住脚的依据。任何不可信目标、调度任务或守护进程都应优先选它。
 - **真正的隔离仍要靠操作系统。** 要强保证，请把 `readonly` 与 OS 级沙盒（容器、seccomp、网络命名空间、只读挂载）结合。Scoot 的策略是纵深防御，不是牢笼。
 
-## 调度任务会被矫正
+## 无人值守运行会被矫正
 
-无人值守任务在结构上强制安全：配置为 `guarded` 的任务在执行时会被**矫正为等效 `readonly`**。若你接受风险，必须在任务配置里显式写 `unrestricted`。见[调度与守护进程](scheduling.md)。
+无人值守任务在结构上强制安全：配置为 `guarded` 的任务在执行时会被**矫正为等效 `readonly`**。若你接受风险，必须显式写 `unrestricted`。这一矫正发生在两处，且共用同一个格（`policy.zig` 中的 `correctUnattended`/`privilegeMin`）：
+
+- **调度 / 守护进程任务**通过 `effectiveMode` 矫正逐任务的 `mode`。见[调度与守护进程](scheduling.md)。
+- **一次性 `scoot -e --unattended`** 会**在子进程内**把有效策略计算为 `correctUnattended(privilegeMin(requested, edge.max_job_policy))`。本地的 `[edge].max_job_policy` 天花板（默认 `readonly`）从 config 读取，因此命令行永远只能把策略*降*下来，绝不能抬到天花板之上 —— 可选的 `--policy <mode>` 会被钳制回去。这是可选的 `scoot-edge` fleet 伴生程序启动任务所经的拱心石原语，因此一个有 bug 或受中心影响的 edge 永远无法越权。不带 `--unattended` 时，有人值守的 `scoot -e` 仍使用交互式的 `tools.policy` 默认值，且 `--policy` 覆盖可以抬高它。
+
+特权序是显式格 `readonly ⊑ guarded ⊑ unrestricted`（从最小到最大权限）—— 刻意**不是** `Mode` 枚举的声明序，所以钳制绝不会意外反转而挑中更危险的 mode。
 
 ## 检视判定
 

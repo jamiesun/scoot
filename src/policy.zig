@@ -29,6 +29,47 @@ pub const Mode = enum {
     }
 };
 
+/// Privilege rank for the explicit lattice `readonly ⊑ guarded ⊑ unrestricted`
+/// (least → most authority). This is deliberately NOT the enum declaration order:
+/// `Mode` is declared `guarded, readonly, unrestricted`, so a numeric `@min` on
+/// the raw enum tags would treat guarded(0) < readonly(1) and silently invert the
+/// lattice — picking the MORE dangerous mode as the "minimum". Always rank
+/// through this function, never through @intFromEnum.
+pub fn privilegeRank(m: Mode) u2 {
+    return switch (m) {
+        .readonly => 0,
+        .guarded => 1,
+        .unrestricted => 2,
+    };
+}
+
+/// Lower-privilege (more restrictive) of two modes per the lattice above. This is
+/// the ceiling clamp: a requested mode can never exceed a local ceiling. Ties
+/// return `a` (they are equal modes, so the choice is irrelevant).
+pub fn privilegeMin(a: Mode, b: Mode) Mode {
+    return if (privilegeRank(a) <= privilegeRank(b)) a else b;
+}
+
+/// Unattended correction: `guarded` is only an interactive catastrophic-command
+/// tripwire and is meaningless without a human in the loop, so it collapses to
+/// the fail-closed `readonly`. `readonly` and `unrestricted` pass through.
+pub fn correctUnattended(m: Mode) Mode {
+    return switch (m) {
+        .guarded => .readonly,
+        else => m,
+    };
+}
+
+/// Effective policy for an unattended one-shot or edge-dispatched job: clamp the
+/// requested mode down to the local ceiling (argv/wire can only ever LOWER, never
+/// raise authority), then apply the unattended correction. Because
+/// `privilegeMin(requested, ceiling) ⊑ ceiling` always holds and
+/// `correctUnattended` only lowers further, the result is `⊑ correctUnattended(ceiling)`
+/// regardless of what `requested` is — the clamp is airtight against a hostile argv.
+pub fn clampUnattended(requested: Mode, ceiling: Mode) Mode {
+    return correctUnattended(privilegeMin(requested, ceiling));
+}
+
 /// Result of one check. `deny` carries a model-feedback reason.
 pub const Decision = union(enum) {
     allow,
@@ -730,6 +771,48 @@ test "evaluateHttpUrl:alternate-encoded SSRF bypass is denied(issue #51)" {
     // Public domains still pass to avoid false positives.
     try testing.expectEqual(Decision.allow, evaluateHttpUrl("https://api.github.com/", .guarded, true));
     try testing.expectEqual(Decision.allow, evaluateHttpUrl("https://1e100.net/", .guarded, true));
+}
+
+test "privilegeRank: lattice order is readonly < guarded < unrestricted, not enum order" {
+    // The enum is declared guarded, readonly, unrestricted, so @intFromEnum would
+    // give guarded(0) < readonly(1). The lattice rank must invert that for guarded.
+    try testing.expect(privilegeRank(.readonly) < privilegeRank(.guarded));
+    try testing.expect(privilegeRank(.guarded) < privilegeRank(.unrestricted));
+}
+
+test "privilegeMin: picks the more restrictive mode (no @min inversion trap)" {
+    // The dangerous case: a numeric @min on enum tags would return guarded here
+    // because guarded's tag (0) is below readonly's (1). privilegeMin must return
+    // readonly — the lower privilege.
+    try testing.expectEqual(Mode.readonly, privilegeMin(.guarded, .readonly));
+    try testing.expectEqual(Mode.readonly, privilegeMin(.readonly, .guarded));
+    try testing.expectEqual(Mode.guarded, privilegeMin(.guarded, .unrestricted));
+    try testing.expectEqual(Mode.readonly, privilegeMin(.unrestricted, .readonly));
+    // Identity / ties.
+    try testing.expectEqual(Mode.unrestricted, privilegeMin(.unrestricted, .unrestricted));
+    try testing.expectEqual(Mode.readonly, privilegeMin(.readonly, .readonly));
+}
+
+test "correctUnattended: guarded collapses to readonly, others pass through" {
+    try testing.expectEqual(Mode.readonly, correctUnattended(.guarded));
+    try testing.expectEqual(Mode.readonly, correctUnattended(.readonly));
+    try testing.expectEqual(Mode.unrestricted, correctUnattended(.unrestricted));
+}
+
+test "clampUnattended: argv can only lower, never raise above the local ceiling" {
+    // Default ceiling readonly: every request clamps to readonly regardless of argv.
+    inline for (.{ Mode.readonly, Mode.guarded, Mode.unrestricted }) |req| {
+        try testing.expectEqual(Mode.readonly, clampUnattended(req, .readonly));
+    }
+    // Ceiling guarded: corrected to readonly even if argv requests unrestricted.
+    try testing.expectEqual(Mode.readonly, clampUnattended(.unrestricted, .guarded));
+    try testing.expectEqual(Mode.readonly, clampUnattended(.guarded, .guarded));
+    // Ceiling unrestricted: this is the only way to actually reach unrestricted,
+    // and only when argv also asks for it (or defaults to the ceiling).
+    try testing.expectEqual(Mode.unrestricted, clampUnattended(.unrestricted, .unrestricted));
+    // A lower argv request still wins under a high ceiling (lowering is always allowed).
+    try testing.expectEqual(Mode.readonly, clampUnattended(.readonly, .unrestricted));
+    try testing.expectEqual(Mode.readonly, clampUnattended(.guarded, .unrestricted));
 }
 
 test {

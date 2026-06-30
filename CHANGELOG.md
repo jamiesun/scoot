@@ -18,6 +18,16 @@ heading when cutting a release.
 
 ### Added
 
+- **Unattended one-shot policy clamp** (`scoot -e --unattended`): the E2 keystone
+  prerequisite for `scoot-edge` job dispatch. An unattended `-e` run now computes
+  its effective policy **in-child** as
+  `correctUnattended(privilegeMin(requested, edge.max_job_policy))`, so argv (and a
+  future wire) can only ever *lower* policy below the local ceiling, never raise it.
+  A new local-only `[edge].max_job_policy` config knob (default `readonly`, override
+  `SCOOT_EDGE_MAX_JOB_POLICY`) is the ceiling; an optional `--policy <mode>` may
+  only lower it. The `correctUnattended`/`privilegeMin` lattice
+  (`readonly ⊑ guarded ⊑ unrestricted`, deliberately **not** the `Mode` enum order)
+  is now the single source of truth shared with the scheduler's `effectiveMode`.
 - `scoot-edge` (E1) gains a continuous **`run` heartbeat loop**: it dials out and
   POSTs a status heartbeat on a `--interval-ms` cadence until stopped, with a
   bounded jittered exponential backoff on transient failure (the loop never

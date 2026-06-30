@@ -162,7 +162,7 @@ Authorization: Bearer <token>
 | 全程 provenance | 每个派发任务记入 edge 侧 `logs/edge-audit.jsonl`（谁派的、`idem_key`、`effective_policy`、关联 `session_id`），并经 `session_id` 与 Scoot 自身 run audit join。 | 完整 provenance 审计 |
 | 受限工作目录 | edge 把子进程的 cwd 钉死到 `edge.job_root`（一个专用、默认为空的目录），绝不用主机根或 `$HOME`。由于 `readonly` 的读取约束是**相对 cwd 的**（`evaluateReadPath`），正是这一点让 `readonly` 意味着*这个目录*而非*整个文件系统*。 | 本地 config/策略即天花板 |
 
-**钳制是一个真实且缺失的原语——E2 没它绝不能上线。** 今天 `scoot -e` 以*本地 config* 策略（`cfg.tools.policy`）运行，且与调度任务不同，它**得不到**无人值守的 `guarded → readonly` 纠正（那条纠正在 `schedule.zig` 的 `effectiveMode` 里，而一次性路径从不调用它）。所以在本地默认是 `guarded` 的主机上，一条天真的 `scoot -e "<goal>"` 会以放行 shell、写、网络的方式运行——而不是 `readonly`。edge 必须通过一个无人值守一次性钳制（见下方核心前置）来启动任务，由它**在子进程内对本地 config 强制天花板**，从而 argv 永远只能*降*策略。一个有 bug 或受中心影响的 edge 在命令行上传入更高策略时，必须被子进程忽略。
+**钳制现在已是真实原语——`scoot -e --unattended`。** 此前 `scoot -e` 以*本地 config* 策略（`cfg.tools.policy`）运行，且与调度任务不同，它**得不到**无人值守的 `guarded → readonly` 纠正（那条纠正在 `schedule.zig` 的 `effectiveMode` 里，而裸的一次性路径从不调用它）。所以在本地默认是 `guarded` 的主机上，一条天真的 `scoot -e "<goal>"` 会以放行 shell、写、网络的方式运行——而不是 `readonly`。这个缺口现已补上：带上 `--unattended` 后，子进程会**在子进程内对本地 config** 计算 `effective = correctUnattended(privilegeMin(requested, edge.max_job_policy))`，从而 argv 永远只能*降*策略。一个有 bug 或受中心影响的 edge 在命令行上传入 `--policy unrestricted` 时，会被钳制回本地天花板并忽略。edge 通过该钳制（`scoot -e --unattended`）启动 E2 任务；`policy.zig` 中共享的 `correctUnattended` 格是调度器与一次性路径的唯一真相来源。
 
 任务生命周期经同一条 append-only 遥测通道回报：
 
@@ -183,7 +183,7 @@ Authorization: Bearer <token>
 
 **已签字的默认值：**
 
-- **Edge 派发任务默认 `readonly`，由钳制强制——不是自动继承的。** 调度器的 `guarded → readonly` 纠正在 `schedule.zig` 里，并**不**作用于一条裸的 `scoot -e`。在核心里那个子进程内的无人值守钳制落地之前，readonly 默认是无支撑的，E2 保持阻塞。
+- **Edge 派发任务默认 `readonly`，由钳制强制——不是自动继承的。** 调度器的 `guarded → readonly` 纠正在 `schedule.zig` 里，并**不**作用于一条裸的 `scoot -e`。子进程内的无人值守钳制现已作为 `scoot -e --unattended` 在核心落地（读取本地 `edge.max_job_policy` 天花板，默认 `readonly`），因此 readonly 默认现已有支撑；E2 任务派发经它接线。
 - **抬高天花板必须本地显式 opt-in，而且唯一有意义的抬高就是那一大跳。** 对*无人值守*任务，`guarded` 会塌缩成 `readonly`，所以 `edge.max_job_policy = guarded` 相对 `readonly` 什么都没多给。真正能给 edge 任务写或网络能力的唯一设置是 `edge.max_job_policy = unrestricted`——一次刻意的、全程审计的、需本地签字的跳变，中间没有安全档。中心永远无法越过本地天花板，也没有任何 wire 字段能抬高策略。
 
 ## 可靠性原语
@@ -201,7 +201,7 @@ edge **只经公共发射接口与只读日志**驱动 Scoot。它不得 import 
 | --- | --- |
 | `status` | `daemon status`（以及未来的 `--json` 形态）、config 读、skill 发现（仅名称 / 描述） |
 | `audit_batch` | 只读 `logs/*.jsonl` |
-| `job kind=run` | 子进程 `scoot -e "<goal>"`，**通过无人值守一次性钳制**启动（天花板在子进程内对本地 config 强制），并把 cwd 钉死到 `edge.job_root` |
+| `job kind=run` | 子进程 `scoot --unattended -e "<goal>"`，**通过无人值守一次性钳制**启动（天花板在子进程内对本地 `edge.max_job_policy` 强制），并把 cwd 钉死到 `edge.job_root` |
 | job 结果 | 子进程 exit code + stdout + 生成的 session / audit |
 
 ### 核心前置与改进
@@ -209,7 +209,7 @@ edge **只经公共发射接口与只读日志**驱动 Scoot。它不得 import 
 其中三项是**阻塞性前置**，不是可选的打磨：没有它们，edge 无法兑现自己的安全与投递承诺。它们仍作为独立、本身有用的核心改动来实现，但 E1/E2 受其门控。
 
 1. **（E1 前置）** 机读 status：`daemon status --json` / `doctor --json`。`status` 心跳不得依赖解析人读文本。
-2. **（E2 前置——拱心石）** 无人值守一次性策略钳制，使 edge 启动的 `scoot -e` 可证明处于或低于 `readonly` 天花板，且在子进程内对本地 config 强制。没有它，整个 readonly 默认授权模型都是无支撑的。**E2 在它之前绝不能上线。**
+2. **（E2 前置——拱心石）✅ 已完成。** 无人值守一次性策略钳制，使 edge 启动的 `scoot -e` 可证明处于或低于 `readonly` 天花板，且在子进程内对本地 config 强制。已作为 `scoot -e --unattended`（外加一个只能*降*的可选 `--policy <mode>`）落地，读取本地 `edge.max_job_policy` 天花板（默认 `readonly`）。`policy.zig` 中共享的 `correctUnattended`/`privilegeMin` 格是调度器与一次性路径的唯一真相来源。这解除了 E2 任务派发的阻塞。
 3. **（E1 前置）** 对 shipping 感知、轮转稳定的 audit：单调轮转代数 + 字节偏移，并把已轮转段保留到 ack 之后（有界，超界时发出显式 `audit_gap` 标记）。当前单备份的破坏性轮转无法承载 at-least-once 承诺。在它落地前，audit 搬运保持关闭。
 4. **（契约）** 把 `serve` NDJSON 方法集作为稳定契约固化；`scoot-edge` 复用它的帧格式，而非它的通道。
 
@@ -228,5 +228,5 @@ edge **只经公共发射接口与只读日志**驱动 Scoot。它不得 import 
 
 - **E0：** 本边界文档（双语）+ ROADMAP 修订 + 授权模型签字。**已在写代码前完成。**
 - **E1：** `scoot-edge` 骨架（独立构建目标，默认关闭）+ 经 HTTPS 的 `status` 心跳。已实现为 `zig build -Dedge=true`：`scoot-edge status` 通过 `scoot daemon status --json` 采集状态并打印一条 NDJSON status envelope；`scoot-edge post-once` 使用环境变量中的 bearer token，把该 envelope 发到调用者提供的 HTTPS endpoint；`scoot-edge run` 则按 `--interval-ms` 周期重复该 POST 直到被停止，遇到瞬时失败时采用有界的抖动指数退避，并提供可选的 `--max-posts` 上限用于受监管 / 有界运行（`--allow-insecure-http` 仅用于本地 / dev loopback HTTP center 测试）。`run` 在收到 SIGINT/SIGTERM 时会先把进行中的心跳跑完，再干净退出（退出码 `0`），因此 systemd/launchd 停止是优雅停机而非硬杀；一次性命令使用稳定的退出码（`0` 成功，`1` 拨出 POST 失败，`2` 配置 / 用法错误，`3` 本地状态采集失败）。audit 日志搬运在 **E1 内部延后**，直到前置 #3（对 shipping 感知的轮转）落地；在此之前 E1 只搬运计数、不搬正文，且 `edge.ship_audit` 默认关闭。显式 opt-in 的 `node` 能力描述符（`--report-capabilities`，默认关闭；由 `--label` / `--skill` 及 `SCOOT_EDGE_LABELS` / `SCOOT_EDGE_SKILLS` 环境变量填充）可搭车心跳上报，供日后能力感知路由使用——仅作建议，绝不构成授权。
-- **E2：** 在显式 config + 策略天花板 + provenance 审计之后，做 schema 化、幂等的任务派发。**硬门控于前置 #2**（子进程内的无人值守策略钳制）与 cwd confinement（`edge.job_root`）。edge 任务默认 `readonly`；唯一的抬高是本地 `edge.max_job_policy = unrestricted`。能力感知路由消费 E1 的 `node` 描述符；节点无法满足的任务以 `no_matching_capability` 被拒。
+- **E2：** 在显式 config + 策略天花板 + provenance 审计之后，做 schema 化、幂等的任务派发。**前置 #2（子进程内的无人值守策略钳制）已完成**——`scoot -e --unattended`——因此 E2 现在仅门控于 cwd confinement（`edge.job_root`）。edge 任务默认 `readonly`；唯一的抬高是本地 `edge.max_job_policy = unrestricted`。能力感知路由消费 E1 的 `node` 描述符；节点无法满足的任务以 `no_matching_capability` 被拒。
 - **E3：** 打包（install 脚本 opt-in、Homebrew、apt）与重连 / 反压加固。

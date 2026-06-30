@@ -66,6 +66,23 @@ debugging without polluting the answer. The trace emits a live progress marker
 doing while it waits, instead of the trace appearing to freeze. `--retries`
 controls retry of transient backend failures (rate limits, 5xx).
 
+For runs with **no human present** add `--unattended`. It computes the effective
+policy in-child as `correctUnattended(privilegeMin(requested, edge.max_job_policy))`:
+the local `[edge].max_job_policy` ceiling (default `readonly`) caps it, `guarded`
+is corrected to `readonly`, and the command line can only ever *lower* policy,
+never raise it above the ceiling. An optional `--policy <mode>` overrides the
+requested mode — with `--unattended` it is clamped down to the ceiling; without
+`--unattended` (a human is present) it acts on the interactive `tools.policy`
+default and may raise. This is the clamp the optional `scoot-edge` fleet companion
+launches jobs through, so a buggy or center-influenced edge cannot escalate
+authority. Raising the unattended ceiling requires a deliberate local
+`edge.max_job_policy = unrestricted`.
+
+```sh
+scoot --unattended -e "summarize the open TODOs"               # clamped to readonly
+scoot --unattended --policy unrestricted -e "..."              # still readonly unless edge.max_job_policy=unrestricted
+```
+
 ### `serve` — stdio app-server
 
 ```sh

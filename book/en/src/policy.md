@@ -189,12 +189,28 @@ Read this before relying on Scoot in a hostile setting:
   `readonly` with OS-level sandboxing (containers, seccomp, network namespaces,
   read-only mounts). Scoot's policy is defense-in-depth, not a jail.
 
-## Scheduled Jobs Are Coerced
+## Unattended Runs Are Coerced
 
 Unattended jobs enforce safety structurally: a job configured as `guarded` is
 **coerced to effective `readonly`** at execution time. `unrestricted` must be
-set explicitly in the job config if you accept the risk. See
-[Scheduling & Daemon](scheduling.md).
+set explicitly if you accept the risk. This applies in two places, both sharing
+one lattice (`correctUnattended`/`privilegeMin` in `policy.zig`):
+
+- **Scheduled / daemon jobs** coerce per-job `mode` via `effectiveMode`. See
+  [Scheduling & Daemon](scheduling.md).
+- **One-shot `scoot -e --unattended`** computes its effective policy in-child as
+  `correctUnattended(privilegeMin(requested, edge.max_job_policy))`. The local
+  `[edge].max_job_policy` ceiling (default `readonly`) is read from config, so the
+  command line can only ever *lower* policy, never raise it above the ceiling — an
+  optional `--policy <mode>` is clamped down. This is the keystone primitive the
+  optional `scoot-edge` fleet companion launches jobs through, so a buggy or
+  center-influenced edge can never escalate authority. Without `--unattended`, a
+  human-present `scoot -e` keeps the interactive `tools.policy` default and a
+  `--policy` override may raise it.
+
+The privilege order is the explicit lattice `readonly ⊑ guarded ⊑ unrestricted`
+(least → most authority) — deliberately **not** the `Mode` enum declaration order,
+so the clamp never accidentally inverts and picks the more dangerous mode.
 
 ## Inspecting Decisions
 
