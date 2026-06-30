@@ -22,6 +22,7 @@ const tools = @import("tools/tools.zig");
 const audit = @import("audit.zig");
 const policy = @import("policy.zig");
 const policy_hook = @import("policy_hook.zig");
+const audit_hook = @import("audit_hook.zig");
 const pathsafe = @import("paths.zig");
 const jsonio = @import("jsonio.zig");
 const obs = @import("obs.zig");
@@ -316,6 +317,13 @@ pub const Agent = struct {
     /// never relax a built-in deny, and any hook failure fails closed to deny.
     policy_hook_config: ?policy_hook.HookConfig = null,
 
+    /// Optional PostToolUse-style audit/observability sink (issue #137).
+    /// Default-off: when set, a structured event is delivered after each tool
+    /// action completes (executed or policy-denied). Purely observational — it
+    /// never gates execution — and best-effort: delivery failures are counted on
+    /// the sink and surfaced at flush, never aborting the run.
+    audit_hook: ?*audit_hook.Sink = null,
+
     /// Constructs an Agent backed by a real LLM client.
     pub fn initClient(client: *llm.Client) Agent {
         return .{ .io = client.io, .complete_ctx = client, .complete_fn = clientComplete };
@@ -451,6 +459,7 @@ pub const Agent = struct {
                                 .{ @tagName(self.policy_mode), reason },
                             );
                             if (self.audit) |lg| lg.log(.policy_deny, denied) catch {};
+                            self.postAudit(arena, sess.id, .policy_deny, step.action, step.action_input, denied);
                             try sess.append(backing, .user, denied);
                         },
                         .allow => {
@@ -465,6 +474,7 @@ pub const Agent = struct {
                             if (try read_cache.dedup(arena, turn + 1, step.action, step.action_input, observation)) |deduped|
                                 observation = deduped;
                             if (self.audit) |lg| lg.log(.observation, observation) catch {};
+                            self.postAudit(arena, sess.id, .observation, step.action, step.action_input, observation);
                             self.traceObservation(turn + 1, step.action, observation);
                             try sess.append(backing, .user, try wrapUntrustedToolOutput(arena, step.action, observation));
                         },
@@ -909,6 +919,29 @@ pub const Agent = struct {
     /// no sink is attached, so event emission never depends on `trace`.
     inline fn emitEvent(self: *Agent, ev: Event) void {
         if (self.events) |s| s.emit(ev);
+    }
+
+    /// Delivers a completed-tool event to the optional PostToolUse audit sink
+    /// (issue #137). No-op when unconfigured; delivery is best-effort and any
+    /// failure is recorded on the sink, never propagated into the run.
+    fn postAudit(
+        self: *Agent,
+        arena: std.mem.Allocator,
+        session_id: []const u8,
+        kind: audit.EventKind,
+        action: Action,
+        input: []const u8,
+        observation: []const u8,
+    ) void {
+        const sink = self.audit_hook orelse return;
+        sink.post(arena, .{
+            .kind = kind,
+            .session_id = session_id,
+            .action = @tagName(action),
+            .input = input,
+            .observation = observation,
+            .mode = @tagName(self.policy_mode),
+        });
     }
 
     /// "Thinking" progress marker printed and flushed before backend inference,
@@ -2067,6 +2100,134 @@ fn writePolicyHookPackage(io: std.Io, root: []const u8, host_script: []const u8)
     try cwd.writeFile(io, .{ .sub_path = try std.fs.path.join(arena, &.{ root, "schema", "input.json" }), .data = "{\"type\":\"object\"}\n" });
     try cwd.writeFile(io, .{ .sub_path = try std.fs.path.join(arena, &.{ root, "schema", "output.json" }), .data = "{\"type\":\"object\"}\n" });
     try cwd.writeFile(io, .{ .sub_path = try std.fs.path.join(arena, &.{ root, "host.sh" }), .data = host_script });
+}
+
+fn writeAuditHookPackage(io: std.Io, root: []const u8, host_script: []const u8) !void {
+    const cwd = std.Io.Dir.cwd();
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const schema_dir = try std.fs.path.join(arena, &.{ root, "schema" });
+    try cwd.createDirPath(io, schema_dir);
+    try cwd.writeFile(io, .{
+        .sub_path = try std.fs.path.join(arena, &.{ root, "manifest.toml" }),
+        .data =
+        \\kind = "audit"
+        \\name = "test-audit-hook"
+        \\description = "Test audit hook."
+        \\entry = "_start"
+        \\component = "component.wasm"
+        \\input_schema = "schema/input.json"
+        \\output_schema = "schema/output.json"
+        \\capabilities = ["compute"]
+        \\
+        ,
+    });
+    try cwd.writeFile(io, .{
+        .sub_path = try std.fs.path.join(arena, &.{ root, "policy.toml" }),
+        .data = "capabilities = [\"compute\"]\n",
+    });
+    try cwd.writeFile(io, .{ .sub_path = try std.fs.path.join(arena, &.{ root, "component.wasm" }), .data = "\x00asm\x01\x00\x00\x00" });
+    try cwd.writeFile(io, .{ .sub_path = try std.fs.path.join(arena, &.{ root, "schema", "input.json" }), .data = "{\"type\":\"object\"}\n" });
+    try cwd.writeFile(io, .{ .sub_path = try std.fs.path.join(arena, &.{ root, "schema", "output.json" }), .data = "{\"type\":\"object\"}\n" });
+    try cwd.writeFile(io, .{ .sub_path = try std.fs.path.join(arena, &.{ root, "host.sh" }), .data = host_script });
+}
+
+test "run: audit hook receives a structured event on tool completion (issue #137)" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const pid = std.posix.system.getpid();
+
+    const root = try std.fmt.allocPrint(arena, ".zig-cache/scoot_audit_hook_ok_{d}", .{pid});
+    cwd.deleteTree(io, root) catch {};
+    defer cwd.deleteTree(io, root) catch {};
+    // The host captures the event JSON it receives on stdin so we can assert the
+    // schema actually reached the hook, then exits 0 (delivered).
+    const capture = try std.fmt.allocPrint(arena, "{s}/captured.jsonl", .{root});
+    const script = try std.fmt.allocPrint(arena, "cat > {s}\n", .{capture});
+    try writeAuditHookPackage(io, root, script);
+
+    var brain = ScriptedBrain{ .steps = &.{
+        "{\"thought\":\"run\",\"action\":\"bash\",\"action_input\":\"printf OK\"}",
+        "{\"thought\":\"done\",\"action\":\"final\",\"action_input\":\"ok\"}",
+    } };
+    var ag = testAgent(&brain, 16);
+    var sink: audit_hook.Sink = .{
+        .cfg = .{
+            .package = root,
+            .host = &.{ "/bin/sh", try std.fs.path.join(arena, &.{ root, "host.sh" }) },
+            .timeout_ms = 5_000,
+        },
+        .io = io,
+    };
+    ag.audit_hook = &sink;
+
+    var sess = session.Session.init("audit-h");
+    defer sess.deinit(gpa);
+    try sess.append(gpa, .user, "go");
+    const reply = try ag.run(gpa, &sess);
+    defer gpa.free(reply);
+    try std.testing.expectEqualStrings("ok", reply);
+
+    try std.testing.expect(sink.delivered >= 1);
+    try std.testing.expectEqual(@as(u64, 0), sink.failed);
+
+    const got = try cwd.readFileAlloc(io, capture, arena, .limited(64 * 1024));
+    try std.testing.expect(std.mem.indexOf(u8, got, "\"kind\":\"observation\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "\"action\":\"bash\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "\"mode\":\"guarded\"") != null);
+    // The event payload must be valid JSON (escaping intact).
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, std.mem.trim(u8, got, " \t\r\n"), .{});
+    parsed.deinit();
+}
+
+test "run: a failing audit hook is non-fatal and surfaced on the sink (issue #137)" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const pid = std.posix.system.getpid();
+
+    const root = try std.fmt.allocPrint(arena, ".zig-cache/scoot_audit_hook_fail_{d}", .{pid});
+    cwd.deleteTree(io, root) catch {};
+    defer cwd.deleteTree(io, root) catch {};
+    // Host drains stdin then exits non-zero: delivery fails, but the run must
+    // complete normally (best-effort, non-fatal).
+    try writeAuditHookPackage(io, root, "cat >/dev/null\nexit 1\n");
+
+    var brain = ScriptedBrain{ .steps = &.{
+        "{\"thought\":\"run\",\"action\":\"bash\",\"action_input\":\"printf OK\"}",
+        "{\"thought\":\"done\",\"action\":\"final\",\"action_input\":\"ok\"}",
+    } };
+    var ag = testAgent(&brain, 16);
+    var sink: audit_hook.Sink = .{
+        .cfg = .{
+            .package = root,
+            .host = &.{ "/bin/sh", try std.fs.path.join(arena, &.{ root, "host.sh" }) },
+            .timeout_ms = 5_000,
+        },
+        .io = io,
+    };
+    ag.audit_hook = &sink;
+
+    var sess = session.Session.init("audit-h-fail");
+    defer sess.deinit(gpa);
+    try sess.append(gpa, .user, "go");
+    const reply = try ag.run(gpa, &sess);
+    defer gpa.free(reply);
+
+    // The run still succeeds even though every delivery failed.
+    try std.testing.expectEqualStrings("ok", reply);
+    try std.testing.expect(sink.failed >= 1);
+    try std.testing.expectEqual(@as(u64, 0), sink.delivered);
+    try std.testing.expect(sink.hadFailures());
+    try std.testing.expect(sink.lastErrorReason().len != 0);
 }
 
 test "run: wasm_tool executes configured host without bash action" {

@@ -12,6 +12,7 @@ const mcp_tool = @import("tools/mcp.zig");
 const wasm_runner = @import("tools/wasm.zig");
 const compressor = @import("compressor.zig");
 const policy_hook_mod = @import("policy_hook.zig");
+const audit_hook_mod = @import("audit_hook.zig");
 
 pub const default_context_budget_bytes: usize = 80_000;
 
@@ -149,6 +150,24 @@ pub const Audit = struct {
     level: []const u8 = "info",
     /// Whether to write audit logs under ~/.scoot/logs.
     to_file: bool = true,
+    /// Optional PostToolUse-style audit/observability hook (issue #137).
+    /// Default-off: when `hook.package` is set, a structured event is delivered
+    /// to the hook after each tool action completes (executed or policy-denied),
+    /// for an external SIEM / analytics / org audit engine. The hook is purely
+    /// observational (no allow/deny) and best-effort: failures/timeouts never
+    /// abort the run, only surfaced at flush. The hook package is a local Wasm
+    /// tool package with manifest kind "audit" and compute-only capability.
+    hook: ?AuditHook = null,
+
+    /// Static `[audit.hook]` sub-table. `host` and the limits fall back to the
+    /// resolved wasm host / `tools.timeout_ms` when omitted.
+    pub const AuditHook = struct {
+        package: []const u8 = "",
+        host: []const []const u8 = &.{},
+        timeout_ms: ?u64 = null,
+        stdout_limit: ?usize = null,
+        stderr_limit: ?usize = null,
+    };
 };
 
 /// Config mirror for one scheduled job. The trigger is represented by three
@@ -660,6 +679,23 @@ pub const Config = struct {
     /// and the timeout defaults to `tools.timeout_ms`, mirroring wasm_tool.
     pub fn resolvePolicyHook(self: Config, arena: std.mem.Allocator, io: std.Io) !?policy_hook_mod.HookConfig {
         const hook = self.tools.policy_hook orelse return null;
+        if (hook.package.len == 0) return null;
+        const host = if (hook.host.len != 0) hook.host else try self.resolveWasmHost(arena, io);
+        return .{
+            .package = hook.package,
+            .host = host,
+            .timeout_ms = hook.timeout_ms orelse self.tools.timeout_ms,
+            .stdout_limit = hook.stdout_limit orelse (1 << 20),
+            .stderr_limit = hook.stderr_limit orelse (256 * 1024),
+        };
+    }
+
+    /// Resolve the optional audit/observability hook (issue #137). Returns null
+    /// when no hook package is configured. The host argv defaults to the resolved
+    /// wasm host and the timeout defaults to `tools.timeout_ms`, mirroring the
+    /// policy hook.
+    pub fn resolveAuditHook(self: Config, arena: std.mem.Allocator, io: std.Io) !?audit_hook_mod.HookConfig {
+        const hook = self.audit.hook orelse return null;
         if (hook.package.len == 0) return null;
         const host = if (hook.host.len != 0) hook.host else try self.resolveWasmHost(arena, io);
         return .{

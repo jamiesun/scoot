@@ -369,6 +369,37 @@ level = "info"
 to_file = true
 ```
 
+### `[audit.hook]`（可选）
+
+可选的 PostToolUse 式可观测性钩子。当一个工具 action 完成后 —— 无论是被放行并执行，
+还是被策略闸门拒绝 —— 它都会收到一条结构化 JSON 事件，可转发给外部 SIEM、分析管线或
+组织审计引擎。与[策略钩子](#toolspolicy_hook可选)一样，它把事件送入同样经过 realpath
+校验的 Wasm 数据转换边界（manifest kind 为 `audit`，仅 `compute` 能力），而非裸 shell 调用。
+它是纯**观测性**的：永不参与放行/拒绝判定，没有 allow/deny 返回；投递是**尽力而为**的 ——
+任何失败（包缺失/非法、kind 错误、非 compute 能力、spawn 失败、超时、输出过大、非零退出）
+都会被计数并在 flush 时作为警告呈现，绝不影响本次运行。仅当设置了 `package` 时启用。
+
+| 键 | 类型 | 默认值 | 含义 |
+| --- | --- | --- | --- |
+| `package` | string | _(空)_ | 本地 Wasm 工具包（manifest kind 为 `audit`，仅 `compute`）。为空表示不启用钩子。 |
+| `host` | string array | 解析后的 `wasm_host` | argv 模板。占位符：`{package}`、`{entry}`、`{component}`。 |
+| `timeout_ms` | u64 | `tools.timeout_ms` | 钩子单次调用的硬超时。 |
+
+事件是写入钩子 stdin 的每行一个 JSON 对象：
+
+```json
+{"version":1,"kind":"observation","session_id":"cli-...","action":"bash","input":"<工具输入>","observation":"<工具结果>","mode":"guarded"}
+```
+
+`kind` 为 `observation` 表示已执行的工具，`policy_deny` 表示被拦截的工具。
+
+```toml
+[audit.hook]
+package = "/opt/scoot/audit/org-sink"
+host = ["scoot-wasm", "wasi", "{component}"]
+timeout_ms = 5000
+```
+
 ---
 
 ## `[schedule]`

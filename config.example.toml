@@ -203,6 +203,24 @@ level = "info"
 # Write audit logs under ~/.scoot/logs.
 to_file = true
 
+# Optional PostToolUse-style audit/observability hook (issue #137). Default-off:
+# when `package` is set, a structured event is delivered to the hook AFTER each
+# tool action completes (executed) or is denied by the policy gate, for an
+# external SIEM / analytics / org audit engine. The hook is purely OBSERVATIONAL
+# (no allow/deny — gating belongs to [tools.policy_hook]) and BEST-EFFORT: any
+# failure (missing/invalid package, wrong kind, non-compute capability, timeout,
+# non-zero exit, oversized output) is non-fatal and only surfaced as a warning at
+# flush. The hook is a local Wasm tool package (manifest kind = "audit",
+# compute-only capability). It receives one JSON object on stdin and stdout is
+# ignored: {"version":1,"kind":"observation","session_id":"...","action":"bash",
+# "input":"...","observation":"...","mode":"guarded"} where `kind` is
+# "observation" (executed) or "policy_deny" (gated). Defaults: host -> resolved
+# wasm_host, timeout_ms -> tools.timeout_ms.
+# [audit.hook]
+# package = "/opt/scoot/audit/siem-forwarder"
+# host = ["scoot-wasm", "wasi", "{component}"]
+# timeout_ms = 5000
+
 [schedule]
 # Enable unattended scheduled agent runs. Keep false unless explicitly needed.
 enabled = false

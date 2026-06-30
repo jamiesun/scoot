@@ -2479,6 +2479,13 @@ fn setupRun(
     ag.wasm_host = try cfg.resolveWasmHost(arena, io);
     ag.policy_hook_config = try cfg.resolvePolicyHook(arena, io);
 
+    if (try cfg.resolveAuditHook(arena, io)) |hook_cfg| {
+        const hook_sink = try arena.create(scoot.audit_hook.Sink);
+        hook_sink.* = .{ .cfg = hook_cfg, .io = io };
+        ag.audit_hook = hook_sink;
+        sink.audit_hook_sink = hook_sink;
+    }
+
     sink.open(warn, arena, io, cfg.dirs.logs_dir);
     sink.setContext(session_id, null);
     ag.audit = sink.loggerPtr();
@@ -2596,6 +2603,9 @@ const AuditSink = struct {
     fw: Io.File.Writer = undefined,
     logger: scoot.audit.Logger = undefined,
     buf: [4096]u8 = undefined,
+    /// Optional PostToolUse audit hook sink (issue #137), arena-allocated in
+    /// setupRun. Surfaced at flush by finalizeRun; null when unconfigured.
+    audit_hook_sink: ?*scoot.audit_hook.Sink = null,
 
     /// Opens audit log at EOF. If open fails, degrades to explicit warning and no
     /// trace, neither silently black-boxing nor blocking the task on log failure.
@@ -2639,6 +2649,12 @@ const AuditSink = struct {
 /// Finalizes one run: flushes/closes audit and appends session snapshot. Best effort.
 fn finalizeRun(warn: *Io.Writer, io: std.Io, sess: *scoot.session.Session, sessions_dir: []const u8, sink: *AuditSink) void {
     sink.close(io);
+    if (sink.audit_hook_sink) |hs| {
+        if (hs.hadFailures()) {
+            warn.print("[scoot] warning: audit hook dropped {d} event(s) ({s}).\n", .{ hs.failed, hs.lastErrorReason() }) catch {};
+            warn.flush() catch {};
+        }
+    }
     sess.persist(io, sessions_dir) catch |err| {
         var pathbuf: [std.fs.max_path_bytes]u8 = undefined;
         const transcript = std.fmt.bufPrint(&pathbuf, "{s}/{s}.jsonl", .{ sessions_dir, sess.id }) catch "<transcript>";
