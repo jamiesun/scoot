@@ -38,6 +38,8 @@ const usage =
     \\Options:
     \\  -e, --eval <prompt>  run one goal and exit
     \\  --retries <N>        retry count for transient backend errors in -e mode (default 2, 0 disables retries)
+    \\  --unattended         -e one-shot runs with no human present: clamps policy to edge.max_job_policy (default readonly) and corrects guarded to readonly
+    \\  --policy <mode>      -e one-shot policy override (guarded/readonly/unrestricted); with --unattended it can only lower below the edge.max_job_policy ceiling
     \\  --scoot-home <dir>   override runtime directory (takes precedence over SCOOT_HOME; useful for test isolation)
     \\  --trace              print execution trace to stderr (-e/--eval and interactive REPL are supported)
     \\  --ticks <N>          schedule run / daemon run exits after N ticks (default 0 means run continuously)
@@ -68,6 +70,8 @@ pub fn main(init: std.process.Init) !void {
     var eval_prompt: ?[]const u8 = null;
     var eval_retries: u32 = default_eval_retries;
     var eval_retries_set = false;
+    var eval_unattended = false;
+    var eval_policy_override: ?[]const u8 = null;
     var scoot_home_override: ?[]const u8 = null;
     var trace = false;
     var cmd_config = false;
@@ -99,6 +103,19 @@ pub fn main(init: std.process.Init) !void {
                 try out.writeAll("error: -e/--eval requires a prompt argument\n");
                 die(out, 2);
             }
+            // Fail-closed: never silently accept a flag as the goal. `scoot -e
+            // --unattended "<goal>"` would otherwise capture "--unattended" as the
+            // prompt and skip the unattended clamp entirely, downgrading to the
+            // attended tools.policy default (guarded). Reject flag-looking prompts
+            // so the only working form is flags-before-prompt, e.g.
+            // `scoot --unattended -e "<goal>"`.
+            if (args[i].len > 1 and args[i][0] == '-') {
+                try out.print(
+                    "error: -e/--eval expects a goal, got flag '{s}'. Put options before the goal, e.g. `scoot --unattended -e \"<goal>\"`.\n",
+                    .{args[i]},
+                );
+                die(out, 2);
+            }
             eval_prompt = args[i];
         } else if (eql(arg, "--retries")) {
             i += 1;
@@ -111,6 +128,15 @@ pub fn main(init: std.process.Init) !void {
                 die(out, 2);
             };
             eval_retries_set = true;
+        } else if (eql(arg, "--unattended")) {
+            eval_unattended = true;
+        } else if (eql(arg, "--policy")) {
+            i += 1;
+            if (i >= args.len) {
+                try out.writeAll("error: --policy requires a mode argument (guarded/readonly/unrestricted)\n");
+                die(out, 2);
+            }
+            eval_policy_override = args[i];
         } else if (eql(arg, "--scoot-home")) {
             i += 1;
             if (i >= args.len or args[i].len == 0) {
@@ -256,6 +282,20 @@ pub fn main(init: std.process.Init) !void {
     if (eval_retries_set and eval_prompt == null) {
         try out.writeAll("error: --retries currently only supports -e/--eval one-shot mode\n");
         die(out, 2);
+    }
+    if (eval_unattended and eval_prompt == null) {
+        try out.writeAll("error: --unattended currently only supports -e/--eval one-shot mode\n");
+        die(out, 2);
+    }
+    if (eval_policy_override != null and eval_prompt == null) {
+        try out.writeAll("error: --policy currently only supports -e/--eval one-shot mode\n");
+        die(out, 2);
+    }
+    if (eval_policy_override) |pm| {
+        if (parsePolicyModeStrict(pm) == null) {
+            try out.print("error: unknown policy mode '{s}' (expected: guarded / readonly / unrestricted)\n", .{pm});
+            die(out, 2);
+        }
     }
     if (daemon_status_json and !(cmd_daemon != null and eql(cmd_daemon.?, "status"))) {
         try out.writeAll("error: --json currently only supports `daemon status --json`\n");
@@ -447,7 +487,34 @@ pub fn main(init: std.process.Init) !void {
         // no trace rather than blocking the run.
         var sink: AuditSink = .{};
         const session_id = try interactiveSessionId(arena, io, "cli");
-        const setup = try setupRun(&client, &sink, err_out, arena, io, env, cfg, session_id, scoot.policy.Mode.fromString(cfg.tools.policy));
+
+        // Effective one-shot policy. Attended runs (a human is present) let
+        // --policy raise above the interactive default. Unattended runs clamp the
+        // argv request DOWN to the local edge ceiling and then apply the unattended
+        // correction. The clamp is enforced in-child against local config, so a
+        // hostile/buggy argv (e.g. a compromised edge passing --policy unrestricted)
+        // can only ever LOWER authority, never raise it above edge.max_job_policy.
+        const requested_override: ?scoot.policy.Mode =
+            if (eval_policy_override) |pm| parsePolicyModeStrict(pm) else null;
+        const eff_mode = blk: {
+            if (eval_unattended) {
+                const ceiling = scoot.policy.Mode.fromString(cfg.edge.max_job_policy);
+                const requested = requested_override orelse ceiling;
+                break :blk scoot.policy.clampUnattended(requested, ceiling);
+            }
+            break :blk requested_override orelse scoot.policy.Mode.fromString(cfg.tools.policy);
+        };
+        if (eval_unattended) {
+            try err_out.print(
+                "[scoot] unattended one-shot: effective policy = {s} (edge.max_job_policy ceiling = {s})\n",
+                .{ @tagName(eff_mode), cfg.edge.max_job_policy },
+            );
+            if (eff_mode == .unrestricted) {
+                try err_out.writeAll("[scoot] WARN running unrestricted in unattended mode; high-risk explicit operator exception with no policy limit.\n");
+            }
+        }
+
+        const setup = try setupRun(&client, &sink, err_out, arena, io, env, cfg, session_id, eff_mode);
         var sess = setup.sess;
         var ag = setup.agent;
         try sess.append(arena, .user, prompt);

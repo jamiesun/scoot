@@ -251,3 +251,16 @@ poll_ms = 1000
 # goal = "Prepare a weekday morning brief"
 # cron = "0 9 * * *"
 # mode = "readonly"
+
+[edge]
+# Policy ceiling for UNATTENDED one-shot runs (`scoot -e --unattended`) and future
+# edge-dispatched jobs. This is deliberately separate from tools.policy (the
+# interactive default) so that raising the interactive policy never silently raises
+# the unattended ceiling. It is enforced IN-CHILD against this local config, so a
+# command line / wire request can only ever LOWER policy below this ceiling, never
+# raise it. Values: readonly (default, fail-closed), guarded (corrected to readonly
+# when unattended, so it buys nothing over readonly), or unrestricted (a high-risk,
+# fully-audited, local-signoff jump that grants writes/network to unattended jobs).
+# Override per-process with SCOOT_EDGE_MAX_JOB_POLICY.
+max_job_policy = "readonly"
+

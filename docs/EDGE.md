@@ -261,16 +261,19 @@ The entire security model lives in these rules:
 | Full provenance | Each dispatched job is recorded in an edge-side `logs/edge-audit.jsonl` (who dispatched it, `idem_key`, `effective_policy`, correlated `session_id`), joined to Scoot's own run audit via `session_id`. | Full provenance auditing |
 | Confined working directory | The edge launches the child with cwd pinned to `edge.job_root` (a dedicated, empty-by-default directory), never the host root or `$HOME`. Because `readonly` read confinement is **cwd-relative** (`evaluateReadPath`), this is what makes `readonly` mean *this directory* instead of *the whole filesystem*. | Local config/policy is the ceiling |
 
-**The clamp is a real, missing primitive — E2 must not ship without it.** Today
-`scoot -e` runs at the *local config* policy (`cfg.tools.policy`) and, unlike a
-scheduled job, gets **no** unattended `guarded → readonly` correction (that lives in
-`schedule.zig`'s `effectiveMode`, which the one-shot path never calls). So a naive
-`scoot -e "<goal>"` on a host whose local default is `guarded` would run with shell,
-write, and network allowed — not `readonly`. The edge must launch jobs through an
-unattended one-shot clamp (core prerequisite below) that **enforces the ceiling
-inside the child against local config**, so argv can only ever *lower* policy. A
-buggy or center-influenced edge passing a higher policy on the command line must be
-ignored by the child.
+**The clamp is now a real primitive — `scoot -e --unattended`.** Previously
+`scoot -e` ran at the *local config* policy (`cfg.tools.policy`) and, unlike a
+scheduled job, got **no** unattended `guarded → readonly` correction (that lives in
+`schedule.zig`'s `effectiveMode`, which the plain one-shot path never called). So a
+naive `scoot -e "<goal>"` on a host whose local default is `guarded` would run with
+shell, write, and network allowed — not `readonly`. That gap is now closed: passing
+`--unattended` makes the child compute
+`effective = correctUnattended(privilegeMin(requested, edge.max_job_policy))`
+**inside the child against local config**, so argv can only ever *lower* policy. A
+buggy or center-influenced edge passing `--policy unrestricted` on the command line
+is clamped down to the local ceiling and ignored. The edge launches E2 jobs through
+this clamp (`scoot -e --unattended`); the shared `correctUnattended` lattice in
+`policy.zig` is the single source of truth for both the scheduler and the one-shot.
 
 Job lifecycle is reported back over the same append-only telemetry channel:
 
@@ -293,9 +296,10 @@ Job lifecycle is reported back over the same append-only telemetry channel:
 
 - **Edge-dispatched jobs default to `readonly`, enforced by the clamp — not
   inherited automatically.** The scheduler's `guarded → readonly` correction lives in
-  `schedule.zig` and does *not* apply to a plain `scoot -e`. Until the in-child
-  unattended clamp exists in core, the readonly default is unbacked and E2 stays
-  blocked.
+  `schedule.zig` and does *not* apply to a plain `scoot -e`. The in-child unattended
+  clamp now exists in core as `scoot -e --unattended` (it reads the local
+  `edge.max_job_policy` ceiling, default `readonly`), so the readonly default is
+  backed; E2 job dispatch wires through it.
 - **Raising the ceiling requires explicit local opt-in, and the only meaningful
   raise is the big one.** For *unattended* jobs `guarded` collapses to `readonly`, so
   `edge.max_job_policy = guarded` buys nothing over `readonly`. The only setting that
@@ -324,7 +328,7 @@ public package root (`src/root.zig`) stays the contract.
 | --- | --- |
 | `status` | `daemon status` (and a future `--json` form), config read, skill discovery (names / descriptions only) |
 | `audit_batch` | read-only `logs/*.jsonl` |
-| `job kind=run` | child process `scoot -e "<goal>"` launched **through the unattended one-shot clamp** (ceiling enforced in-child against local config), with cwd pinned to `edge.job_root` |
+| `job kind=run` | child process `scoot --unattended -e "<goal>"` launched **through the unattended one-shot clamp** (ceiling enforced in-child against local `edge.max_job_policy`), with cwd pinned to `edge.job_root` |
 | job result | child exit code + stdout + the resulting session / audit |
 
 ### Core prerequisites and improvements
@@ -336,10 +340,13 @@ separate, independently-useful core changes, but E1/E2 are gated on them.
 1. **(E1 prerequisite)** Machine-readable status: `daemon status --json` /
    `doctor --json`. The `status` heartbeat must not depend on scraping
    human-readable text.
-2. **(E2 prerequisite — the keystone)** An unattended one-shot policy clamp so an
-   edge-launched `scoot -e` is provably at or below the `readonly` ceiling, enforced
-   in-child against local config. Without it the entire readonly-default authority
-   model is unbacked. **E2 must not ship before this.**
+2. **(E2 prerequisite — the keystone) ✅ Done.** An unattended one-shot policy
+   clamp so an edge-launched `scoot -e` is provably at or below the `readonly`
+   ceiling, enforced in-child against local config. Shipped as `scoot -e
+   --unattended` (with an optional `--policy <mode>` that can only *lower*), reading
+   the local `edge.max_job_policy` ceiling (default `readonly`). The shared
+   `correctUnattended`/`privilegeMin` lattice in `policy.zig` is the single source of
+   truth for both the scheduler and the one-shot. This unblocks E2 job dispatch.
 3. **(E1 prerequisite)** Shipping-aware, rotation-stable audit: a monotonic rotation
    generation plus byte offset, retaining rotated segments until acked (bounded, with
    an explicit `audit_gap` marker when the bound is exceeded). The current
@@ -394,10 +401,10 @@ separate, independently-useful core changes, but E1/E2 are gated on them.
   `SCOOT_EDGE_LABELS` / `SCOOT_EDGE_SKILLS` env vars feed it) may ride the heartbeat
   for later capability-aware routing — advisory only, never authority.
 - **E2:** schema'd, idempotent job dispatch behind explicit config + policy ceiling +
-  provenance auditing. **Hard-gated on prerequisite #2** (the in-child unattended
-  policy clamp) and on cwd confinement (`edge.job_root`). Edge jobs default
-  `readonly`; the only raise is local `edge.max_job_policy = unrestricted`.
-  Capability-aware routing consumes the E1 `node` descriptor; a job a node cannot
-  satisfy rejects with `no_matching_capability`.
+  provenance auditing. **Prerequisite #2 (the in-child unattended policy clamp) is
+  done** — `scoot -e --unattended` — so E2 now gates only on cwd confinement
+  (`edge.job_root`). Edge jobs default `readonly`; the only raise is local
+  `edge.max_job_policy = unrestricted`. Capability-aware routing consumes the E1
+  `node` descriptor; a job a node cannot satisfy rejects with `no_matching_capability`.
 - **E3:** packaging (install-script opt-in, Homebrew, apt) and
   reconnect/backpressure hardening.

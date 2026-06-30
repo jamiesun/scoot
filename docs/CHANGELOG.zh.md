@@ -17,6 +17,7 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 ### 新增
 
+- **无人值守一次性策略钳制**（`scoot -e --unattended`）：`scoot-edge` 任务派发（E2）的拱心石前置。无人值守的 `-e` 运行现在会**在子进程内**把有效策略计算为 `correctUnattended(privilegeMin(requested, edge.max_job_policy))`，因此 argv（以及未来的 wire）永远只能把策略*降*到本地天花板以下，绝不能抬高。新增纯本地的 `[edge].max_job_policy` 配置旋钮（默认 `readonly`，可用 `SCOOT_EDGE_MAX_JOB_POLICY` 覆盖）作为天花板；可选的 `--policy <mode>` 只能把它降低。`correctUnattended`/`privilegeMin` 格（`readonly ⊑ guarded ⊑ unrestricted`，刻意**不是** `Mode` 枚举的声明序）现在是与调度器 `effectiveMode` 共享的唯一真相来源。
 - `scoot-edge`（E1）新增持续的 **`run` 心跳循环**：按 `--interval-ms` 周期向外拨出并 POST status 心跳，直到被停止；遇到瞬时失败时采用有界的抖动指数退避（循环永不崩溃，也永不开启监听端口），并提供可选的 `--max-posts` 上限用于受监管 / 有界运行。每次迭代使用按次重置的 arena，因此无界运行也只占用有界内存。心跳还可携带显式 opt-in、仅作建议的 **`node` 能力描述符**（`--report-capabilities`，默认关闭；由 `--label` / `--skill` 及 `SCOOT_EDGE_LABELS` / `SCOOT_EDGE_SKILLS` 填充），供能力感知路由使用——声明能力绝不构成授权，本地策略上限仍然门控每一个任务。
 - `scoot-edge run` 现在在收到 `SIGINT`/`SIGTERM` 时会**优雅停机**：先跑完进行中的心跳，再以退出码 `0` 退出，而非被硬杀，使其成为合格的 systemd/launchd 服务。一次性命令新增**稳定且有文档的退出码**（`0` 成功，`1` 拨出 POST 失败，`2` 配置 / 用法错误，`3` 本地状态采集失败），因此 `scoot daemon status --json` 子进程失败或缺失时会打印干净的错误信息，而不再抛出原始错误栈。
 

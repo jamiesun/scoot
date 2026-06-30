@@ -61,6 +61,7 @@ ephemeral, run-once-then-discard execution.
 | `SCOOT_SKILLS_INCLUDE_AGENTS_SKILLS` | `skills.include_agents_skills` | bool |
 | `SCOOT_AUDIT_LEVEL` | `audit.level` | string |
 | `SCOOT_AUDIT_TO_FILE` | `audit.to_file` | bool |
+| `SCOOT_EDGE_MAX_JOB_POLICY` | `edge.max_job_policy` | string (`guarded`/`readonly`/`unrestricted`) |
 
 Notes:
 
@@ -116,6 +117,7 @@ Either way no secret is ever written to disk.
 | `[mcp]` | External MCP server declarations for `mcp_call` |
 | `[audit]` | Audit log level and file output |
 | `[schedule]` | Unattended scheduled jobs and the poll interval |
+| `[edge]` | Policy ceiling for unattended one-shot / edge-dispatched jobs |
 
 ---
 
@@ -486,6 +488,31 @@ id = "morning-brief"
 goal = "Prepare today's task brief"
 at_unix = 1893456000
 mode = "readonly"
+```
+
+---
+
+## `[edge]`
+
+The policy ceiling for **unattended** runs: the one-shot `scoot -e --unattended`
+clamp and future `scoot-edge`-dispatched jobs. It is deliberately separate from
+`tools.policy` (the interactive default) so that raising the interactive policy
+never silently raises the unattended ceiling.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `max_job_policy` | string | `"readonly"` | Ceiling for unattended jobs: `readonly` (fail-closed), `guarded` (corrected to `readonly` when unattended, so it buys nothing), or `unrestricted` (high-risk, fully-audited, local-signoff jump that grants writes/network) |
+
+The ceiling is enforced **in-child against this local config**, so a command line
+or wire request can only ever *lower* policy below it, never raise it. With
+`scoot -e --unattended`, the effective policy is
+`correctUnattended(privilegeMin(requested, edge.max_job_policy))`; an optional
+`--policy <mode>` is clamped down to this ceiling. Override per-process with
+`SCOOT_EDGE_MAX_JOB_POLICY`.
+
+```toml
+[edge]
+max_job_policy = "readonly"
 ```
 
 ---
