@@ -15,7 +15,15 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 ## [未发布]
 
+## [0.6.0] - 2026-06-30
+
 ### 新增
+
+- 全仓库**审计 agent skill**（`project-audit`）：从十个维度为仓库健康度打分
+  （文档↔功能一致性、安全、配置一致性、双语对齐、构建/测试、内存纪律、
+  公共 API 面等），产出单一可复现的报告（#168）。
+- 为可选的边缘 fleet agent 新增 `scoot-edge` **E1 状态心跳**，以及可选
+  `scoot-edge` 部署的 E0 边界文档（#172、#173）。
 
 - 为内置的 `scoot-wasm` 引擎新增 **WebAssembly spec 一致性测试**。官方
   WebAssembly/testsuite 的一个精选子集（固定在修订版 `193e551f`）用 `wast2json`
@@ -32,6 +40,18 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 - `scoot-wasm`：`iNN.trunc_fMM_s/u` 不再对“向零截断后的整数值在范围内”的小数输入
   误 trap —— 例如 `i32.trunc_f64_s(-2147483648.9)`。范围检查现在在截断之后进行，
   而不是针对原始操作数，与 spec 一致（由新的一致性测试套件暴露，#163）。
+- `scoot-wasm`：加固加载器/解释器以抵御恶意字节码：把按构造不可达的 `unreachable`
+  改为显式的解码错误与 trap，并移除 WASI 测试 host 中的一处 OOM→panic 路径（#174、
+  #181）。
+
+### 安全
+
+- 收紧 agent 边界护栏，避免不受信任的工具输出扩大权限（#176）。
+
+### 文档
+
+- 补充 Wasm 工具的 compute-unit 构建指引、触发/发现说明，以及 `scoot-edge` E0
+  边界文档（#170、#172）。
 
 ## [0.5.0] - 2026-06-27
 
@@ -261,7 +281,8 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 - 完善首页/许可证元数据、信息图与双语用户指南（#6、#19、#36）
 
-[未发布]: https://github.com/jamiesun/scoot/compare/v0.5.0...HEAD
+[未发布]: https://github.com/jamiesun/scoot/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/jamiesun/scoot/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jamiesun/scoot/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jamiesun/scoot/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jamiesun/scoot/compare/v0.2.0...v0.3.0
