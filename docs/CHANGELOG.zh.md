@@ -15,6 +15,10 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 ## [未发布]
 
+### 新增
+
+- `scoot-edge`（E1）新增持续的 **`run` 心跳循环**：按 `--interval-ms` 周期向外拨出并 POST status 心跳，直到被停止；遇到瞬时失败时采用有界的抖动指数退避（循环永不崩溃，也永不开启监听端口），并提供可选的 `--max-posts` 上限用于受监管 / 有界运行。每次迭代使用按次重置的 arena，因此无界运行也只占用有界内存。心跳还可携带显式 opt-in、仅作建议的 **`node` 能力描述符**（`--report-capabilities`，默认关闭；由 `--label` / `--skill` 及 `SCOOT_EDGE_LABELS` / `SCOOT_EDGE_SKILLS` 填充），供能力感知路由使用——声明能力绝不构成授权，本地策略上限仍然门控每一个任务。
+
 ## [0.6.0] - 2026-06-30
 
 ### 新增
