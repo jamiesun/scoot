@@ -220,7 +220,7 @@ fn parseModule(d: *Decoder) DecodeError!Summary {
                 declared_data_count = parseDataCountSection(&section_decoder) catch |err| return adoptSectionError(d, &section_decoder, err);
                 summary.declared_data_count = declared_data_count;
             },
-            _ => unreachable,
+            _ => return d.fail("unknown wasm section id {d}", .{id}),
         }
         if (section_decoder.remaining() != 0) return d.fail("section {s} has trailing bytes", .{sectionName(id)});
         summary.sections += 1;

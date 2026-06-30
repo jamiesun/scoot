@@ -2088,7 +2088,7 @@ pub const Instance = struct {
                 const a = try self.effectiveAddr(body, pc, 4);
                 std.mem.writeInt(u32, self.memory[a..][0..4], @truncate(@as(u64, @bitCast(v))), .little);
             },
-            else => unreachable,
+            else => return self.malformed(),
         }
     }
 
@@ -3496,9 +3496,9 @@ fn runWasiTest(
     bytes: []const u8,
     stdin: []const u8,
     args: []const []const u8,
-) WasiRun {
-    const so = a.create(std.ArrayList(u8)) catch unreachable;
-    const se = a.create(std.ArrayList(u8)) catch unreachable;
+) !WasiRun {
+    const so = try a.create(std.ArrayList(u8));
+    const se = try a.create(std.ArrayList(u8));
     so.* = .empty;
     se.* = .empty;
     const r = runWasi(a, bytes, so, se, .{
@@ -3598,7 +3598,7 @@ test "wasi: echo stdin to stdout via fd_read/fd_write" {
         &.{&body},
         null,
     );
-    const run = runWasiTest(a, bytes, "hello world", &.{"prog"});
+    const run = try runWasiTest(a, bytes, "hello world", &.{"prog"});
     try testing.expect(run.result == .exited);
     try testing.expectEqual(@as(u32, 0), run.result.exited);
     try testing.expectEqualStrings("hello world", run.stdout);
@@ -3619,7 +3619,7 @@ test "wasi: proc_exit sets exit code" {
         &.{&body},
         null,
     );
-    const run = runWasiTest(a, bytes, "", &.{"prog"});
+    const run = try runWasiTest(a, bytes, "", &.{"prog"});
     try testing.expect(run.result == .exited);
     try testing.expectEqual(@as(u32, 7), run.result.exited);
 }
@@ -3639,7 +3639,7 @@ test "wasi: normal return from _start exits 0" {
         &.{&body},
         null,
     );
-    const run = runWasiTest(a, bytes, "", &.{"prog"});
+    const run = try runWasiTest(a, bytes, "", &.{"prog"});
     try testing.expect(run.result == .exited);
     try testing.expectEqual(@as(u32, 0), run.result.exited);
 }
@@ -3684,7 +3684,7 @@ test "wasi: args round-trip via args_sizes_get/args_get" {
         null,
     );
     // argv[1] == "abc"
-    const run = runWasiTest(a, bytes, "", &.{ "prog", "abc" });
+    const run = try runWasiTest(a, bytes, "", &.{ "prog", "abc" });
     try testing.expect(run.result == .exited);
     try testing.expectEqualStrings("abc", run.stdout);
 }
@@ -3707,7 +3707,7 @@ test "wasi: environ_get is unsupported and traps" {
         &.{&body},
         null,
     );
-    const run = runWasiTest(a, bytes, "", &.{"prog"});
+    const run = try runWasiTest(a, bytes, "", &.{"prog"});
     try testing.expect(run.result == .trap);
 }
 
@@ -3729,7 +3729,7 @@ test "wasi: clock_time_get is unsupported and traps" {
         &.{&body},
         null,
     );
-    const run = runWasiTest(a, bytes, "", &.{"prog"});
+    const run = try runWasiTest(a, bytes, "", &.{"prog"});
     try testing.expect(run.result == .trap);
 }
 
@@ -3751,7 +3751,7 @@ test "wasi: random_get is unsupported and traps" {
         &.{&body},
         null,
     );
-    const run = runWasiTest(a, bytes, "", &.{"prog"});
+    const run = try runWasiTest(a, bytes, "", &.{"prog"});
     try testing.expect(run.result == .trap);
 }
 
@@ -3806,7 +3806,7 @@ test "wasi: write to a non-stdio fd returns EBADF" {
         &.{&body},
         null,
     );
-    const run = runWasiTest(a, bytes, "", &.{"prog"});
+    const run = try runWasiTest(a, bytes, "", &.{"prog"});
     try testing.expect(run.result == .exited);
     var expected: [4]u8 = undefined;
     std.mem.writeInt(u32, &expected, 8, .little); // EBADF
@@ -3853,7 +3853,7 @@ test "wasi: out-of-bounds pointer yields EFAULT" {
         &.{&body},
         null,
     );
-    const run = runWasiTest(a, bytes, "", &.{"prog"});
+    const run = try runWasiTest(a, bytes, "", &.{"prog"});
     try testing.expect(run.result == .exited);
     var expected: [4]u8 = undefined;
     std.mem.writeInt(u32, &expected, 21, .little); // EFAULT
@@ -3881,7 +3881,7 @@ test "wasi: unknown import traps when called" {
         &.{&body},
         null,
     );
-    const run = runWasiTest(a, bytes, "", &.{"prog"});
+    const run = try runWasiTest(a, bytes, "", &.{"prog"});
     try testing.expect(run.result == .trap);
 }
 
