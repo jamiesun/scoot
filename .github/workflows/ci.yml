@@ -29,6 +29,22 @@ jobs:
           echo "$PWD/zig-x86_64-linux-${ZIG_VERSION}" >> "$GITHUB_PATH"
           "$PWD/zig-x86_64-linux-${ZIG_VERSION}/zig" version
 
+      - name: Secret hygiene guard
+        run: |
+          set -euo pipefail
+          # config.toml must stay ignored so a local secret-bearing config can
+          # never be committed.
+          if ! git check-ignore -q config.toml; then
+            echo "::error::config.toml is not gitignored; secrets could be committed"
+            exit 1
+          fi
+          # No inline API-key literals may enter source or the example config.
+          if grep -rnIE 'sk-[A-Za-z0-9]{12,}|api[_-]?key[[:space:]]*=[[:space:]]*"[^"]+"' \
+               src config.example.toml; then
+            echo "::error::inline secret literal found; use api_key_env/file/cmd instead"
+            exit 1
+          fi
+
       - name: Format check
         run: zig fmt --check build.zig src examples
 
