@@ -16,7 +16,16 @@ heading when cutting a release.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-06-30
+
 ### Added
+
+- Project-wide **audit agent skill** (`project-audit`) that scores ten dimensions
+  of repository health (docs↔functionality, security, config consistency,
+  bilingual parity, build/test, memory discipline, public-API surface, …) into a
+  single reproducible report (#168).
+- `scoot-edge` **E1 status heartbeat** for the optional edge fleet agent, plus the
+  E0 boundary documentation for the optional `scoot-edge` deployment (#172, #173).
 
 - **WebAssembly spec conformance tests** for the bundled `scoot-wasm` engine. A
   curated subset of the official WebAssembly/testsuite (pinned at revision
@@ -50,6 +59,20 @@ heading when cutting a release.
   `i32.trunc_f64_s(-2147483648.9)`. The range check now runs after truncation
   instead of against the raw operand, matching the spec (surfaced by the new
   conformance suite, #163).
+- `scoot-wasm`: hardened the loader/interpreter against hostile bytecode by
+  replacing unreachable-by-construction `unreachable` sites with explicit decode
+  errors and traps, and removed an OOM→panic path in the WASI test host (#174,
+  #181).
+
+### Security
+
+- Tightened the agent boundary guardrails so untrusted tool output cannot widen
+  authority (#176).
+
+### Documentation
+
+- Compute-unit build guidance, trigger/discovery notes for Wasm tools, and the
+  `scoot-edge` E0 boundary doc (#170, #172).
 
 ## [0.5.0] - 2026-06-27
 
@@ -315,7 +338,8 @@ First feature release since `v0.0.2` (which only carried release-workflow plumbi
 
 - Polished homepage/license metadata, infographic, bilingual user guide (#6, #19, #36)
 
-[Unreleased]: https://github.com/jamiesun/scoot/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/jamiesun/scoot/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/jamiesun/scoot/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jamiesun/scoot/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jamiesun/scoot/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jamiesun/scoot/compare/v0.2.0...v0.3.0
