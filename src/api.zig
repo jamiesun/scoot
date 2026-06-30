@@ -45,6 +45,10 @@ pub const RunOptions = struct {
     max_retries: u32 = 0,
     retry_base_delay_ns: u64 = 2 * std.time.ns_per_s,
     retry_max_delay_ns: u64 = 10 * std.time.ns_per_s,
+    /// Optional structured ReACT event sink forwarded to the agent (issue #156).
+    /// Internal-only embedding surface; not exported from `root.zig`. See
+    /// `agent.Event` for the turn-arena lifetime contract.
+    event_sink: ?*const agent.EventSink = null,
 };
 
 const RuntimeState = struct {
@@ -159,6 +163,7 @@ pub fn runDetailedWithOptions(rt: *Runtime, goal: []const u8, options: RunOption
 
     var ag = state.agent_template;
     ag.skills = refs;
+    ag.events = options.event_sink;
     var sink: ApiAuditSink = .{};
     sink.open(arena, state.io, state.dirs.logs_dir, sess.id);
     defer sink.close(state.io);
@@ -470,6 +475,61 @@ test "embedded runDetailedWithOptions retries transient errors and can return ca
     const session_path = try std.fmt.allocPrint(gpa, "{s}/state/sessions/{s}.jsonl", .{ home, result.session_id });
     defer gpa.free(session_path);
     try std.testing.expect(fileExists(io, session_path));
+}
+
+const ApiCaptureSink = struct {
+    saw_final: bool = false,
+    final_reply_len: usize = 0,
+    step_count: usize = 0,
+
+    fn record(ctx: *anyopaque, ev: agent.Event) void {
+        const self: *ApiCaptureSink = @ptrCast(@alignCast(ctx));
+        switch (ev) {
+            .step => self.step_count += 1,
+            .final => |f| {
+                self.saw_final = true;
+                self.final_reply_len = f.reply.len;
+            },
+            else => {},
+        }
+    }
+
+    fn sink(self: *ApiCaptureSink) agent.EventSink {
+        return .{ .ctx = self, .emitFn = record };
+    }
+};
+
+test "runDetailedWithOptions forwards event_sink into the agent (issue #156)" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const home = "/tmp/scoot_api_event_sink_test";
+    cwd.deleteTree(io, home) catch {};
+    defer cwd.deleteTree(io, home) catch {};
+
+    var env: std.process.Environ.Map = .init(gpa);
+    defer env.deinit();
+
+    const rt = try start(gpa, io, .{ .env = &env, .scoot_home = home });
+    defer stop(rt);
+
+    var brain = TestBrain{ .steps = &.{
+        "{\"thought\":\"go\",\"action\":\"final\",\"action_input\":\"sink-ok\"}",
+    } };
+    const state: *RuntimeState = @ptrCast(@alignCast(rt));
+    state.agent_template.complete_ctx = &brain;
+    state.agent_template.complete_fn = scriptedComplete;
+    state.agent_template.max_turns = 4;
+    state.skill_paths = &.{};
+
+    var capture = ApiCaptureSink{};
+    const es = capture.sink();
+    const result = try runDetailedWithOptions(rt, "go", .{ .event_sink = &es });
+
+    try std.testing.expectEqualStrings("sink-ok", result.reply);
+    try std.testing.expect(capture.saw_final);
+    try std.testing.expectEqual(@as(usize, 1), capture.step_count);
+    try std.testing.expectEqual(@as(usize, "sink-ok".len), capture.final_reply_len);
 }
 
 fn fileExists(io: std.Io, path: []const u8) bool {

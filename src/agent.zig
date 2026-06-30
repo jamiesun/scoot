@@ -102,6 +102,46 @@ pub const Step = struct {
     action_input: []const u8,
 };
 
+/// Structured ReACT event for in-process protocol adapters and observability
+/// sinks (issue #156). Events fire synchronously at the same points as the
+/// human-readable `trace` writer and never change its text output; a sink is
+/// independent of `trace` and fires even when no trace writer is attached.
+///
+/// Lifetime: every slice carried by an `Event` is **turn-arena lifetime** and
+/// is valid only for the duration of the synchronous `EventSink.emit` call.
+/// Sinks must consume it immediately (copy it, or write it to a stream) and
+/// must not retain references past the call.
+pub const Event = union(enum) {
+    /// Backend inference is about to start for `turn`.
+    thinking: struct { turn: u32 },
+    /// A parsed model step. For `.final`, the reply travels in `action_input`.
+    step: struct { turn: u32, action: Action, thought: []const u8, action_input: []const u8 },
+    /// The policy gate denied `action` with `reason`.
+    policy_deny: struct { turn: u32, action: Action, reason: []const u8 },
+    /// A tool `action` is about to execute and may block.
+    running: struct { turn: u32, action: Action },
+    /// Tool output observed for `action`.
+    observation: struct { turn: u32, action: Action, observation: []const u8 },
+    /// The agent produced its final reply.
+    final: struct { turn: u32, reply: []const u8 },
+    /// The model emitted an unparseable step; a correction was fed back.
+    malformed: struct { turn: u32, err: anyerror, raw: []const u8 },
+    /// History was compacted to fit the context budget.
+    compacted: struct { turn: u32, used_bytes: usize },
+};
+
+/// Lightweight vtable for receiving structured `Event`s. Construct with a
+/// context pointer and an emit function. See `Event` for the turn-arena
+/// lifetime contract: do not retain event slices past the `emit` call.
+pub const EventSink = struct {
+    ctx: *anyopaque,
+    emitFn: *const fn (*anyopaque, Event) void,
+
+    pub fn emit(self: *const EventSink, ev: Event) void {
+        self.emitFn(self.ctx, ev);
+    }
+};
+
 /// Multi-argument built-ins carry a JSON object string in action_input and parse
 /// it per tool. Single-argument tools such as file_read also use JSON
 /// (`{"path":...}`), keeping the rule "file-like tools use JSON args" uniform
@@ -256,6 +296,11 @@ pub const Agent = struct {
     env: ?*const std.process.Environ.Map = null,
     /// Optional CLI trace output for explicit debugging; final answer stays caller-owned.
     trace: ?*std.Io.Writer = null,
+    /// Optional structured event sink for protocol adapters and observability
+    /// (issue #156). Fires synchronously at the same points as `trace`, but is
+    /// independent of it. Default-off: no events emitted when null. See `Event`
+    /// for the turn-arena lifetime contract.
+    events: ?*const EventSink = null,
     /// Loaded name->dir skill table injected by setupRun from Registry. Arena-owned
     /// for this run. Empty means no loaded skills.
     skills: []const SkillRef = &.{},
@@ -399,7 +444,7 @@ pub const Agent = struct {
                     // Model-produced actions must pass the guard before reaching the system.
                     switch (self.guard(arena, step.action, step.action_input)) {
                         .deny => |reason| {
-                            self.tracePolicyDeny(turn + 1, reason);
+                            self.tracePolicyDeny(turn + 1, step.action, reason);
                             const denied = try std.fmt.allocPrint(
                                 arena,
                                 "[Observation] action denied by execution policy ({s} mode): {s}. Use a safer or read-only approach.",
@@ -420,7 +465,7 @@ pub const Agent = struct {
                             if (try read_cache.dedup(arena, turn + 1, step.action, step.action_input, observation)) |deduped|
                                 observation = deduped;
                             if (self.audit) |lg| lg.log(.observation, observation) catch {};
-                            self.traceObservation(turn + 1, observation);
+                            self.traceObservation(turn + 1, step.action, observation);
                             try sess.append(backing, .user, try wrapUntrustedToolOutput(arena, step.action, observation));
                         },
                     }
@@ -860,9 +905,16 @@ pub const Agent = struct {
         return formatObservation(arena, result);
     }
 
+    /// Forwards a structured event to the optional sink (issue #156). No-op when
+    /// no sink is attached, so event emission never depends on `trace`.
+    inline fn emitEvent(self: *Agent, ev: Event) void {
+        if (self.events) |s| s.emit(ev);
+    }
+
     /// "Thinking" progress marker printed and flushed before backend inference,
     /// so trace remains live while waiting for the model.
     fn traceThinking(self: *Agent, turn: u32) void {
+        self.emitEvent(.{ .thinking = .{ .turn = turn } });
         const w = self.trace orelse return;
         w.print("[trace {d}] thinking: calling backend...\n", .{turn}) catch return;
         w.flush() catch {};
@@ -871,12 +923,14 @@ pub const Agent = struct {
     /// "Running" progress marker printed and flushed before executing a tool,
     /// showing which tool is currently blocking.
     fn traceRunning(self: *Agent, turn: u32, action: Action) void {
+        self.emitEvent(.{ .running = .{ .turn = turn, .action = action } });
         const w = self.trace orelse return;
         w.print("[trace {d}] running: {s} (tool call may block)...\n", .{ turn, @tagName(action) }) catch return;
         w.flush() catch {};
     }
 
     fn traceMalformed(self: *Agent, turn: u32, parse_err: anyerror, content: []const u8) void {
+        self.emitEvent(.{ .malformed = .{ .turn = turn, .err = parse_err, .raw = content } });
         const w = self.trace orelse return;
         w.print("[trace {d}] malformed model step ({s}); retrying. raw: ", .{ turn, @errorName(parse_err) }) catch return;
         traceClipped(w, content, trace_malformed_cap) catch return;
@@ -886,12 +940,19 @@ pub const Agent = struct {
 
     /// History-compaction progress marker after over-budget old context is folded.
     fn traceCompacted(self: *Agent, turn: u32, used_bytes: usize) void {
+        self.emitEvent(.{ .compacted = .{ .turn = turn, .used_bytes = used_bytes } });
         const w = self.trace orelse return;
         w.print("[trace {d}] compacted history: now {d} bytes (kept system, job, and {d} recent messages)\n", .{ turn, used_bytes, history_keep_recent }) catch return;
         w.flush() catch {};
     }
 
     fn traceStep(self: *Agent, turn: u32, step: Step) void {
+        self.emitEvent(.{ .step = .{
+            .turn = turn,
+            .action = step.action,
+            .thought = step.thought,
+            .action_input = step.action_input,
+        } });
         const w = self.trace orelse return;
         w.print("[trace {d}] reason: ", .{turn}) catch return;
         traceClipped(w, step.thought, trace_reason_cap) catch return;
@@ -910,7 +971,8 @@ pub const Agent = struct {
         w.flush() catch {};
     }
 
-    fn tracePolicyDeny(self: *Agent, turn: u32, reason: []const u8) void {
+    fn tracePolicyDeny(self: *Agent, turn: u32, action: Action, reason: []const u8) void {
+        self.emitEvent(.{ .policy_deny = .{ .turn = turn, .action = action, .reason = reason } });
         const w = self.trace orelse return;
         w.print("[trace {d}] policy: deny ({s}) ", .{ turn, @tagName(self.policy_mode) }) catch return;
         traceClipped(w, reason, trace_reason_cap) catch return;
@@ -918,7 +980,8 @@ pub const Agent = struct {
         w.flush() catch {};
     }
 
-    fn traceObservation(self: *Agent, turn: u32, observation: []const u8) void {
+    fn traceObservation(self: *Agent, turn: u32, action: Action, observation: []const u8) void {
+        self.emitEvent(.{ .observation = .{ .turn = turn, .action = action, .observation = observation } });
         const w = self.trace orelse return;
         w.print("[trace {d}] observe: ", .{turn}) catch return;
         traceClipped(w, observation, trace_observation_cap) catch return;
@@ -943,6 +1006,7 @@ pub const Agent = struct {
     }
 
     fn traceFinal(self: *Agent, turn: u32, reply: []const u8) void {
+        self.emitEvent(.{ .final = .{ .turn = turn, .reply = reply } });
         const w = self.trace orelse return;
         w.print("[trace {d}] final: ", .{turn}) catch return;
         traceClipped(w, reply, trace_final_cap) catch return;
@@ -2728,6 +2792,65 @@ test "run: malformed backend step trace includes raw output sample" {
     const trace = trace_writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, trace, "malformed model step (MalformedStep)") != null);
     try std.testing.expect(std.mem.indexOf(u8, trace, "I will answer in prose") != null);
+}
+
+/// Test sink that records only scalar event fields (tag, action, turn). It never
+/// retains event slices, honoring the turn-arena lifetime contract on `Event`.
+const CapturingSink = struct {
+    tags: [32]std.meta.Tag(Event) = undefined,
+    count: usize = 0,
+    deny_action: ?Action = null,
+    final_turn: u32 = 0,
+
+    fn record(ctx: *anyopaque, ev: Event) void {
+        const self: *CapturingSink = @ptrCast(@alignCast(ctx));
+        if (self.count < self.tags.len) {
+            self.tags[self.count] = std.meta.activeTag(ev);
+            self.count += 1;
+        }
+        switch (ev) {
+            .policy_deny => |d| self.deny_action = d.action,
+            .final => |f| self.final_turn = f.turn,
+            else => {},
+        }
+    }
+
+    fn sink(self: *CapturingSink) EventSink {
+        return .{ .ctx = self, .emitFn = record };
+    }
+};
+
+test "run: structured event sink receives ordered events incl policy-deny (issue #156)" {
+    const gpa = std.testing.allocator;
+    var brain = ScriptedBrain{ .steps = &.{
+        "{\"thought\":\"safe\",\"action\":\"bash\",\"action_input\":\"printf OK\"}",
+        "{\"thought\":\"danger\",\"action\":\"bash\",\"action_input\":\"rm -rf /\"}",
+        "{\"thought\":\"done\",\"action\":\"final\",\"action_input\":\"ok\"}",
+    } };
+    var ag = testAgent(&brain, 16);
+
+    // No trace writer is attached: events must fire independently of `trace`.
+    var capture = CapturingSink{};
+    const es = capture.sink();
+    ag.events = &es;
+
+    var sess = session.Session.init("test");
+    defer sess.deinit(gpa);
+    try sess.append(gpa, .user, "Start.");
+
+    const reply = try ag.run(gpa, &sess);
+    defer gpa.free(reply);
+    try std.testing.expectEqualStrings("ok", reply);
+
+    const expected = [_]std.meta.Tag(Event){
+        .thinking, .step, .running, .observation, // turn 1: allowed bash
+        .thinking, .step, .policy_deny, // turn 2: catastrophic bash denied
+        .thinking, .step, .final, // turn 3: final reply
+    };
+    try std.testing.expectEqual(expected.len, capture.count);
+    try std.testing.expectEqualSlices(std.meta.Tag(Event), &expected, capture.tags[0..capture.count]);
+    try std.testing.expectEqual(Action.bash, capture.deny_action.?);
+    try std.testing.expectEqual(@as(u32, 3), capture.final_turn);
 }
 
 test "run: max_turns returns MaxTurnsExceeded" {
