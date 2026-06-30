@@ -109,6 +109,7 @@ cp book/site-index.html site/index.html
 | `src/audit.zig` | JSONL audit events |
 | `src/policy.zig` | Execution policy gate and path/network guardrails |
 | `src/policy_hook.zig` | Opt-in external PreToolUse policy hook consulted after built-in checks (tighten-only, fail-closed) |
+| `src/audit_hook.zig` | Opt-in external PostToolUse audit/observability hook fired after an action (purely observational, never gates) |
 | `src/tools/*.zig` | Built-in tools, MCP client, Wasm runner shim, and execution sandbox |
 | `src/wasm_*.zig` | Optional standalone `scoot-wasm` host/engine support; not linked into the core binary unless requested |
 | `src/edge_main.zig` | Optional standalone `scoot-edge` fleet companion; disabled by default and not linked into the core binary |

@@ -83,6 +83,7 @@ cp book/site-index.html site/index.html
 | `src/audit.zig` | 审计日志 |
 | `src/policy.zig` | 执行策略门与路径/网络护栏 |
 | `src/policy_hook.zig` | 可选的外部 PreToolUse 策略钩子，在内建检查之后被咨询（只收紧、fail-closed） |
+| `src/audit_hook.zig` | 可选的外部 PostToolUse 审计/可观测性钩子，在动作完成后触发（纯观察、不参与门控） |
 | `src/tools/*.zig` | 执行沙盒：bash / file / search / http / MCP client / Wasm runner shim |
 | `src/wasm_*.zig` | 可选独立 `scoot-wasm` host/engine 支撑；除显式构建外不链接进核心二进制 |
 | `src/edge_main.zig` | 可选独立 `scoot-edge` 舰队伴生程序；默认关闭且不链接进核心二进制 |
