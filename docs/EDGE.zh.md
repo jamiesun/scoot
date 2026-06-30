@@ -2,7 +2,7 @@
 
 English version: [EDGE.md](EDGE.md)
 
-状态：**E1 实现已启动。** E0 边界已经签字，当前已有一个独立、显式 opt-in 的 `scoot-edge` 骨架，需通过 `zig build -Dedge=true` 构建。它可以在本地生成一次仅报告态的 status 心跳，也可以用逐节点 bearer token 把该心跳 `post-once` 到 HTTPS endpoint。一个刻意命名的 `--allow-insecure-http` 开关只用于本地 / dev loopback 环境对接纯 HTTP center；即便带上该开关，非 loopback 的 `http://` URL 也会被拒绝，生产仍保持 HTTPS-only。audit 正文搬运与 E2 任务派发仍然刻意未实现，并继续受下方前置条件门控。
+状态：**E1 已基本实现。** E0 边界已经签字，当前已有一个独立、显式 opt-in 的 `scoot-edge` 伴生程序，需通过 `zig build -Dedge=true` 构建。它可以在本地生成一次仅报告态的 status 心跳，用逐节点 bearer token 把该心跳 `post-once` 到 HTTPS endpoint，并能以 **`run` 持续心跳循环**按固定间隔向外拨出上报：遇到瞬时失败时采用有界的抖动退避（绝不让循环崩溃，也绝不开启监听端口）。心跳还可携带一个**显式 opt-in、仅作建议的 `node` 能力描述符**（`--report-capabilities`），供能力感知路由使用。一个刻意命名的 `--allow-insecure-http` 开关只用于本地 / dev loopback 环境对接纯 HTTP center；即便带上该开关，非 loopback 的 `http://` URL 也会被拒绝，生产仍保持 HTTPS-only。audit 正文搬运与 E2 任务派发仍然刻意未实现，并继续受下方前置条件门控。
 
 ## 一句话讲明白
 
@@ -227,6 +227,6 @@ edge **只经公共发射接口与只读日志**驱动 Scoot。它不得 import 
 ## 阶段划分
 
 - **E0：** 本边界文档（双语）+ ROADMAP 修订 + 授权模型签字。**已在写代码前完成。**
-- **E1：** `scoot-edge` 骨架（独立构建目标，默认关闭）+ 经 HTTPS 的 `status` 心跳。第一片已实现为 `zig build -Dedge=true`：`scoot-edge status` 通过 `scoot daemon status --json` 采集状态并打印一条 NDJSON status envelope；`scoot-edge post-once` 使用环境变量中的 bearer token，把该 envelope 发到调用者提供的 HTTPS endpoint（`--allow-insecure-http` 仅用于本地 / dev loopback HTTP center 测试）。audit 日志搬运在 **E1 内部延后**，直到前置 #3（对 shipping 感知的轮转）落地；在此之前 E1 只搬运计数、不搬正文，且 `edge.ship_audit` 默认关闭。一个 opt-in 的 `node` 能力描述符（`edge.report_capabilities`，默认关闭）可搭车心跳上报，供日后能力感知路由使用。
+- **E1：** `scoot-edge` 骨架（独立构建目标，默认关闭）+ 经 HTTPS 的 `status` 心跳。已实现为 `zig build -Dedge=true`：`scoot-edge status` 通过 `scoot daemon status --json` 采集状态并打印一条 NDJSON status envelope；`scoot-edge post-once` 使用环境变量中的 bearer token，把该 envelope 发到调用者提供的 HTTPS endpoint；`scoot-edge run` 则按 `--interval-ms` 周期重复该 POST 直到被停止，遇到瞬时失败时采用有界的抖动指数退避，并提供可选的 `--max-posts` 上限用于受监管 / 有界运行（`--allow-insecure-http` 仅用于本地 / dev loopback HTTP center 测试）。audit 日志搬运在 **E1 内部延后**，直到前置 #3（对 shipping 感知的轮转）落地；在此之前 E1 只搬运计数、不搬正文，且 `edge.ship_audit` 默认关闭。显式 opt-in 的 `node` 能力描述符（`--report-capabilities`，默认关闭；由 `--label` / `--skill` 及 `SCOOT_EDGE_LABELS` / `SCOOT_EDGE_SKILLS` 环境变量填充）可搭车心跳上报，供日后能力感知路由使用——仅作建议，绝不构成授权。
 - **E2：** 在显式 config + 策略天花板 + provenance 审计之后，做 schema 化、幂等的任务派发。**硬门控于前置 #2**（子进程内的无人值守策略钳制）与 cwd confinement（`edge.job_root`）。edge 任务默认 `readonly`；唯一的抬高是本地 `edge.max_job_policy = unrestricted`。能力感知路由消费 E1 的 `node` 描述符；节点无法满足的任务以 `no_matching_capability` 被拒。
 - **E3：** 打包（install 脚本 opt-in、Homebrew、apt）与重连 / 反压加固。

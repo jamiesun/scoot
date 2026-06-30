@@ -2,14 +2,18 @@
 
 Chinese version: [EDGE.zh.md](EDGE.zh.md)
 
-Status: **E1 implementation started.** The E0 boundary has been signed off and a
-standalone, opt-in `scoot-edge` skeleton now exists behind `zig build -Dedge=true`.
-It can emit one report-only status heartbeat locally and can `post-once` that
-heartbeat to an HTTPS endpoint with a per-node bearer token. A deliberately
-named `--allow-insecure-http` switch exists only for local/dev loopback testing
-against a plain-HTTP center; non-loopback HTTP is rejected even with the switch,
-and production remains HTTPS-only. Audit-body shipping and E2 job dispatch remain
-intentionally unimplemented and gated by the prerequisites below.
+Status: **E1 substantially implemented.** The E0 boundary has been signed off and a
+standalone, opt-in `scoot-edge` companion now exists behind `zig build -Dedge=true`.
+It can emit one report-only status heartbeat locally, `post-once` that heartbeat to
+an HTTPS endpoint with a per-node bearer token, and **`run` a continuous heartbeat
+loop** that dials out on a fixed interval with bounded jittered backoff on transient
+failure (never crashing the loop, never opening a listener). The heartbeat can carry
+an **opt-in, advisory `node` capability descriptor** (`--report-capabilities`) for
+capability-aware routing. A deliberately named `--allow-insecure-http` switch exists
+only for local/dev loopback testing against a plain-HTTP center; non-loopback HTTP is
+rejected even with the switch, and production remains HTTPS-only. Audit-body shipping
+and E2 job dispatch remain intentionally unimplemented and gated by the prerequisites
+below.
 
 ## The idea in plain terms
 
@@ -372,16 +376,19 @@ separate, independently-useful core changes, but E1/E2 are gated on them.
 - **E0:** this boundary doc (bilingual) + roadmap amendment + authority-model
   sign-off. **Completed before code.**
 - **E1:** `scoot-edge` skeleton (separate build target, default off) + `status`
-  heartbeat over HTTPS. The first slice is implemented as `zig build -Dedge=true`:
-  `scoot-edge status` prints one NDJSON status envelope gathered through
-  `scoot daemon status --json`, and `scoot-edge post-once` sends that envelope to a
-  caller-provided HTTPS endpoint using a bearer token from an environment variable
-  (`--allow-insecure-http` is available only for local/dev loopback HTTP center testing).
-  Audit-log shipping is **deferred within E1** until prerequisite #3
-  (shipping-aware rotation) lands; until then E1 ships counts, not bodies, and
-  `edge.ship_audit` is off by default. An opt-in `node` capability descriptor
-  (`edge.report_capabilities`, off by default) may ride the heartbeat for later
-  capability-aware routing.
+  heartbeat over HTTPS. Implemented as `zig build -Dedge=true`: `scoot-edge status`
+  prints one NDJSON status envelope gathered through `scoot daemon status --json`;
+  `scoot-edge post-once` sends that envelope to a caller-provided HTTPS endpoint
+  using a bearer token from an environment variable; and `scoot-edge run` repeats
+  that POST on a `--interval-ms` cadence until stopped, with a bounded jittered
+  exponential backoff on transient failure and an optional `--max-posts` bound for
+  supervised/bounded runs (`--allow-insecure-http` is available only for local/dev
+  loopback HTTP center testing). Audit-log shipping is **deferred within E1** until
+  prerequisite #3 (shipping-aware rotation) lands; until then E1 ships counts, not
+  bodies, and `edge.ship_audit` is off by default. The opt-in `node` capability
+  descriptor (`--report-capabilities`, off by default; `--label` / `--skill` and the
+  `SCOOT_EDGE_LABELS` / `SCOOT_EDGE_SKILLS` env vars feed it) may ride the heartbeat
+  for later capability-aware routing — advisory only, never authority.
 - **E2:** schema'd, idempotent job dispatch behind explicit config + policy ceiling +
   provenance auditing. **Hard-gated on prerequisite #2** (the in-child unattended
   policy clamp) and on cwd confinement (`edge.job_root`). Edge jobs default

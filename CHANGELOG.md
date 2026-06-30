@@ -16,6 +16,19 @@ heading when cutting a release.
 
 ## [Unreleased]
 
+### Added
+
+- `scoot-edge` (E1) gains a continuous **`run` heartbeat loop**: it dials out and
+  POSTs a status heartbeat on a `--interval-ms` cadence until stopped, with a
+  bounded jittered exponential backoff on transient failure (the loop never
+  crashes and never opens a listener) and an optional `--max-posts` bound for
+  supervised/bounded runs. Each iteration uses a reset-per-post arena so an
+  unbounded run holds bounded memory. The heartbeat can also carry an opt-in,
+  advisory **`node` capability descriptor** (`--report-capabilities`, off by
+  default; `--label` / `--skill` plus `SCOOT_EDGE_LABELS` / `SCOOT_EDGE_SKILLS`
+  feed it) for capability-aware routing — advertising never grants authority, the
+  local policy ceiling still gates every job.
+
 ## [0.6.0] - 2026-06-30
 
 ### Added

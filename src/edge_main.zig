@@ -4,36 +4,66 @@
 //! import `src/internal.zig` and does not link into the core `scoot` executable.
 //! It drives Scoot only through public process interfaces such as
 //! `scoot daemon status --json`.
+//!
+//! E1 capabilities: one-shot `status` / `post-once`, plus a continuous `run`
+//! heartbeat loop (periodic dial-out POST with bounded jittered backoff) and an
+//! opt-in, advisory `node` capability descriptor for capability-aware routing.
+//! The loop never opens a listener and only ever reports up.
 const std = @import("std");
+const builtin = @import("builtin");
 const build_options = @import("build_options");
 const proc = @import("tools/proc.zig");
 
 const usage =
-    \\scoot-edge - optional report-only Scoot fleet messenger (E1 skeleton)
+    \\scoot-edge - optional report-only Scoot fleet messenger (E1)
     \\
     \\Usage:
     \\  scoot-edge status [options]      print one status heartbeat envelope as NDJSON
     \\  scoot-edge post-once [options]   POST one status heartbeat to an HTTPS endpoint
+    \\  scoot-edge run [options]         POST a status heartbeat on a fixed interval until stopped
     \\
     \\Options:
     \\  --node-id <id>          stable node id (default: hostname when available, else "local")
     \\  --scoot-bin <path>      scoot executable to launch (default: scoot)
     \\  --scoot-home <dir>      pass --scoot-home to the child scoot process
-    \\  --center-url <https>    exact HTTPS telemetry endpoint for post-once
+    \\  --center-url <https>    exact HTTPS telemetry endpoint for post-once/run
     \\  --token-env <name>      env var containing the per-node bearer token (default: SCOOT_EDGE_TOKEN)
-    \\  --timeout-ms <N>        hard timeout for child/network operations (default: 30000)
+    \\  --timeout-ms <N>        hard timeout for each child/network operation (default: 30000)
+    \\  --interval-ms <N>       run: delay between heartbeats (default: 60000)
+    \\  --max-posts <N>         run: stop after N successful heartbeats (default: 0 = unlimited)
+    \\  --report-capabilities   attach an advisory node capability descriptor to the heartbeat (default: off)
+    \\  --label <k:v>           operator routing label for the node descriptor (repeatable; also SCOOT_EDGE_LABELS)
+    \\  --skill <name>          advertised skill name for the node descriptor (repeatable; also SCOOT_EDGE_SKILLS)
     \\  --allow-insecure-http   allow http:// loopback center URLs for local/dev testing only
     \\  -h, --help             show this help
     \\  -v, --version          show version
     \\
-    \\No outbound network happens in `status`; `post-once` requires HTTPS and a non-empty token
-    \\unless --allow-insecure-http is explicitly set for local/dev loopback testing.
+    \\No outbound network happens in `status`; `post-once` and `run` require HTTPS and a non-empty
+    \\token unless --allow-insecure-http is explicitly set for local/dev loopback testing.
+    \\`run` dials out only — it never opens a listener — and reports up only; a supervisor
+    \\(systemd/launchd) stop signal is the normal way to halt an unbounded loop.
     \\
 ;
 
-const Command = enum { status, post_once };
+const Command = enum { status, post_once, run };
 
 const default_timeout_ms: u64 = 30_000;
+const default_interval_ms: u64 = 60_000;
+/// Upper bound for transient-failure backoff so a long outage cannot push the
+/// retry delay arbitrarily high.
+const max_backoff_ms: u64 = 900_000;
+/// Lower bound for transient-failure backoff. The steady-state interval is the
+/// backoff base, so a tiny (or `0`-normalized) interval must not collapse the
+/// retry delay to a busy-spin that hammers the center while it is down.
+const min_backoff_ms: u64 = 1_000;
+/// The center-dispatched job ceiling reported by the heartbeat. E2 job dispatch
+/// (and any local `edge.max_job_policy` knob) does not exist yet, so this is the
+/// documented default; advertising it never grants authority.
+const default_max_job_policy = "readonly";
+
+/// Advisory, readonly-aligned built-in actions a node declares it is "for". This
+/// is routing metadata only; the local policy ceiling still gates every job.
+const advisory_readonly_tools = [_][]const u8{ "file_read", "grep", "glob", "outline", "http_request" };
 
 const Options = struct {
     command: Command = .status,
@@ -43,6 +73,11 @@ const Options = struct {
     center_url: ?[]const u8 = null,
     token_env: []const u8 = "SCOOT_EDGE_TOKEN",
     timeout_ms: u64 = default_timeout_ms,
+    interval_ms: u64 = default_interval_ms,
+    max_posts: u64 = 0,
+    report_capabilities: bool = false,
+    labels: []const []const u8 = &.{},
+    skills: []const []const u8 = &.{},
     allow_insecure_http: bool = false,
 };
 
@@ -59,12 +94,29 @@ const AuditStats = struct {
     system_error: usize = 0,
 };
 
+const NodeCapabilities = struct {
+    max_job_policy: []const u8,
+    tools: []const []const u8,
+    skills: []const []const u8,
+};
+
+/// Opt-in, advisory node identity/capability descriptor (`--report-capabilities`).
+/// Declarative routing metadata only — advertising a capability never widens what
+/// the edge will execute; the local policy ceiling still gates every job.
+const NodeDescriptor = struct {
+    labels: []const []const u8,
+    os: []const u8,
+    arch: []const u8,
+    capabilities: NodeCapabilities,
+};
+
 const StatusBody = struct {
     scoot_version: []const u8,
     edge_version: []const u8,
     daemon: DaemonSummary,
     policy_ceiling: []const u8 = "readonly",
     audit_stats: AuditStats = .{},
+    node: ?NodeDescriptor = null,
 };
 
 const StatusEnvelope = struct {
@@ -117,36 +169,21 @@ pub fn main(init: std.process.Init) !void {
     defer err_out.flush() catch {};
 
     const args = try init.minimal.args.toSlice(arena);
-    const opts = parseArgs(out, args) catch |err| switch (err) {
+    const opts = parseArgs(arena, out, args) catch |err| switch (err) {
         error.HelpShown => return,
         else => return err,
     };
 
-    const envelope = try collectStatusEnvelope(arena, io, env, opts);
-    var payload: std.Io.Writer.Allocating = .init(arena);
-    try std.json.Stringify.value(envelope, .{}, &payload.writer);
-    try payload.writer.writeByte('\n');
-
     switch (opts.command) {
-        .status => try out.writeAll(payload.writer.buffered()),
+        .status => {
+            const envelope = try collectStatusEnvelope(arena, io, env, opts);
+            try out.writeAll(try stringifyEnvelope(arena, envelope));
+        },
         .post_once => {
-            const center_url = opts.center_url orelse {
-                try err_out.writeAll("error: post-once requires --center-url <https://...>\n");
-                die(err_out, 2);
-            };
-            if (!centerUrlAllowed(center_url, opts.allow_insecure_http)) {
-                try err_out.writeAll("error: --center-url must use https://; http:// is allowed only with --allow-insecure-http for local/dev loopback testing\n");
-                die(err_out, 2);
-            }
-            const token = env.get(opts.token_env) orelse {
-                try err_out.print("error: token env var {s} is not set or empty\n", .{opts.token_env});
-                die(err_out, 2);
-            };
-            if (token.len == 0) {
-                try err_out.print("error: token env var {s} is not set or empty\n", .{opts.token_env});
-                die(err_out, 2);
-            }
-            const res = try postJson(arena, io, center_url, token, payload.writer.buffered(), opts.timeout_ms);
+            const ca = try requireCenterAndToken(err_out, env, opts);
+            const envelope = try collectStatusEnvelope(arena, io, env, opts);
+            const payload = try stringifyEnvelope(arena, envelope);
+            const res = try postJson(arena, io, ca.url, ca.token, payload, opts.timeout_ms);
             if (res.timed_out) {
                 try err_out.writeAll("error: telemetry POST timed out\n");
                 die(err_out, 1);
@@ -161,17 +198,166 @@ pub fn main(init: std.process.Init) !void {
             }
             try out.print("posted status node_id={s} status={d}\n", .{ envelope.node_id, res.status });
         },
+        .run => try runLoop(io, env, opts, out, err_out),
     }
 }
 
-fn parseArgs(out: *std.Io.Writer, args: []const []const u8) !Options {
+/// Required HTTPS endpoint plus bearer token for any dial-out command. Exits with
+/// code 2 (a configuration error) when either is missing or insecure.
+const CenterAuth = struct { url: []const u8, token: []const u8 };
+
+fn requireCenterAndToken(
+    err_out: *std.Io.Writer,
+    env: *const std.process.Environ.Map,
+    opts: Options,
+) !CenterAuth {
+    const center_url = opts.center_url orelse {
+        try err_out.writeAll("error: this command requires --center-url <https://...>\n");
+        die(err_out, 2);
+    };
+    if (!centerUrlAllowed(center_url, opts.allow_insecure_http)) {
+        try err_out.writeAll("error: --center-url must use https://; http:// is allowed only with --allow-insecure-http for local/dev loopback testing\n");
+        die(err_out, 2);
+    }
+    const token = env.get(opts.token_env) orelse {
+        try err_out.print("error: token env var {s} is not set or empty\n", .{opts.token_env});
+        die(err_out, 2);
+    };
+    if (token.len == 0) {
+        try err_out.print("error: token env var {s} is not set or empty\n", .{opts.token_env});
+        die(err_out, 2);
+    }
+    return .{ .url = center_url, .token = token };
+}
+
+fn stringifyEnvelope(arena: std.mem.Allocator, envelope: StatusEnvelope) ![]const u8 {
+    var payload: std.Io.Writer.Allocating = .init(arena);
+    // Omit null optionals so a bare heartbeat (no `node` descriptor) stays byte-identical.
+    try std.json.Stringify.value(envelope, .{ .emit_null_optional_fields = false }, &payload.writer);
+    try payload.writer.writeByte('\n');
+    return payload.writer.buffered();
+}
+
+/// Continuous report-only heartbeat loop. Each iteration uses a per-turn arena
+/// that is reset between posts, so an unbounded run holds bounded memory. A
+/// transient failure (collection, encode, network, non-2xx) never aborts the
+/// loop: it is logged, the failure streak drives a bounded jittered backoff, and
+/// the loop continues. Only a supervisor stop signal halts an unbounded run.
+fn runLoop(
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+    opts: Options,
+    out: *std.Io.Writer,
+    err_out: *std.Io.Writer,
+) !void {
+    const ca = try requireCenterAndToken(err_out, env, opts);
+
+    var iter_arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
+    defer iter_arena_state.deinit();
+
+    var prng = std.Random.DefaultPrng.init(@bitCast(std.Io.Timestamp.now(io, .real).toMilliseconds()));
+    const rand = prng.random();
+
+    var successes: u64 = 0;
+    var fail_streak: u32 = 0;
+    while (true) {
+        _ = iter_arena_state.reset(.retain_capacity);
+        const iter = iter_arena_state.allocator();
+
+        const failed = postOneHeartbeat(iter, io, env, opts, ca, out, err_out) catch |e| blk: {
+            try err_out.print("warn: heartbeat failed: {s}; will retry\n", .{@errorName(e)});
+            break :blk true;
+        };
+        out.flush() catch {};
+        err_out.flush() catch {};
+
+        if (failed) {
+            fail_streak +|= 1;
+        } else {
+            fail_streak = 0;
+            successes += 1;
+            if (opts.max_posts != 0 and successes >= opts.max_posts) break;
+        }
+
+        const wait_ms = if (fail_streak == 0)
+            opts.interval_ms
+        else
+            jitteredBackoffMs(rand, fail_streak, opts.interval_ms);
+        sleepDeadline(io, wait_ms);
+    }
+}
+
+/// Collects and posts one heartbeat. Returns `true` on a transient (retryable)
+/// failure and `false` on success. Only genuinely unexpected errors propagate.
+fn postOneHeartbeat(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+    opts: Options,
+    ca: CenterAuth,
+    out: *std.Io.Writer,
+    err_out: *std.Io.Writer,
+) !bool {
+    const envelope = collectStatusEnvelope(arena, io, env, opts) catch |e| {
+        try err_out.print("warn: heartbeat collection failed: {s}; will retry\n", .{@errorName(e)});
+        return true;
+    };
+    const payload = try stringifyEnvelope(arena, envelope);
+    const res = postJson(arena, io, ca.url, ca.token, payload, opts.timeout_ms) catch |e| {
+        try err_out.print("warn: heartbeat POST failed: {s}; will retry\n", .{@errorName(e)});
+        return true;
+    };
+    if (res.timed_out) {
+        try err_out.writeAll("warn: heartbeat POST timed out; will retry\n");
+        return true;
+    }
+    if (res.err) |e| {
+        try err_out.print("warn: heartbeat POST failed: {s}; will retry\n", .{e});
+        return true;
+    }
+    if (res.status < 200 or res.status >= 300) {
+        try err_out.print("warn: heartbeat POST returned HTTP {d}; will retry\n", .{res.status});
+        return true;
+    }
+    try out.print("posted status node_id={s} status={d}\n", .{ envelope.node_id, res.status });
+    return false;
+}
+
+/// Monotonic, overflow-safe exponential backoff ceiling for a 1-based attempt:
+/// attempt 1 -> base, attempt 2 -> 2*base, ... clamped to `cap_ms`.
+fn backoffCeilingMs(attempt: u32, base_ms: u64, cap_ms: u64) u64 {
+    var v = @min(base_ms, cap_ms);
+    var i: u32 = 1;
+    while (i < attempt) : (i += 1) {
+        if (v >= cap_ms) return cap_ms;
+        v = if (v > cap_ms / 2) cap_ms else v * 2;
+    }
+    return v;
+}
+
+/// Full-jitter delay in `[min(base, ceiling), ceiling]` to avoid synchronized
+/// fleet-wide retry storms against the center. The base is floored at
+/// `min_backoff_ms` so a tiny steady-state interval still backs off on failure.
+fn jitteredBackoffMs(rand: std.Random, attempt: u32, base_ms: u64) u64 {
+    const effective_base = @max(base_ms, min_backoff_ms);
+    const ceiling = backoffCeilingMs(attempt, effective_base, max_backoff_ms);
+    const floor = @min(effective_base, ceiling);
+    if (ceiling <= floor) return ceiling;
+    return floor + rand.uintLessThan(u64, ceiling - floor + 1);
+}
+
+fn parseArgs(arena: std.mem.Allocator, out: *std.Io.Writer, args: []const []const u8) !Options {
     var opts: Options = .{};
+    var labels: std.ArrayList([]const u8) = .empty;
+    var skills: std.ArrayList([]const u8) = .empty;
     var i: usize = 1;
     if (i < args.len and !std.mem.startsWith(u8, args[i], "-")) {
         if (std.mem.eql(u8, args[i], "status")) {
             opts.command = .status;
         } else if (std.mem.eql(u8, args[i], "post-once")) {
             opts.command = .post_once;
+        } else if (std.mem.eql(u8, args[i], "run")) {
+            opts.command = .run;
         } else {
             try out.print("error: unknown command '{s}'\n\n", .{args[i]});
             try out.writeAll(usage);
@@ -198,11 +384,20 @@ fn parseArgs(out: *std.Io.Writer, args: []const []const u8) !Options {
         } else if (std.mem.eql(u8, arg, "--token-env")) {
             opts.token_env = try nextArg(out, args, &i, arg);
         } else if (std.mem.eql(u8, arg, "--timeout-ms")) {
-            const raw = try nextArg(out, args, &i, arg);
-            opts.timeout_ms = std.fmt.parseInt(u64, raw, 10) catch {
-                try out.print("error: --timeout-ms must be a non-negative integer: '{s}'\n", .{raw});
-                die(out, 2);
-            };
+            opts.timeout_ms = try parseU64Arg(out, args, &i, arg);
+        } else if (std.mem.eql(u8, arg, "--interval-ms")) {
+            const parsed = try parseU64Arg(out, args, &i, arg);
+            // 0 means "use the default" (consistent with --timeout-ms); it also
+            // keeps the success-path loop from degenerating into a POST storm.
+            opts.interval_ms = if (parsed == 0) default_interval_ms else parsed;
+        } else if (std.mem.eql(u8, arg, "--max-posts")) {
+            opts.max_posts = try parseU64Arg(out, args, &i, arg);
+        } else if (std.mem.eql(u8, arg, "--report-capabilities")) {
+            opts.report_capabilities = true;
+        } else if (std.mem.eql(u8, arg, "--label")) {
+            try labels.append(arena, try nextArg(out, args, &i, arg));
+        } else if (std.mem.eql(u8, arg, "--skill")) {
+            try skills.append(arena, try nextArg(out, args, &i, arg));
         } else if (std.mem.eql(u8, arg, "--allow-insecure-http")) {
             opts.allow_insecure_http = true;
         } else {
@@ -211,7 +406,17 @@ fn parseArgs(out: *std.Io.Writer, args: []const []const u8) !Options {
             die(out, 2);
         }
     }
+    opts.labels = labels.items;
+    opts.skills = skills.items;
     return opts;
+}
+
+fn parseU64Arg(out: *std.Io.Writer, args: []const []const u8, i: *usize, name: []const u8) !u64 {
+    const raw = try nextArg(out, args, i, name);
+    return std.fmt.parseInt(u64, raw, 10) catch {
+        try out.print("error: {s} must be a non-negative integer: '{s}'\n", .{ name, raw });
+        die(out, 2);
+    };
 }
 
 fn nextArg(out: *std.Io.Writer, args: []const []const u8, i: *usize, name: []const u8) ![]const u8 {
@@ -239,8 +444,53 @@ fn collectStatusEnvelope(
             .scoot_version = scoot_version,
             .edge_version = build_options.version,
             .daemon = try summarizeDaemonStatus(arena, daemon_json),
+            .node = if (opts.report_capabilities)
+                try buildNodeDescriptor(arena, env, opts)
+            else
+                null,
         },
     };
+}
+
+fn buildNodeDescriptor(
+    arena: std.mem.Allocator,
+    env: *const std.process.Environ.Map,
+    opts: Options,
+) !NodeDescriptor {
+    const labels = try mergeCsv(arena, opts.labels, env.get("SCOOT_EDGE_LABELS"));
+    const skills = try mergeCsv(arena, opts.skills, env.get("SCOOT_EDGE_SKILLS"));
+    return nodeDescriptorFrom(labels, skills);
+}
+
+fn nodeDescriptorFrom(labels: []const []const u8, skills: []const []const u8) NodeDescriptor {
+    return .{
+        .labels = labels,
+        .os = @tagName(builtin.os.tag),
+        .arch = @tagName(builtin.cpu.arch),
+        .capabilities = .{
+            .max_job_policy = default_max_job_policy,
+            .tools = &advisory_readonly_tools,
+            .skills = skills,
+        },
+    };
+}
+
+/// Merges flag-provided values with an optional comma-separated env override,
+/// trimming and dropping empties. The result is advisory routing metadata.
+fn mergeCsv(arena: std.mem.Allocator, base: []const []const u8, csv: ?[]const u8) ![]const []const u8 {
+    var list: std.ArrayList([]const u8) = .empty;
+    for (base) |b| {
+        const t = std.mem.trim(u8, b, " \t");
+        if (t.len != 0) try list.append(arena, t);
+    }
+    if (csv) |raw| {
+        var it = std.mem.splitScalar(u8, raw, ',');
+        while (it.next()) |part| {
+            const t = std.mem.trim(u8, part, " \t");
+            if (t.len != 0) try list.append(arena, t);
+        }
+    }
+    return list.items;
 }
 
 fn runScootDaemonStatus(arena: std.mem.Allocator, io: std.Io, opts: Options) ![]const u8 {
@@ -468,6 +718,114 @@ test "post-once requires HTTPS or explicitly insecure loopback URL" {
     try std.testing.expect(!centerUrlAllowed("http://center.example/telemetry", true));
     try std.testing.expect(!centerUrlAllowed("http://10.0.0.5/telemetry", true));
     try std.testing.expect(!centerUrlAllowed("ftp://center.example/telemetry", true));
+}
+
+test "backoffCeilingMs grows exponentially and clamps to the cap" {
+    try std.testing.expectEqual(@as(u64, 1000), backoffCeilingMs(1, 1000, 60_000));
+    try std.testing.expectEqual(@as(u64, 2000), backoffCeilingMs(2, 1000, 60_000));
+    try std.testing.expectEqual(@as(u64, 4000), backoffCeilingMs(3, 1000, 60_000));
+    try std.testing.expectEqual(@as(u64, 8000), backoffCeilingMs(4, 1000, 60_000));
+    // Eventually clamps to the cap and never exceeds it.
+    try std.testing.expectEqual(@as(u64, 60_000), backoffCeilingMs(20, 1000, 60_000));
+    try std.testing.expectEqual(@as(u64, 60_000), backoffCeilingMs(1000, 1000, 60_000));
+    // attempt 0 degrades to the (capped) base without underflowing.
+    try std.testing.expectEqual(@as(u64, 1000), backoffCeilingMs(0, 1000, 60_000));
+    // A base already above the cap is clamped immediately.
+    try std.testing.expectEqual(@as(u64, 5000), backoffCeilingMs(3, 9999, 5000));
+}
+
+test "jitteredBackoffMs stays within [base, ceiling] for every attempt" {
+    var prng = std.Random.DefaultPrng.init(0xED9E_5EED);
+    const rand = prng.random();
+    var attempt: u32 = 1;
+    while (attempt <= 40) : (attempt += 1) {
+        const ceiling = backoffCeilingMs(attempt, 1000, max_backoff_ms);
+        var trial: usize = 0;
+        while (trial < 64) : (trial += 1) {
+            const wait = jitteredBackoffMs(rand, attempt, 1000);
+            try std.testing.expect(wait >= @min(@as(u64, 1000), ceiling));
+            try std.testing.expect(wait <= ceiling);
+        }
+    }
+}
+
+test "jitteredBackoffMs floors a zero/tiny base so failures never busy-spin" {
+    var prng = std.Random.DefaultPrng.init(0xB16B_00B5);
+    const rand = prng.random();
+    // A 0 base (e.g. an un-normalized interval) must still back off, not spin.
+    var attempt: u32 = 1;
+    while (attempt <= 8) : (attempt += 1) {
+        try std.testing.expect(jitteredBackoffMs(rand, attempt, 0) >= min_backoff_ms);
+        try std.testing.expect(jitteredBackoffMs(rand, attempt, 1) >= min_backoff_ms);
+    }
+}
+
+test "mergeCsv combines flags and env, trims, and drops empties" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const base = [_][]const u8{ "role:db", "  ", "env:prod" };
+    const merged = try mergeCsv(arena, &base, " focus:log-triage , , extra ");
+    try std.testing.expectEqual(@as(usize, 4), merged.len);
+    try std.testing.expectEqualStrings("role:db", merged[0]);
+    try std.testing.expectEqualStrings("env:prod", merged[1]);
+    try std.testing.expectEqualStrings("focus:log-triage", merged[2]);
+    try std.testing.expectEqualStrings("extra", merged[3]);
+
+    const none = try mergeCsv(arena, &.{}, null);
+    try std.testing.expectEqual(@as(usize, 0), none.len);
+}
+
+test "nodeDescriptorFrom is advisory: readonly ceiling, derived os/arch, declared tools" {
+    const labels = [_][]const u8{"role:db"};
+    const skills = [_][]const u8{"log-triage"};
+    const node = nodeDescriptorFrom(&labels, &skills);
+    try std.testing.expectEqualStrings("readonly", node.capabilities.max_job_policy);
+    try std.testing.expect(node.os.len != 0);
+    try std.testing.expect(node.arch.len != 0);
+    try std.testing.expectEqualStrings("file_read", node.capabilities.tools[0]);
+    try std.testing.expectEqualStrings("role:db", node.labels[0]);
+    try std.testing.expectEqualStrings("log-triage", node.capabilities.skills[0]);
+}
+
+test "parseArgs accepts the run command with loop and capability flags" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    const out = &aw.writer;
+
+    const args = [_][]const u8{
+        "scoot-edge",                       "run",
+        "--interval-ms",                    "1500",
+        "--max-posts",                      "3",
+        "--report-capabilities",            "--label",
+        "role:db",                          "--skill",
+        "log-triage",                       "--center-url",
+        "https://center.example/telemetry",
+    };
+    const opts = try parseArgs(arena, out, &args);
+    try std.testing.expectEqual(Command.run, opts.command);
+    try std.testing.expectEqual(@as(u64, 1500), opts.interval_ms);
+    try std.testing.expectEqual(@as(u64, 3), opts.max_posts);
+    try std.testing.expect(opts.report_capabilities);
+    try std.testing.expectEqual(@as(usize, 1), opts.labels.len);
+    try std.testing.expectEqualStrings("role:db", opts.labels[0]);
+    try std.testing.expectEqual(@as(usize, 1), opts.skills.len);
+    try std.testing.expectEqualStrings("log-triage", opts.skills[0]);
+}
+
+test "parseArgs normalizes --interval-ms 0 to the default interval" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    const out = &aw.writer;
+
+    const args = [_][]const u8{ "scoot-edge", "run", "--interval-ms", "0" };
+    const opts = try parseArgs(arena, out, &args);
+    try std.testing.expectEqual(default_interval_ms, opts.interval_ms);
 }
 
 test {
