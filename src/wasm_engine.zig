@@ -2137,22 +2137,28 @@ pub const Instance = struct {
             self.setTrap("invalid conversion to integer");
             return error.BadConversion;
         }
+        // Truncate toward zero first, then range-check the integral result.
+        // Checking `x` directly would wrongly trap fractional values just past a
+        // boundary (e.g. i32.trunc_f64_s(-2147483648.9) truncates to the valid
+        // -2147483648), since such values lie outside [minInt, maxInt] as reals
+        // but inside it after truncation.
+        const t = @trunc(x);
         const info = @typeInfo(I).int;
         if (info.signedness == .signed) {
             const min_f: F = @floatFromInt(std.math.minInt(I));
             const lim_f: F = -min_f; // 2^(bits-1), exactly representable
-            if (!(x >= min_f and x < lim_f)) {
+            if (!(t >= min_f and t < lim_f)) {
                 self.setTrap("integer overflow");
                 return error.IntOverflow;
             }
         } else {
             const lim_f: F = @floatFromInt(@as(u128, 1) << info.bits); // 2^bits
-            if (!(x > -1.0 and x < lim_f)) {
+            if (!(t > -1.0 and t < lim_f)) {
                 self.setTrap("integer overflow");
                 return error.IntOverflow;
             }
         }
-        return @intFromFloat(@trunc(x));
+        return @intFromFloat(t);
     }
 
     fn miscOp(self: *Instance, body: []const u8, pc: *usize) Trap!void {

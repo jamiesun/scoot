@@ -18,6 +18,14 @@ heading when cutting a release.
 
 ### Added
 
+- **WebAssembly spec conformance tests** for the bundled `scoot-wasm` engine. A
+  curated subset of the official WebAssembly/testsuite (pinned at revision
+  `193e551f`) is converted offline with `wast2json` and committed under
+  `test/wasm-spec/`, then replayed against the engine by an always-run
+  `zig build test` target. The core stays zero-dependency (fixtures are embedded
+  via `@embedFile`; no toolchain needed at test time). See
+  [`docs/WASM_TOOLS.md`](docs/WASM_TOOLS.md#spec-conformance-testing) for the
+  included/excluded coverage and how to regenerate (#163).
 - Opt-in PostToolUse-style **audit/observability hook** (`[audit.hook]`). After a
   tool action completes (executed or policy-denied), an external Wasm package
   (manifest kind `audit`, compute-only) receives a structured JSON event for an
@@ -34,6 +42,14 @@ heading when cutting a release.
   it — allow→deny only, never relaxing a built-in deny. Fail-closed on any
   failure/timeout/invalid output, audited, and reflected by `scoot policy check`.
   Default off (#136).
+
+### Fixed
+
+- `scoot-wasm`: `iNN.trunc_fMM_s/u` no longer traps on fractional inputs whose
+  truncated (toward-zero) integral value is in range — e.g.
+  `i32.trunc_f64_s(-2147483648.9)`. The range check now runs after truncation
+  instead of against the raw operand, matching the spec (surfaced by the new
+  conformance suite, #163).
 
 ## [0.5.0] - 2026-06-27
 
