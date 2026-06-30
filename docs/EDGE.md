@@ -383,7 +383,11 @@ separate, independently-useful core changes, but E1/E2 are gated on them.
   that POST on a `--interval-ms` cadence until stopped, with a bounded jittered
   exponential backoff on transient failure and an optional `--max-posts` bound for
   supervised/bounded runs (`--allow-insecure-http` is available only for local/dev
-  loopback HTTP center testing). Audit-log shipping is **deferred within E1** until
+  loopback HTTP center testing). `run` shuts down cleanly (exit `0`) on SIGINT/SIGTERM
+  after finishing the in-flight heartbeat, so a systemd/launchd stop is graceful rather
+  than a hard kill; one-shot commands use stable exit codes (`0` ok, `1` dial-out POST
+  failed, `2` config/usage error, `3` local-status collection failed). Audit-log shipping
+  is **deferred within E1** until
   prerequisite #3 (shipping-aware rotation) lands; until then E1 ships counts, not
   bodies, and `edge.ship_audit` is off by default. The opt-in `node` capability
   descriptor (`--report-capabilities`, off by default; `--label` / `--skill` and the

@@ -28,6 +28,12 @@ heading when cutting a release.
   default; `--label` / `--skill` plus `SCOOT_EDGE_LABELS` / `SCOOT_EDGE_SKILLS`
   feed it) for capability-aware routing — advertising never grants authority, the
   local policy ceiling still gates every job.
+- `scoot-edge run` now shuts down **gracefully** on `SIGINT`/`SIGTERM`: it finishes
+  the in-flight heartbeat, then exits `0` instead of being hard-killed, making it a
+  well-behaved systemd/launchd service. One-shot commands gained **stable, documented
+  exit codes** (`0` success, `1` dial-out POST failed, `2` config/usage error, `3`
+  local-status collection failed), so a failed/missing `scoot daemon status --json`
+  child now prints a clean message instead of a raw error trace.
 
 ## [0.6.0] - 2026-06-30
 
