@@ -8,7 +8,8 @@
 //! E1 capabilities: one-shot `status` / `post-once`, plus a continuous `run`
 //! heartbeat loop (periodic dial-out POST with bounded jittered backoff) and an
 //! opt-in, advisory `node` capability descriptor for capability-aware routing.
-//! The loop never opens a listener and only ever reports up.
+//! The loop never opens a listener, only ever reports up, and shuts down cleanly
+//! (exit 0) on SIGINT/SIGTERM so it is a well-behaved systemd/launchd service.
 const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
@@ -40,8 +41,15 @@ const usage =
     \\
     \\No outbound network happens in `status`; `post-once` and `run` require HTTPS and a non-empty
     \\token unless --allow-insecure-http is explicitly set for local/dev loopback testing.
-    \\`run` dials out only — it never opens a listener — and reports up only; a supervisor
-    \\(systemd/launchd) stop signal is the normal way to halt an unbounded loop.
+    \\`run` dials out only — it never opens a listener — and reports up only. It shuts down
+    \\cleanly (exit 0) on SIGINT/SIGTERM, finishing the in-flight heartbeat first, so a supervisor
+    \\(systemd/launchd) stop is graceful rather than a hard kill.
+    \\
+    \\Exit codes:
+    \\  0  success (or a clean SIGINT/SIGTERM shutdown of `run`)
+    \\  1  dial-out POST failed in post-once (network error, timeout, or non-2xx)
+    \\  2  configuration/usage error (bad flag, or missing/invalid --center-url or token)
+    \\  3  could not collect local status (the `scoot daemon status --json` child failed)
     \\
 ;
 
@@ -60,6 +68,13 @@ const min_backoff_ms: u64 = 1_000;
 /// (and any local `edge.max_job_policy` knob) does not exist yet, so this is the
 /// documented default; advertising it never grants authority.
 const default_max_job_policy = "readonly";
+
+/// Stable process exit codes, documented in `usage` and EDGE.md so supervisors
+/// and scripts can branch on them. `0` is success (including a clean `run`
+/// shutdown on SIGINT/SIGTERM).
+const exit_post_failed: u8 = 1;
+const exit_config_error: u8 = 2;
+const exit_collect_failed: u8 = 3;
 
 /// Advisory, readonly-aligned built-in actions a node declares it is "for". This
 /// is routing metadata only; the local policy ceiling still gates every job.
@@ -176,25 +191,25 @@ pub fn main(init: std.process.Init) !void {
 
     switch (opts.command) {
         .status => {
-            const envelope = try collectStatusEnvelope(arena, io, env, opts);
+            const envelope = try collectOrDie(arena, io, env, opts, err_out);
             try out.writeAll(try stringifyEnvelope(arena, envelope));
         },
         .post_once => {
             const ca = try requireCenterAndToken(err_out, env, opts);
-            const envelope = try collectStatusEnvelope(arena, io, env, opts);
+            const envelope = try collectOrDie(arena, io, env, opts, err_out);
             const payload = try stringifyEnvelope(arena, envelope);
             const res = try postJson(arena, io, ca.url, ca.token, payload, opts.timeout_ms);
             if (res.timed_out) {
                 try err_out.writeAll("error: telemetry POST timed out\n");
-                die(err_out, 1);
+                die(err_out, exit_post_failed);
             }
             if (res.err) |e| {
                 try err_out.print("error: telemetry POST failed: {s}\n", .{e});
-                die(err_out, 1);
+                die(err_out, exit_post_failed);
             }
             if (res.status < 200 or res.status >= 300) {
                 try err_out.print("error: telemetry POST returned HTTP {d}\n", .{res.status});
-                die(err_out, 1);
+                die(err_out, exit_post_failed);
             }
             try out.print("posted status node_id={s} status={d}\n", .{ envelope.node_id, res.status });
         },
@@ -213,21 +228,85 @@ fn requireCenterAndToken(
 ) !CenterAuth {
     const center_url = opts.center_url orelse {
         try err_out.writeAll("error: this command requires --center-url <https://...>\n");
-        die(err_out, 2);
+        die(err_out, exit_config_error);
     };
     if (!centerUrlAllowed(center_url, opts.allow_insecure_http)) {
         try err_out.writeAll("error: --center-url must use https://; http:// is allowed only with --allow-insecure-http for local/dev loopback testing\n");
-        die(err_out, 2);
+        die(err_out, exit_config_error);
     }
     const token = env.get(opts.token_env) orelse {
         try err_out.print("error: token env var {s} is not set or empty\n", .{opts.token_env});
-        die(err_out, 2);
+        die(err_out, exit_config_error);
     };
     if (token.len == 0) {
         try err_out.print("error: token env var {s} is not set or empty\n", .{opts.token_env});
-        die(err_out, 2);
+        die(err_out, exit_config_error);
     }
     return .{ .url = center_url, .token = token };
+}
+
+/// Collects the local status envelope for a one-shot command, translating a
+/// failed/timed-out `scoot daemon status --json` child into a clean message and
+/// the stable `exit_collect_failed` code instead of a raw error stack trace.
+fn collectOrDie(
+    arena: std.mem.Allocator,
+    io: std.Io,
+    env: *const std.process.Environ.Map,
+    opts: Options,
+    err_out: *std.Io.Writer,
+) !StatusEnvelope {
+    return collectStatusEnvelope(arena, io, env, opts) catch |e| switch (e) {
+        error.ChildTimeout => {
+            try err_out.print(
+                "error: timed out collecting local status (the '{s} daemon status --json' child exceeded {d}ms)\n",
+                .{ opts.scoot_bin, proc.effectiveTimeoutMs(opts.timeout_ms, default_timeout_ms) },
+            );
+            die(err_out, exit_collect_failed);
+        },
+        error.ChildFailed => {
+            try err_out.print(
+                "error: could not collect local status; the '{s} daemon status --json' child failed (is scoot installed and on PATH?)\n",
+                .{opts.scoot_bin},
+            );
+            die(err_out, exit_collect_failed);
+        },
+        error.ChildSpawnFailed => {
+            try err_out.print(
+                "error: could not run '{s}' (is scoot installed and on PATH?)\n",
+                .{opts.scoot_bin},
+            );
+            die(err_out, exit_collect_failed);
+        },
+        else => return e,
+    };
+}
+
+/// Set by the SIGINT/SIGTERM handler so an unbounded `run` loop finishes the
+/// in-flight heartbeat and exits cleanly (status 0) instead of being hard-killed.
+/// POSIX only; elsewhere the loop still relies on the supervisor's stop signal.
+var stop_requested: std.atomic.Value(bool) = .init(false);
+
+const stop_signals_supported = builtin.os.tag != .windows;
+
+fn stopRequested() bool {
+    return stop_requested.load(.monotonic);
+}
+
+fn installStopHandlers() void {
+    if (comptime !stop_signals_supported) return;
+    const act: std.posix.Sigaction = .{
+        .handler = .{ .handler = handleStop },
+        .mask = std.posix.sigemptyset(),
+        // SA_RESTART so an in-flight POST is not aborted with EINTR; the flag is
+        // observed at the next loop / backoff-slice boundary instead.
+        .flags = std.posix.SA.RESTART,
+    };
+    std.posix.sigaction(.INT, &act, null);
+    std.posix.sigaction(.TERM, &act, null);
+}
+
+fn handleStop(_: std.posix.SIG) callconv(.c) void {
+    stop_requested.store(true, .monotonic);
 }
 
 fn stringifyEnvelope(arena: std.mem.Allocator, envelope: StatusEnvelope) ![]const u8 {
@@ -242,7 +321,8 @@ fn stringifyEnvelope(arena: std.mem.Allocator, envelope: StatusEnvelope) ![]cons
 /// that is reset between posts, so an unbounded run holds bounded memory. A
 /// transient failure (collection, encode, network, non-2xx) never aborts the
 /// loop: it is logged, the failure streak drives a bounded jittered backoff, and
-/// the loop continues. Only a supervisor stop signal halts an unbounded run.
+/// the loop continues. SIGINT/SIGTERM requests a clean shutdown: the in-flight
+/// heartbeat finishes, the loop breaks, and the process exits 0.
 fn runLoop(
     io: std.Io,
     env: *const std.process.Environ.Map,
@@ -251,6 +331,7 @@ fn runLoop(
     err_out: *std.Io.Writer,
 ) !void {
     const ca = try requireCenterAndToken(err_out, env, opts);
+    installStopHandlers();
 
     var iter_arena_state: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer iter_arena_state.deinit();
@@ -260,7 +341,7 @@ fn runLoop(
 
     var successes: u64 = 0;
     var fail_streak: u32 = 0;
-    while (true) {
+    while (!stopRequested()) {
         _ = iter_arena_state.reset(.retain_capacity);
         const iter = iter_arena_state.allocator();
 
@@ -283,7 +364,11 @@ fn runLoop(
             opts.interval_ms
         else
             jitteredBackoffMs(rand, fail_streak, opts.interval_ms);
-        sleepDeadline(io, wait_ms);
+        interruptibleSleep(io, wait_ms);
+    }
+    if (stopRequested()) {
+        err_out.writeAll("scoot-edge: stop signal received; exiting cleanly\n") catch {};
+        err_out.flush() catch {};
     }
 }
 
@@ -361,7 +446,7 @@ fn parseArgs(arena: std.mem.Allocator, out: *std.Io.Writer, args: []const []cons
         } else {
             try out.print("error: unknown command '{s}'\n\n", .{args[i]});
             try out.writeAll(usage);
-            die(out, 2);
+            die(out, exit_config_error);
         }
         i += 1;
     }
@@ -403,7 +488,7 @@ fn parseArgs(arena: std.mem.Allocator, out: *std.Io.Writer, args: []const []cons
         } else {
             try out.print("error: unknown argument '{s}'\n\n", .{arg});
             try out.writeAll(usage);
-            die(out, 2);
+            die(out, exit_config_error);
         }
     }
     opts.labels = labels.items;
@@ -415,7 +500,7 @@ fn parseU64Arg(out: *std.Io.Writer, args: []const []const u8, i: *usize, name: [
     const raw = try nextArg(out, args, i, name);
     return std.fmt.parseInt(u64, raw, 10) catch {
         try out.print("error: {s} must be a non-negative integer: '{s}'\n", .{ name, raw });
-        die(out, 2);
+        die(out, exit_config_error);
     };
 }
 
@@ -423,7 +508,7 @@ fn nextArg(out: *std.Io.Writer, args: []const []const u8, i: *usize, name: []con
     i.* += 1;
     if (i.* >= args.len or args[i.*].len == 0) {
         try out.print("error: {s} requires a value\n", .{name});
-        die(out, 2);
+        die(out, exit_config_error);
     }
     return args[i.*];
 }
@@ -532,7 +617,10 @@ fn runChild(arena: std.mem.Allocator, io: std.Io, argv: []const []const u8, time
         .stderr_limit = .limited(64 * 1024),
     }) catch |err| switch (err) {
         error.Timeout => return .{ .stdout = "", .stderr = "", .exit_code = -1, .timed_out = true },
-        else => return err,
+        error.OutOfMemory => return error.OutOfMemory,
+        // The child could not be spawned at all (most often the scoot binary is
+        // not installed or not on PATH). Surface it as a clean collection error.
+        else => return error.ChildSpawnFailed,
     };
     return .{
         .stdout = res.stdout,
@@ -669,6 +757,20 @@ fn sleepDeadline(io: std.Io, timeout_ms: u64) void {
         .clock = .awake,
     };
     d.sleep(io) catch {};
+}
+
+/// Sleeps up to `total_ms`, waking promptly when a stop signal arrives so a
+/// supervised `run` shuts down within a slice instead of a whole interval.
+fn interruptibleSleep(io: std.Io, total_ms: u64) void {
+    if (comptime !stop_signals_supported) return sleepDeadline(io, total_ms);
+    const slice_ms: u64 = 200;
+    var remaining = total_ms;
+    while (remaining != 0) {
+        if (stopRequested()) return;
+        const chunk = @min(remaining, slice_ms);
+        sleepDeadline(io, chunk);
+        remaining -= chunk;
+    }
 }
 
 fn termToCode(term: std.process.Child.Term) i32 {
