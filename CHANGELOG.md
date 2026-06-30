@@ -18,6 +18,16 @@ heading when cutting a release.
 
 ### Added
 
+- Opt-in PostToolUse-style **audit/observability hook** (`[audit.hook]`). After a
+  tool action completes (executed or policy-denied), an external Wasm package
+  (manifest kind `audit`, compute-only) receives a structured JSON event for an
+  external SIEM/analytics/org-audit pipeline. Purely observational — never gates
+  execution — and best-effort: any failure/timeout is counted and surfaced as a
+  flush warning, never fatal. Default off (#137).
+- Structured ReACT **event sink** for protocol adapters: an optional in-process
+  observer receives typed lifecycle events (thinking, step, observation,
+  policy_deny, final, …) so embedders can build protocol adapters without parsing
+  trace text (#156).
 - Opt-in PreToolUse-style **policy hook** at the unified `guard()` chokepoint
   (`[tools.policy_hook]`). After built-in checks allow an action, an external
   Wasm policy package (manifest kind `policy`, compute-only) may further restrict

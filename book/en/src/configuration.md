@@ -402,6 +402,40 @@ level = "info"
 to_file = true
 ```
 
+### `[audit.hook]` (opt-in)
+
+Optional PostToolUse-style observability hook. After a tool action completes —
+either executed (allowed) or denied by the policy gate — it receives a structured
+JSON event for an external SIEM, analytics pipeline, or org audit engine. Like the
+[policy hook](#toolspolicy_hook-opt-in), it runs the event through the same
+realpath-validated Wasm data-transform boundary (manifest kind `audit`,
+compute-only) rather than a raw shell callout. It is purely **observational**: it
+never gates execution and has no allow/deny return, and delivery is **best-effort**
+— any failure (missing/invalid package, wrong kind, non-compute capability, spawn
+failure, timeout, oversized output, non-zero exit) is counted and surfaced as a
+warning at flush, never fatal to the run. Off unless `package` is set.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `package` | string | _(empty)_ | Local Wasm tool package (manifest kind `audit`, compute-only). Empty = no hook. |
+| `host` | string array | resolved `wasm_host` | argv template. Placeholders: `{package}`, `{entry}`, `{component}`. |
+| `timeout_ms` | u64 | `tools.timeout_ms` | Hard per-call timeout for the hook. |
+
+The event is one JSON object per line on the hook's stdin:
+
+```json
+{"version":1,"kind":"observation","session_id":"cli-...","action":"bash","input":"<tool input>","observation":"<tool result>","mode":"guarded"}
+```
+
+`kind` is `observation` for an executed tool or `policy_deny` for a gated one.
+
+```toml
+[audit.hook]
+package = "/opt/scoot/audit/org-sink"
+host = ["scoot-wasm", "wasi", "{component}"]
+timeout_ms = 5000
+```
+
 ---
 
 ## `[schedule]`
