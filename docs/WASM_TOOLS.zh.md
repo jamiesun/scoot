@@ -164,6 +164,45 @@ policy 能力必须是 manifest 能力的子集，避免工具包静默获得自
 
 `schema/input.json` 和 `schema/output.json` 是工具输入与输出的 JSON Schema。当前校验器只检查两个文件存在且是合法 JSON；后续运行时 schema 校验会基于同一组文件继续扩展。
 
+## Spec 一致性测试
+
+内置的 `scoot-wasm` 引擎（`src/wasm_engine.zig`）会针对官方
+[WebAssembly/testsuite](https://github.com/WebAssembly/testsuite) 的一个精选子集
+进行校验，固定在修订版 `193e551ff22663995b1ac95dc62344133669e14b`。这样验证的是
+validator/decoder/解释器是否符合上游的权威预期，而不是依赖手工编码的字节。
+
+fixtures 是**离线**生成的，因此核心保持零依赖，`zig build test` 不需要任何外部
+工具链：
+
+- `scripts/gen_wasm_spec_fixtures.sh` 下载固定版本的 `.wast` 文件，并用
+  `wast2json`（来自 [wabt](https://github.com/WebAssembly/wabt)）按 group 生成一个
+  JSON 命令清单以及每个 module 对应的 `.wasm`。
+- 生成的产物提交在 `test/wasm-spec/<group>/` 下，并由
+  `test/wasm-spec/fixtures.zig` 索引，后者用 `@embedFile` 嵌入每个 module，使
+  runner 自包含且在 comptime 校验。
+- `src/wasm_spec_test.zig` 是一个总会运行的测试目标，针对引擎重放每个清单中的
+  `assert_return`、`assert_trap`、`assert_exhaustion` 和 `assert_invalid` 命令
+  （对浮点会区分 NaN 类别）。
+
+引擎改动后用下面命令重新生成：
+
+```sh
+scripts/gen_wasm_spec_fixtures.sh   # 需要 PATH 中有 wast2json（brew install wabt）
+zig build test
+```
+
+**包含的 group**（引擎已实现的 MVP 面）：`i32`、`i64`、`conversions`、
+`int_exprs`、`int_literals`、`address`、`endianness`、`memory_redundancy`、
+`memory_fill`、`local_get`、`local_set`、`call`、`return`、`br`、`loop`、
+`labels`、`switch`、`nop`、`unreachable`、`fac`、`forward`。
+
+**排除 / 超出范围**（与 v0 非目标和[路线图](ROADMAP.zh.md)一致）：SIMD、threads、
+GC、异常、尾调用、multi-memory、reference types，以及文本形式的
+`assert_malformed` 用例。`call_indirect` 在此修订版也被排除：上游在该文件里混入了
+reference-types/multi-table 模块以及结构化类型匹配，MVP 引擎并不建模这些 ——
+直接 `call` 的覆盖仍然保留。浮点 `f32`/`f64` 的取值 group 被省略，以保持提交的
+fixture 集较小。
+
 ## v0 非目标
 
 - 不做 OCI registry 或远程包安装流程，

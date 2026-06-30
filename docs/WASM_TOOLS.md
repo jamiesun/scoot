@@ -204,6 +204,48 @@ binary next to the running `scoot` executable, then falls back to PATH.
 and output. The validator currently checks that both files exist and contain
 valid JSON. Runtime schema enforcement will build on the same files.
 
+## Spec Conformance Testing
+
+The bundled `scoot-wasm` engine (`src/wasm_engine.zig`) is checked against a
+curated subset of the official
+[WebAssembly/testsuite](https://github.com/WebAssembly/testsuite), pinned at
+revision `193e551ff22663995b1ac95dc62344133669e14b`. This validates the
+validator/decoder/interpreter against canonical upstream expectations instead of
+hand-encoded bytes.
+
+The fixtures are generated **offline** so the core stays zero-dependency and
+`zig build test` needs no external toolchain:
+
+- `scripts/gen_wasm_spec_fixtures.sh` downloads the pinned `.wast` files and runs
+  `wast2json` (from [wabt](https://github.com/WebAssembly/wabt)) to emit, per
+  group, a JSON command manifest plus one `.wasm` per module.
+- The generated artifacts are committed under `test/wasm-spec/<group>/` and
+  indexed by `test/wasm-spec/fixtures.zig`, which `@embedFile`s every module so
+  the runner is hermetic and comptime-checked.
+- `src/wasm_spec_test.zig` is an always-run test target that replays each
+  manifest's `assert_return`, `assert_trap`, `assert_exhaustion`, and
+  `assert_invalid` commands against the engine (NaN-class aware for floats).
+
+Regenerate after an engine change with:
+
+```sh
+scripts/gen_wasm_spec_fixtures.sh   # requires wast2json on PATH (brew install wabt)
+zig build test
+```
+
+**Included groups** (MVP surface the engine implements): `i32`, `i64`,
+`conversions`, `int_exprs`, `int_literals`, `address`, `endianness`,
+`memory_redundancy`, `memory_fill`, `local_get`, `local_set`, `call`, `return`,
+`br`, `loop`, `labels`, `switch`, `nop`, `unreachable`, `fac`, `forward`.
+
+**Excluded / out of scope** (consistent with the v0 non-goals and the
+[roadmap](ROADMAP.md)): SIMD, threads, GC, exceptions, tail-call, multi-memory,
+reference types, and the text-form `assert_malformed` cases. `call_indirect` is
+also excluded at this revision: upstream mixes reference-types/multi-table
+modules and structural type-matching into that file, which the MVP engine does
+not model — direct `call` coverage remains. Float `f32`/`f64` value groups are
+omitted to keep the committed fixture set small.
+
 ## Non-Goals For v0
 
 - no OCI registry or remote package install flow,

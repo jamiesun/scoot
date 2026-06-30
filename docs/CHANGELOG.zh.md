@@ -17,9 +17,21 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 ### 新增
 
+- 为内置的 `scoot-wasm` 引擎新增 **WebAssembly spec 一致性测试**。官方
+  WebAssembly/testsuite 的一个精选子集（固定在修订版 `193e551f`）用 `wast2json`
+  离线转换并提交到 `test/wasm-spec/`，再由一个总会运行的 `zig build test` 目标
+  针对引擎重放。核心保持零依赖（fixtures 通过 `@embedFile` 嵌入，测试时无需任何
+  工具链）。包含/排除的覆盖范围及如何重新生成见
+  [`docs/WASM_TOOLS.zh.md`](WASM_TOOLS.zh.md#spec-一致性测试)（#163）。
 - 新增可选的 PostToolUse 式**审计/可观测性钩子**（`[audit.hook]`）。当一个工具 action 完成后（已执行或被策略拒绝），外部 Wasm 包（manifest kind 为 `audit`，仅 `compute` 能力）会收到一条结构化 JSON 事件，可转发给外部 SIEM/分析/组织审计管线。它是纯观测性的 —— 永不参与放行判定 —— 且尽力而为：任何失败/超时都会被计数并在 flush 时作为警告呈现，绝不致命。默认关闭（#137）。
 - 为协议适配器新增结构化 ReACT **事件接收器（event sink）**：可选的进程内观察者会收到带类型的生命周期事件（thinking、step、observation、policy_deny、final 等），让嵌入方无需解析 trace 文本即可构建协议适配器（#156）。
 - 在统一的 `guard()` 收口处新增可选的 PreToolUse 式**策略钩子**（`[tools.policy_hook]`）。当内建检查放行某个 action 后，外部 Wasm 策略包（manifest kind 为 `policy`，仅 `compute` 能力）可进一步收紧判定 —— 只能把 allow 改为 deny，永不放松内建的 deny。任何失败/超时/非法输出都 fail-closed 拒绝，写入审计，并由 `scoot policy check` 反映。默认关闭（#136）。
+
+### 修复
+
+- `scoot-wasm`：`iNN.trunc_fMM_s/u` 不再对“向零截断后的整数值在范围内”的小数输入
+  误 trap —— 例如 `i32.trunc_f64_s(-2147483648.9)`。范围检查现在在截断之后进行，
+  而不是针对原始操作数，与 spec 一致（由新的一致性测试套件暴露，#163）。
 
 ## [0.5.0] - 2026-06-27
 

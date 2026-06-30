@@ -118,6 +118,25 @@ pub fn build(b: *std.Build) void {
         }),
     });
     const run_wasm_engine_tests = b.addRunArtifact(wasm_engine_tests);
+    // The spec-suite conformance runner (#163) lives in its own always-run test
+    // artifact: it replays a curated, committed subset of the upstream
+    // WebAssembly spec tests against the engine. Fixtures are embedded, so no
+    // external toolchain is needed at build time.
+    const wasm_spec_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/wasm_spec_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "spec_fixtures", .module = b.createModule(.{
+                    .root_source_file = b.path("test/wasm-spec/fixtures.zig"),
+                    .target = target,
+                    .optimize = optimize,
+                }) },
+            },
+        }),
+    });
+    const run_wasm_spec_tests = b.addRunArtifact(wasm_spec_tests);
     const wasm_host_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/wasm_host.zig"),
@@ -173,6 +192,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_internal_tests.step);
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_wasm_engine_tests.step);
+    test_step.dependOn(&run_wasm_spec_tests.step);
     test_step.dependOn(&run_wasm_host_tests.step);
     test_step.dependOn(&run_edge_tests.step);
     test_step.dependOn(&embed_example.step);
