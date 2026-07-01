@@ -11,7 +11,10 @@ A session is the message transcript of a single interaction. `-e` runs and REPL
 conversations get a fresh id for each process, such as `cli-<ms>-<pid>` or
 `repl-<ms>-<pid>`, so independent runs do not get appended into one shared
 `cli.jsonl` or `repl.jsonl` file. Scheduled jobs keep the stable id
-`job-<id>` because they represent a continuing unattended task.
+`job-<id>` because they represent a continuing unattended task. Pass
+`--session-id <id>` to `-e` to override the generated id with your own, so an
+external caller can correlate a run with its own job id — see
+[CLI Reference](cli.md).
 
 It is persisted to:
 

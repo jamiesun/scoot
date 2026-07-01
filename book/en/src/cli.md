@@ -14,9 +14,13 @@ overridden with `--scoot-home` or `SCOOT_HOME`.
 | --- | --- |
 | `-e, --eval <prompt>` | Run a single goal to completion, print the answer, and exit. |
 | `--retries <N>` | Retries for transient backend errors in `-e` mode (default `2`, `0` disables). |
+| `--unattended` | Marks an `-e` run as unattended: clamps policy to the `edge.max_job_policy` ceiling (default `readonly`) and corrects `guarded` to `readonly`. |
+| `--policy <mode>` | One-shot policy override for `-e` (`guarded`/`readonly`/`unrestricted`); with `--unattended` it can only be clamped down to the `edge.max_job_policy` ceiling. |
+| `--session-id <id>` | For `-e`: pin the session file name instead of a generated id, so an external caller can correlate a run with its own job id. |
 | `--scoot-home <dir>` | Override the runtime directory. Wins over `SCOOT_HOME`. |
 | `--trace` | Print the ReACT execution trace to **stderr** (answer/conversation stays on stdout). Works in `-e` and interactive REPL mode. |
 | `--ticks <N>` | For `schedule run` / `daemon run`: run `N` poll cycles then exit (default `0` = run forever). |
+| `--json` | For `daemon status`: print a machine-readable status snapshot instead of human-readable text. |
 | `-h, --help` | Show usage. |
 | `-v, --version` | Show the version. |
 
@@ -81,6 +85,15 @@ authority. Raising the unattended ceiling requires a deliberate local
 ```sh
 scoot --unattended -e "summarize the open TODOs"               # clamped to readonly
 scoot --unattended --policy unrestricted -e "..."              # still readonly unless edge.max_job_policy=unrestricted
+```
+
+Pin the session file name with `--session-id <id>` instead of letting Scoot
+generate one, so an external caller can correlate a run with its own job id.
+This is how the optional `scoot-edge` companion ties a dispatched job to the
+session it produces (`--session-id job-<job_id>`):
+
+```sh
+scoot --session-id my-fixed-id -e "summarize README.md"
 ```
 
 ### `serve` — stdio app-server
@@ -220,10 +233,15 @@ safety. Requires `schedule.enabled = true` to run. See
 
 ```sh
 scoot daemon status                 # print last recorded daemon state
+scoot daemon status --json          # machine-readable status snapshot
 scoot daemon run                    # foreground long-running scheduler
 scoot daemon run --ticks 3          # run three poll cycles then exit
 scoot daemon stop                   # send SIGTERM only when state/pid agree
 ```
+
+`daemon status --json` prints the same status as a single JSON object instead
+of human-readable text — useful for scripting or for the optional `scoot-edge`
+companion, which polls it to build its heartbeat.
 
 The foreground long-running mode for scheduled jobs. It writes
 `state/daemon.json` and `state/daemon.pid`, installs SIGTERM/SIGINT handlers, and

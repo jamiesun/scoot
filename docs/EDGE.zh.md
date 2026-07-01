@@ -200,7 +200,7 @@ edge **只经公共发射接口与只读日志**驱动 Scoot。它不得 import 
 
 | Wire 操作 | 用到的公共面 |
 | --- | --- |
-| `status` | `daemon status`（以及未来的 `--json` 形态）、config 读、skill 发现（仅名称 / 描述） |
+| `status` | `daemon status --json`（机器可读快照；`doctor --json` 尚不存在）、config 读、skill 发现（仅名称 / 描述） |
 | `audit_batch` | 只读 `logs/*.jsonl` |
 | `job kind=run` | 子进程 `scoot --unattended -e "<goal>"`，**通过无人值守一次性钳制**启动（天花板在子进程内对本地 `edge.max_job_policy` 强制），并把 cwd 钉死到 `edge.job_root` |
 | job 结果 | 子进程 exit code + stdout + 生成的 session / audit |
@@ -209,7 +209,7 @@ edge **只经公共发射接口与只读日志**驱动 Scoot。它不得 import 
 
 其中三项是**阻塞性前置**，不是可选的打磨：没有它们，edge 无法兑现自己的安全与投递承诺。它们仍作为独立、本身有用的核心改动来实现，但 E1/E2 受其门控。
 
-1. **（E1 前置）** 机读 status：`daemon status --json` / `doctor --json`。`status` 心跳不得依赖解析人读文本。
+1. **（E1 前置）部分完成。** 机读 status：`daemon status --json` 已经落地，能打印完整的 JSON 状态快照；`doctor --json` 尚不存在。`status` 心跳不得依赖解析人读文本。
 2. **（E2 前置——拱心石）✅ 已完成。** 无人值守一次性策略钳制，使 edge 启动的 `scoot -e` 可证明处于或低于 `readonly` 天花板，且在子进程内对本地 config 强制。已作为 `scoot --unattended -e "<goal>"`（外加一个只能*降*的可选 `--policy <mode>`）落地，读取本地 `edge.max_job_policy` 天花板（默认 `readonly`）。`policy.zig` 中共享的 `correctUnattended`/`privilegeMin` 格是调度器与一次性路径的唯一真相来源。这解除了 E2 任务派发的阻塞。
 3. **（E1 前置）✅ 核心侧保留已完成。** 对 shipping 感知、轮转稳定的 audit：单调轮转代数，把已轮转段保留到有界上限之内，超出上限时发出显式的 gap 记录。已作为 `src/audit.zig` 里的 `rotateGenerational` 落地（#187）：真正的审计日志不再使用破坏性的单备份 `.1` 轮转，取而代之的是编号的 `audit.jsonl.<gen>` 段，由一个持久的 `.gen` sidecar 追踪，最多保留 `[audit].max_retained_generations`（默认 `8`）个，任何淘汰都会持久记录进 `.gaps.jsonl` 并由 `scoot doctor` 呈现。在 audit 搬运本身能够开始之前，仍然缺失：游标里字节偏移的那一半（`byte_from`/`byte_to`/`seq_to`）、wire 层的 `audit_gap` 标记，以及 `edge.ship_audit` 拨出路径——这些在 `src/edge_main.zig` 里都还不存在。在它们落地前，audit 搬运保持关闭。
 4. **（契约）** 把 `serve` NDJSON 方法集作为稳定契约固化；`scoot-edge` 复用它的帧格式，而非它的通道。
