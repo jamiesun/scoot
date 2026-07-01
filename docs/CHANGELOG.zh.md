@@ -15,6 +15,15 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 ## [未发布]
 
+### 新增
+
+- `apt` release job 现在除了已有的 `scoot-edge` 包，还会为核心 `scoot` 二进制
+  和可选的 `scoot-wasm` host 打 `.deb` 包，一并推送到共享仓库
+  [`jamiesun/apt-tap`](https://github.com/jamiesun/apt-tap)。`scoot-wasm` 与
+  `scoot-edge` 现在都声明了 apt 的 `Depends: scoot`（与它们的 Homebrew
+  formula 已有的依赖关系一致），因此 `apt install scoot-wasm`/`scoot-edge`
+  会自动带上核心 agent。
+
 ## [0.8.0] - 2026-07-01
 
 ### 安全

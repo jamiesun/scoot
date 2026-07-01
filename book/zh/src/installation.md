@@ -74,20 +74,39 @@ brew install jamiesun/tap/scoot-edge
 
 ## 用 apt 安装（Debian/Ubuntu）
 
-可选的 `scoot-edge` 舰队伴生程序也发布到了一个共享的 apt 仓库
+`scoot`、可选的 `scoot-wasm` host，以及可选的 `scoot-edge` 舰队伴生程序，
+现在都发布到了同一个共享的 apt 仓库
 [`jamiesun/apt-tap`](https://github.com/jamiesun/apt-tap)，覆盖
-`amd64`、`arm64`、`armhf` 三种架构：
+`amd64`、`arm64`、`armhf` 三种架构。先添加一次仓库源：
 
 ```sh
 curl -fsSL https://jamiesun.github.io/apt-tap/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/jamiesun-apt-tap.gpg
 echo "deb [signed-by=/usr/share/keyrings/jamiesun-apt-tap.gpg] https://jamiesun.github.io/apt-tap stable main" | sudo tee /etc/apt/sources.list.d/jamiesun-apt-tap.list
 sudo apt update
+```
+
+然后安装 agent：
+
+```sh
+sudo apt install scoot
+```
+
+如果还要运行只做计算的 Wasm 工具包（`wasm_tool` action），再安装可选的独立
+host。它的包依赖 `scoot`，所以这一条命令会同时装上 agent 和 host：
+
+```sh
+sudo apt install scoot-wasm
+```
+
+如果还想让管理中心观测 / 派发任务到这台 Scoot，再安装可选的独立舰队伴生程序。
+它的包同样依赖 `scoot`，因为 `scoot-edge` 会把 agent 当子进程启动：
+
+```sh
 sudo apt install scoot-edge
 ```
 
-目前只有 `scoot-edge` 打包成了 apt 包，核心 `scoot` 二进制没有——请先用上面的
-脚本或 Homebrew 安装 `scoot`，如果你更喜欢用 apt 而不是安装脚本的
-`SCOOT_INSTALL_EDGE=1` 开关或 Homebrew formula，再用 apt 装 `scoot-edge`。
+和上面的 Homebrew formula 不同，apt 会自己解析 `Depends: scoot` 这一行，
+所以安装 `scoot-wasm` 或 `scoot-edge` 会自动带上 `scoot`，不需要额外一条命令。
 `jamiesun/apt-tap` 和上面的 `homebrew-tap` 一样，是多个不相关工具共享的同一个
 仓库。
 

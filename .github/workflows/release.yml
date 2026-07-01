@@ -321,7 +321,7 @@ jobs:
           fi
 
   apt:
-    name: Publish apt package (scoot-edge)
+    name: Publish apt packages (scoot, scoot-wasm, scoot-edge)
     runs-on: ubuntu-latest
     needs: publish
     if: startsWith(github.ref, 'refs/tags/')
@@ -330,12 +330,13 @@ jobs:
       # enable this job. Without it the job no-ops, mirroring the optional
       # Homebrew tap / Docker Hub publish paths. APT_TAP_REPO is the shared
       # apt repository (jamiesun/apt-tap, one suite shared across unrelated
-      # projects, mirroring homebrew-tap) that backs `apt install scoot-edge`
-      # once a user has added its Pages URL as an apt source (see
-      # docs/EDGE.md). This job never touches the apt-tap signing key --
-      # that repository's own workflow signs and republishes the index
-      # whenever pool/ changes, keeping the GPG private key's blast radius
-      # confined to a single repo.
+      # projects, mirroring homebrew-tap) that backs `apt install scoot`,
+      # `apt install scoot-wasm`, and `apt install scoot-edge` once a user
+      # has added its Pages URL as an apt source (see
+      # book/en/src/installation.md). This job never touches the apt-tap
+      # signing key -- that repository's own workflow signs and republishes
+      # the index whenever pool/ changes, keeping the GPG private key's
+      # blast radius confined to a single repo.
       APT_TAP_TOKEN: ${{ secrets.APT_TAP_TOKEN }}
       APT_TAP_REPO: jamiesun/apt-tap
     steps:
@@ -355,57 +356,74 @@ jobs:
 
           git clone --depth 1 \
             "https://x-access-token:${APT_TAP_TOKEN}@github.com/${APT_TAP_REPO}.git" "$WORKDIR/tap"
-          dest="$WORKDIR/tap/pool/main/s/scoot-edge"
-          mkdir -p "$dest"
 
-          # $1 = this repo's release asset name, $2 = Debian architecture name.
+          # $1 = package name (matches the release asset prefix and the
+          # installed binary name), $2 = this repo's release asset arch
+          # suffix, $3 = Debian architecture name, $4 = "Depends:" value
+          # (empty for none), $5 = "Description:" block with a literal `\n`
+          # between lines (each continuation line already includes its
+          # required single leading space; expanded via `printf '%b'`),
+          # remaining args = doc files copied from the archive into
+          # /usr/share/doc/<pkg>/.
           build_one() {
-            local asset="$1" deb_arch="$2"
-            local archive extract_dir pkgdir deb_name
-            archive="$(find dist-artifacts -name "scoot-edge-${TAG}-${asset}.tar.gz" -print -quit)"
-            [ -n "$archive" ] || { echo "missing archive for ${asset}" >&2; exit 1; }
+            local pkg="$1" asset="$2" deb_arch="$3" depends="$4" description="$5"
+            shift 5
+            local doc_files=("$@")
+            local archive extract_dir pkgdir dest deb_name
 
-            extract_dir="$WORKDIR/${asset}"
+            archive="$(find dist-artifacts -name "${pkg}-${TAG}-${asset}.tar.gz" -print -quit)"
+            [ -n "$archive" ] || { echo "missing archive for ${pkg} ${asset}" >&2; exit 1; }
+
+            extract_dir="$WORKDIR/${pkg}-${asset}"
             mkdir -p "$extract_dir"
             tar -C "$extract_dir" -xzf "$archive"
 
-            pkgdir="$WORKDIR/${asset}-pkg"
-            mkdir -p "$pkgdir/DEBIAN" "$pkgdir/usr/bin" "$pkgdir/usr/share/doc/scoot-edge"
-            install -m 0755 "$extract_dir/scoot-edge/scoot-edge" "$pkgdir/usr/bin/scoot-edge"
-            cp "$extract_dir/scoot-edge/README.md" "$extract_dir/scoot-edge/EDGE.md" \
-              "$extract_dir/scoot-edge/EDGE.zh.md" "$pkgdir/usr/share/doc/scoot-edge/"
+            pkgdir="$WORKDIR/${pkg}-${asset}-pkg"
+            mkdir -p "$pkgdir/DEBIAN" "$pkgdir/usr/bin" "$pkgdir/usr/share/doc/${pkg}"
+            install -m 0755 "$extract_dir/${pkg}/${pkg}" "$pkgdir/usr/bin/${pkg}"
+            for f in "${doc_files[@]}"; do
+              cp "$extract_dir/${pkg}/${f}" "$pkgdir/usr/share/doc/${pkg}/"
+            done
 
             {
-              printf 'Package: scoot-edge\n'
+              printf 'Package: %s\n' "$pkg"
               printf 'Version: %s\n' "$VERSION"
               printf 'Section: utils\n'
               printf 'Priority: optional\n'
               printf 'Architecture: %s\n' "$deb_arch"
+              [ -n "$depends" ] && printf 'Depends: %s\n' "$depends"
               printf 'Maintainer: Jett Wang <jamiesun.net@gmail.com>\n'
               printf 'Homepage: https://github.com/jamiesun/scoot\n'
-              printf 'Description: Optional fleet companion (status heartbeat + job dispatch) for scoot\n'
-              printf ' scoot-edge is a standalone, opt-in companion binary that lets a remote\n'
-              printf ' management center observe and, opt-in, dispatch tasks to a local scoot\n'
-              printf ' agent. Statically linked (musl); no runtime dependencies.\n'
+              printf '%b\n' "$description"
             } > "$pkgdir/DEBIAN/control"
 
-            deb_name="scoot-edge_${VERSION}_${deb_arch}.deb"
+            dest="$WORKDIR/tap/pool/main/${pkg:0:1}/${pkg}"
+            mkdir -p "$dest"
+            deb_name="${pkg}_${VERSION}_${deb_arch}.deb"
             dpkg-deb --build --root-owner-group "$pkgdir" "$dest/${deb_name}"
           }
 
-          build_one linux-amd64 amd64
-          build_one linux-arm64 arm64
-          build_one linux-armv7 armhf
+          scoot_desc='Description: Lightweight, local-first, auditable AI agent daemon and CLI\n scoot runs a ReACT loop against an OpenAI-compatible Responses API backend,\n with built-in tools (bash, file I/O, grep, glob, http_request, skill,\n recall, MCP, wasm_tool), execution policy gates, local skills, scheduled\n jobs, and JSONL audit logging. Statically linked (musl); no runtime\n dependencies.'
+          wasm_desc='Description: Optional standalone Wasm compute-unit host for scoot\n scoot-wasm runs compute-only Wasm/WASI packages for the wasm_tool action.\n Installing it pulls in scoot so wasm_tool works end-to-end. Statically\n linked (musl); no runtime dependencies.'
+          edge_desc='Description: Optional fleet companion (status heartbeat + job dispatch) for scoot\n scoot-edge is a standalone, opt-in companion binary that lets a remote\n management center observe and, opt-in, dispatch tasks to a local scoot\n agent. Installing it pulls in scoot, since scoot-edge launches the agent\n as a subprocess. Statically linked (musl); no runtime dependencies.'
+
+          for pair in linux-amd64:amd64 linux-arm64:arm64 linux-armv7:armhf; do
+            asset="${pair%%:*}"
+            deb_arch="${pair##*:}"
+            build_one scoot "$asset" "$deb_arch" "" "$scoot_desc" README.md config.example.toml
+            build_one scoot-wasm "$asset" "$deb_arch" scoot "$wasm_desc" README.md
+            build_one scoot-edge "$asset" "$deb_arch" scoot "$edge_desc" README.md EDGE.md EDGE.zh.md
+          done
 
           cd "$WORKDIR/tap"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add pool/main/s/scoot-edge/
+          git add pool/main/s/scoot pool/main/s/scoot-wasm pool/main/s/scoot-edge
           if git diff --cached --quiet; then
-            echo "scoot-edge ${VERSION} .deb packages already up to date"
+            echo "scoot ${VERSION} .deb packages already up to date"
             exit 0
           fi
-          git commit -m "scoot-edge ${VERSION} (amd64, arm64, armhf)"
+          git commit -m "scoot ${VERSION} (scoot, scoot-wasm, scoot-edge; amd64, arm64, armhf)"
 
           # apt-tap is a shared repo that other projects may push to as well,
           # so retry on a rejected push instead of failing outright.
