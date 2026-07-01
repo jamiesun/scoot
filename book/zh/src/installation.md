@@ -72,6 +72,25 @@ brew install jamiesun/tap/scoot-edge
 （可用 `--scoot-bin` 覆盖）。核心 `scoot` formula 永远不会带上任何一个可选伴生
 程序，保持默认安装最小化。
 
+## 用 apt 安装（Debian/Ubuntu）
+
+可选的 `scoot-edge` 舰队伴生程序也发布到了一个共享的 apt 仓库
+[`jamiesun/apt-tap`](https://github.com/jamiesun/apt-tap)，覆盖
+`amd64`、`arm64`、`armhf` 三种架构：
+
+```sh
+curl -fsSL https://jamiesun.github.io/apt-tap/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/jamiesun-apt-tap.gpg
+echo "deb [signed-by=/usr/share/keyrings/jamiesun-apt-tap.gpg] https://jamiesun.github.io/apt-tap stable main" | sudo tee /etc/apt/sources.list.d/jamiesun-apt-tap.list
+sudo apt update
+sudo apt install scoot-edge
+```
+
+目前只有 `scoot-edge` 打包成了 apt 包，核心 `scoot` 二进制没有——请先用上面的
+脚本或 Homebrew 安装 `scoot`，如果你更喜欢用 apt 而不是安装脚本的
+`SCOOT_INSTALL_EDGE=1` 开关或 Homebrew formula，再用 apt 装 `scoot-edge`。
+`jamiesun/apt-tap` 和上面的 `homebrew-tap` 一样，是多个不相关工具共享的同一个
+仓库。
+
 ## 发布构建变体
 
 预编译的 release 压缩包只发布一种变体——Zig `ReleaseSafe`，保留运行时安全检查与

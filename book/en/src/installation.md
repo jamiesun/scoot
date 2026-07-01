@@ -77,6 +77,26 @@ All three land on Homebrew's `bin` (on your `PATH`), so the default
 default too (override with `--scoot-bin`). The core `scoot` formula never pulls
 in either optional companion, keeping the default install minimal.
 
+## Install via apt (Debian/Ubuntu)
+
+The optional `scoot-edge` fleet companion is also published to a shared apt
+repository, [`jamiesun/apt-tap`](https://github.com/jamiesun/apt-tap), for the
+`amd64`, `arm64`, and `armhf` architectures:
+
+```sh
+curl -fsSL https://jamiesun.github.io/apt-tap/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/jamiesun-apt-tap.gpg
+echo "deb [signed-by=/usr/share/keyrings/jamiesun-apt-tap.gpg] https://jamiesun.github.io/apt-tap stable main" | sudo tee /etc/apt/sources.list.d/jamiesun-apt-tap.list
+sudo apt update
+sudo apt install scoot-edge
+```
+
+Only `scoot-edge` is packaged for apt today, not the core `scoot` binary —
+install `scoot` with the script or Homebrew above first, then use apt for
+`scoot-edge` if you prefer it over the install script's `SCOOT_INSTALL_EDGE=1`
+flag or the Homebrew formula. `jamiesun/apt-tap` is a repository shared across
+several unrelated tools, the same shared-tap model `homebrew-tap` already uses
+above.
+
 ## Release Build Flavor
 
 Prebuilt release archives ship a single flavor — Zig `ReleaseSafe`, which keeps

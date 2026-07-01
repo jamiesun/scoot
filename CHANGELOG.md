@@ -68,14 +68,18 @@ heading when cutting a release.
   audit. A new core `--session-id <id>` flag on `scoot -e` lets a caller pin
   the session file name instead of the default UUID, which is what makes this
   `job_id` ↔ `session_id` correlation possible (#186).
-- **`scoot-edge` E3 packaging (partial)**: the release workflow now builds,
+- **`scoot-edge` E3 packaging (complete)**: the release workflow builds,
   archives (`scoot-edge-<target>.tar.gz` + `.sha256`), and publishes a
   `scoot-edge` Homebrew formula (`brew install jamiesun/tap/scoot-edge`,
   depending on `scoot`) for every tagged release, mirroring the existing
   `scoot-wasm` packaging. `install.sh` gained an opt-in `SCOOT_INSTALL_EDGE`
   variable that additionally downloads and installs `scoot-edge` alongside
-  core `scoot`; it is never installed unless explicitly requested. An apt
-  package remains out of scope for now (#171).
+  core `scoot`; it is never installed unless explicitly requested. A new
+  optional `apt` job (gated by `APT_TAP_TOKEN`, mirroring the Homebrew job's
+  `HOMEBREW_TAP_TOKEN`) builds a `.deb` per Linux architecture and pushes it
+  to the shared [`jamiesun/apt-tap`](https://github.com/jamiesun/apt-tap)
+  repository, which owns the GPG signing key and publishes the signed apt
+  index to GitHub Pages on every push, closing out #171.
 
 ### Documentation
 
