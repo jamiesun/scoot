@@ -16,6 +16,8 @@ heading when cutting a release.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-07-01
+
 ### Added
 
 - **Unattended one-shot policy clamp** (`scoot -e --unattended`): the E2 keystone
@@ -367,7 +369,8 @@ First feature release since `v0.0.2` (which only carried release-workflow plumbi
 
 - Polished homepage/license metadata, infographic, bilingual user guide (#6, #19, #36)
 
-[Unreleased]: https://github.com/jamiesun/scoot/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/jamiesun/scoot/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/jamiesun/scoot/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/jamiesun/scoot/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jamiesun/scoot/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jamiesun/scoot/compare/v0.3.0...v0.4.0

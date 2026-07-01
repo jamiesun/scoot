@@ -15,6 +15,8 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 ## [未发布]
 
+## [0.7.0] - 2026-07-01
+
 ### 新增
 
 - **无人值守一次性策略钳制**（`scoot -e --unattended`）：`scoot-edge` 任务派发（E2）的拱心石前置。无人值守的 `-e` 运行现在会**在子进程内**把有效策略计算为 `correctUnattended(privilegeMin(requested, edge.max_job_policy))`，因此 argv（以及未来的 wire）永远只能把策略*降*到本地天花板以下，绝不能抬高。新增纯本地的 `[edge].max_job_policy` 配置旋钮（默认 `readonly`，可用 `SCOOT_EDGE_MAX_JOB_POLICY` 覆盖）作为天花板；可选的 `--policy <mode>` 只能把它降低。`correctUnattended`/`privilegeMin` 格（`readonly ⊑ guarded ⊑ unrestricted`，刻意**不是** `Mode` 枚举的声明序）现在是与调度器 `effectiveMode` 共享的唯一真相来源。
@@ -287,7 +289,8 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 - 完善首页/许可证元数据、信息图与双语用户指南（#6、#19、#36）
 
-[未发布]: https://github.com/jamiesun/scoot/compare/v0.6.0...HEAD
+[未发布]: https://github.com/jamiesun/scoot/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/jamiesun/scoot/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/jamiesun/scoot/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jamiesun/scoot/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/jamiesun/scoot/compare/v0.3.0...v0.4.0
