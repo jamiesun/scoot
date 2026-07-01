@@ -15,6 +15,8 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 ## [未发布]
 
+## [0.8.0] - 2026-07-01
+
 ### 安全
 
 - 由模型触发的 `bash` 调用现在使用经过脱敏的子进程环境：名字匹配
@@ -351,7 +353,8 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 - 完善首页/许可证元数据、信息图与双语用户指南（#6、#19、#36）
 
-[未发布]: https://github.com/jamiesun/scoot/compare/v0.7.0...HEAD
+[未发布]: https://github.com/jamiesun/scoot/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/jamiesun/scoot/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/jamiesun/scoot/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/jamiesun/scoot/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/jamiesun/scoot/compare/v0.4.0...v0.5.0
