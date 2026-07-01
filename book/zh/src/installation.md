@@ -42,6 +42,7 @@ curl -fsSL https://raw.githubusercontent.com/jamiesun/scoot/main/install.sh | en
 | `SCOOT_INSTALL_VERSION` | `latest` | 要安装的 release tag，可带或不带开头的 `v`。 |
 | `SCOOT_INSTALL_BINARY` | `scoot` | 安装后的二进制名称。 |
 | `SCOOT_INSTALL_REPO` | `jamiesun/scoot` | 下载 release 的 GitHub 仓库。 |
+| `SCOOT_INSTALL_EDGE` | 未设置（opt-in） | 设为任意非空值时，额外下载并安装可选的 `scoot-edge` 舰队伴生程序到 `$SCOOT_INSTALL_DIR/scoot-edge`。除非显式要求，否则永不安装。 |
 
 ## 用 Homebrew 安装（macOS）
 
@@ -58,17 +59,26 @@ brew install jamiesun/tap/scoot
 brew install jamiesun/tap/scoot-wasm
 ```
 
-两者都会落在 Homebrew 的 `bin`（已在 `PATH` 上），因此默认的
+如果还想让管理中心观测 / 派发任务到这台 Scoot，再安装可选的独立舰队伴生程序。
+它的 formula 同样依赖 `scoot`，因为 `scoot-edge` 会把 agent 当子进程启动：
+
+```sh
+brew install jamiesun/tap/scoot-edge
+```
+
+三者都会落在 Homebrew 的 `bin`（已在 `PATH` 上），因此默认的
 `wasm_host = ["scoot-wasm", "wasi", "{component}"]` 会从 `PATH` 解析到
-`scoot-wasm`，无需额外配置。核心 `scoot` formula 永远不会带上 Wasm host，
-保持默认安装最小化。
+`scoot-wasm`，无需额外配置；`scoot-edge` 默认也会从 `PATH` 找到 `scoot`
+（可用 `--scoot-bin` 覆盖）。核心 `scoot` formula 永远不会带上任何一个可选伴生
+程序，保持默认安装最小化。
 
 ## 发布构建变体
 
 预编译的 release 压缩包只发布一种变体——Zig `ReleaseSafe`，保留运行时安全检查与
 清晰的 fail-fast 诊断。如果你需要更小的二进制（用于探针、边缘设备或极简容器），
 请用 `ReleaseSmall` 从源码自行编译（见[从源码构建](#从源码构建)）。每个目标还会
-单独发布一个 `scoot-wasm-*` 压缩包，里面只包含可选的 Wasm 计算单元 host。
+单独发布一个 `scoot-wasm-*` 压缩包（只包含可选的 Wasm 计算单元 host）和一个
+`scoot-edge-*` 压缩包（只包含可选的舰队伴生程序）。
 
 ## 从源码构建
 
@@ -98,7 +108,8 @@ install -m 0755 zig-out/bin/scoot /usr/local/bin/scoot
 ## 安装发布产物
 
 每个 tag 版本会为每个目标发布一个 `scoot-<target>.tar.gz`，外加一个独立的
-`scoot-wasm-<target>.tar.gz`（可选的 Wasm host），以及对应的 `.sha256` 校验和。
+`scoot-wasm-<target>.tar.gz`（可选的 Wasm host）、一个独立的
+`scoot-edge-<target>.tar.gz`（可选的舰队伴生程序），以及各自对应的 `.sha256` 校验和。
 
 ```sh
 # Pick the archive for your platform from the Releases page, then:

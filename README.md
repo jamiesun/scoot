@@ -72,8 +72,8 @@ On macOS you can use Homebrew instead:
 brew install jamiesun/tap/scoot
 ```
 
-Prefer Docker, the optional Wasm host, or compiling a smaller build from source?
-See [Installation](book/en/src/installation.md).
+Prefer Docker, the optional Wasm host, the optional edge fleet agent, or
+compiling a smaller build from source? See [Installation](book/en/src/installation.md).
 
 **2. Configure.** The wizard creates `~/.scoot` and writes your config:
 

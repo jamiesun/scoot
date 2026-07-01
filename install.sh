@@ -5,6 +5,11 @@ REPO="${SCOOT_INSTALL_REPO:-jamiesun/scoot}"
 VERSION="${SCOOT_INSTALL_VERSION:-latest}"
 INSTALL_DIR="${SCOOT_INSTALL_DIR:-/usr/local/bin}"
 BINARY_NAME="${SCOOT_INSTALL_BINARY:-scoot}"
+# Opt-in only: the optional scoot-edge fleet companion is never installed
+# unless explicitly requested. Set to any non-empty value to also install it
+# alongside core scoot (mirrors the Homebrew `scoot-edge` formula, which
+# likewise never installs automatically with `scoot`).
+INSTALL_EDGE="${SCOOT_INSTALL_EDGE:-}"
 
 log() {
   printf '%s\n' "$*" >&2
@@ -75,7 +80,8 @@ verify_checksum() {
 install_binary() {
   src="$1"
   dst_dir="$2"
-  dst="$dst_dir/$BINARY_NAME"
+  dst_name="$3"
+  dst="$dst_dir/$dst_name"
 
   if mkdir -p "$dst_dir" 2>/dev/null && [ -w "$dst_dir" ]; then
     install -m 0755 "$src" "$dst"
@@ -135,12 +141,38 @@ main() {
   [ -f "$bin" ] || die "archive did not contain expected binary path: scoot/scoot"
 
   log "Installing to $INSTALL_DIR/$BINARY_NAME"
-  install_binary "$bin" "$INSTALL_DIR"
+  install_binary "$bin" "$INSTALL_DIR" "$BINARY_NAME"
 
   if command -v "$INSTALL_DIR/$BINARY_NAME" >/dev/null 2>&1; then
     "$INSTALL_DIR/$BINARY_NAME" --version
   else
     log "Installed. Add $INSTALL_DIR to PATH if needed."
+  fi
+
+  if [ -n "$INSTALL_EDGE" ]; then
+    edge_artifact="scoot-edge-$VERSION-$target.tar.gz"
+
+    log "Downloading $edge_artifact (SCOOT_INSTALL_EDGE opt-in)"
+    curl -fsSL "$base_url/$edge_artifact" -o "$tmp/$edge_artifact" ||
+      die "failed to download $edge_artifact; pin a release that publishes this target"
+    curl -fsSL "$base_url/$edge_artifact.sha256" -o "$tmp/$edge_artifact.sha256" ||
+      die "failed to download $edge_artifact.sha256"
+
+    log "Verifying checksum"
+    verify_checksum "$tmp/$edge_artifact" "$tmp/$edge_artifact.sha256"
+
+    tar -xzf "$tmp/$edge_artifact" -C "$tmp"
+    edge_bin="$tmp/scoot-edge/scoot-edge"
+    [ -f "$edge_bin" ] || die "archive did not contain expected binary path: scoot-edge/scoot-edge"
+
+    log "Installing to $INSTALL_DIR/scoot-edge"
+    install_binary "$edge_bin" "$INSTALL_DIR" "scoot-edge"
+
+    if command -v "$INSTALL_DIR/scoot-edge" >/dev/null 2>&1; then
+      "$INSTALL_DIR/scoot-edge" --version
+    else
+      log "Installed scoot-edge. Add $INSTALL_DIR to PATH if needed."
+    fi
   fi
 }
 
