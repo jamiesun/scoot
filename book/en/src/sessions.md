@@ -106,11 +106,14 @@ as JSONL, preserving `seq`, `ts`, optional `run_id`, `kind`, and `msg`.
 
 Control how much is logged with `[audit] level` — `debug`, `info` (default),
 `warn`, or `error`. Set `to_file = false` to disable file logging entirely.
+`max_retained_generations` (default `8`) bounds how many rotated audit
+generations are kept before the oldest is evicted; see [Retention](#retention).
 
 ```toml
 [audit]
 level = "info"
 to_file = true
+max_retained_generations = 8
 ```
 
 ## Secrets Are Never Logged
@@ -121,6 +124,19 @@ redaction before they're written. See the [Agent Guide](agent.md) secret rule.
 
 ## Retention
 
-Session and audit files are append-oriented JSONL files. Scoot rotates an
-individual JSONL file to `.1` before appending once it reaches the built-in size
-limit, keeping daemon runs from growing one file without bound.
+Session transcripts are append-oriented JSONL files. Scoot rotates an
+individual session file to `.1` before appending once it reaches the built-in
+size limit, keeping daemon runs from growing one file without bound; only the
+latest backup is kept.
+
+The audit log uses a sturdier scheme so a future `scoot-edge` audit shipper
+can never silently lose a range (issue #187): once `logs/audit.jsonl` reaches
+the size limit, it is retired to a monotonically numbered
+`logs/audit.jsonl.<gen>` instead of a single clobbered `.1` backup. The
+generation counter is tracked durably in a `logs/audit.jsonl.gen` sidecar so it
+survives process restarts. Up to `[audit] max_retained_generations` (default
+`8`) retired generations are kept on disk; only once that cap is exceeded is
+the oldest evicted, and every eviction is durably recorded as
+`{gap_from, gap_to, ts}` in `logs/audit.jsonl.gaps.jsonl` rather than silently
+disappearing. `scoot doctor` reports `audit.retention` as `WARN` if any gap was
+ever recorded, so a bounded retention cap never becomes an invisible loss.

@@ -48,7 +48,7 @@ pub const Job = struct {
     /// Corrected effective policy: unattended `guarded` is meaningless, so it is
     /// lowered to `readonly`. Scheduled jobs can never run on guarded. Delegates
     /// to `policy.correctUnattended` so the unattended lattice has one source of
-    /// truth shared with the `scoot -e --unattended` one-shot clamp.
+    /// truth shared with the `scoot --unattended -e "<goal>"` one-shot clamp.
     pub fn effectiveMode(self: Job) policy.Mode {
         return policy.correctUnattended(self.mode);
     }

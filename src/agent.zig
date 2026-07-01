@@ -26,6 +26,7 @@ const audit_hook = @import("audit_hook.zig");
 const pathsafe = @import("paths.zig");
 const jsonio = @import("jsonio.zig");
 const obs = @import("obs.zig");
+const secret = @import("secret.zig");
 
 pub const default_context_budget_bytes: usize = 80_000;
 
@@ -295,6 +296,22 @@ pub const Agent = struct {
     ca_file: ?[]const u8 = null,
     /// Process environment used for MCP remote header credentials.
     env: ?*const std.process.Environ.Map = null,
+    /// Extra env var names to scrub from the bash subprocess environment, in
+    /// addition to common secret-name patterns (issue #190). Typically set to
+    /// the configured `backend.api_key_env` name so it is removed even if it
+    /// does not match a generic KEY/TOKEN/SECRET pattern.
+    secret_env_names: []const []const u8 = &.{},
+    /// Known secret-bearing file paths that guarded/readonly local reads must
+    /// never expose (issue #191), such as the resolved token file and any
+    /// configured `backend.api_key_file`.
+    secret_paths: []const []const u8 = &.{},
+    /// Plaintext secret values (e.g. the resolved backend token and ambient
+    /// secret-named env values) that must never reach a persisted audit record,
+    /// trace line, structured event, or PostToolUse hook payload (issue #189).
+    /// Matching substrings in tool input/output/final/thought text are replaced
+    /// with a placeholder before they reach those recording channels; the live
+    /// conversation history sent back to the model is never routed through this.
+    redact_secret_values: []const []const u8 = &.{},
     /// Optional CLI trace output for explicit debugging; final answer stays caller-owned.
     trace: ?*std.Io.Writer = null,
     /// Optional structured event sink for protocol adapters and observability
@@ -422,16 +439,16 @@ pub const Agent = struct {
                 if (self.audit) |lg| {
                     const msg = malformedAuditMessage(arena, parse_err, completion.content) catch
                         "model output was not valid step JSON; fed back a correction and retried";
-                    lg.log(.system_error, msg) catch {};
+                    lg.log(.system_error, self.redacted(arena, msg)) catch {};
                 }
-                self.traceMalformed(turn + 1, parse_err, completion.content);
+                self.traceMalformed(arena, turn + 1, parse_err, completion.content);
                 // Keep malformed output in history so the model can see and fix it.
                 try sess.append(backing, .assistant, completion.content);
                 try sess.append(backing, .user, malformed_hint);
                 continue;
             };
-            if (self.audit) |lg| lg.log(.thought, step.thought) catch {};
-            self.traceStep(turn + 1, step);
+            if (self.audit) |lg| lg.log(.thought, self.redacted(arena, step.thought)) catch {};
+            self.traceStep(arena, turn + 1, step);
 
             // Write only compact steps without thought to history (issue #70).
             // thought is private per-turn reasoning with no reuse value in later
@@ -442,23 +459,23 @@ pub const Agent = struct {
 
             switch (step.action) {
                 .final => {
-                    if (self.audit) |lg| lg.log(.final, step.action_input) catch {};
-                    self.traceFinal(turn + 1, step.action_input);
+                    if (self.audit) |lg| lg.log(.final, self.redacted(arena, step.action_input)) catch {};
+                    self.traceFinal(arena, turn + 1, step.action_input);
                     return try backing.dupe(u8, step.action_input);
                 },
                 // All remaining actions are tool actions with common trace -> guard -> execute/feed back flow.
                 else => {
-                    if (self.audit) |lg| lg.log(.tool_call, step.action_input) catch {};
+                    if (self.audit) |lg| lg.log(.tool_call, self.redacted(arena, step.action_input)) catch {};
                     // Model-produced actions must pass the guard before reaching the system.
                     switch (self.guard(arena, step.action, step.action_input)) {
                         .deny => |reason| {
-                            self.tracePolicyDeny(turn + 1, step.action, reason);
+                            self.tracePolicyDeny(arena, turn + 1, step.action, reason);
                             const denied = try std.fmt.allocPrint(
                                 arena,
                                 "[Observation] action denied by execution policy ({s} mode): {s}. Use a safer or read-only approach.",
                                 .{ @tagName(self.policy_mode), reason },
                             );
-                            if (self.audit) |lg| lg.log(.policy_deny, denied) catch {};
+                            if (self.audit) |lg| lg.log(.policy_deny, self.redacted(arena, denied)) catch {};
                             self.postAudit(arena, sess.id, .policy_deny, step.action, step.action_input, denied);
                             try sess.append(backing, .user, denied);
                         },
@@ -473,9 +490,9 @@ pub const Agent = struct {
                             // use short references instead of stacking identical text.
                             if (try read_cache.dedup(arena, turn + 1, step.action, step.action_input, observation)) |deduped|
                                 observation = deduped;
-                            if (self.audit) |lg| lg.log(.observation, observation) catch {};
+                            if (self.audit) |lg| lg.log(.observation, self.redacted(arena, observation)) catch {};
                             self.postAudit(arena, sess.id, .observation, step.action, step.action_input, observation);
-                            self.traceObservation(turn + 1, step.action, observation);
+                            self.traceObservation(arena, turn + 1, step.action, observation);
                             try sess.append(backing, .user, try wrapUntrustedToolOutput(arena, step.action, observation));
                         },
                     }
@@ -541,34 +558,48 @@ pub const Agent = struct {
             .deny => return base,
             .allow => {},
         }
-        if (self.policy_mode != .readonly) return .allow;
         return switch (action) {
             .file_read => blk: {
                 const args = parseToolArgs(FileReadArgs, arena, input) catch
-                    break :blk .{ .deny = "readonly mode could not parse file_read path; denied" };
-                break :blk policy.evaluateReadPath(args.path, self.policy_mode);
+                    break :blk .{ .deny = "could not parse file_read path; denied" };
+                break :blk self.evaluateLocalReadPath(args.path);
             },
             .grep => blk: {
                 const args = parseToolArgs(GrepArgs, arena, input) catch
-                    break :blk .{ .deny = "readonly mode could not parse grep path; denied" };
-                break :blk policy.evaluateReadPath(args.path, self.policy_mode);
+                    break :blk .{ .deny = "could not parse grep path; denied" };
+                break :blk self.evaluateLocalReadPath(args.path);
             },
             .glob => blk: {
                 const args = parseToolArgs(GlobArgs, arena, input) catch
-                    break :blk .{ .deny = "readonly mode could not parse glob args; denied" };
-                const root_decision = policy.evaluateReadPath(args.root, self.policy_mode);
+                    break :blk .{ .deny = "could not parse glob args; denied" };
+                const root_decision = self.evaluateLocalReadPath(args.root);
                 if (root_decision != .allow) break :blk root_decision;
-                break :blk policy.evaluateReadPath(args.pattern, self.policy_mode);
+                break :blk self.evaluateLocalReadPath(args.pattern);
             },
             .outline => blk: {
                 const args = parseToolArgs(OutlineArgs, arena, input) catch
-                    break :blk .{ .deny = "readonly mode could not parse outline path; denied" };
-                break :blk policy.evaluateReadPath(args.path, self.policy_mode);
+                    break :blk .{ .deny = "could not parse outline path; denied" };
+                break :blk self.evaluateLocalReadPath(args.path);
             },
             // Caller contract: guardLocalRead is only for local read actions.
             // Degrade to deny rather than unreachable if future refactors break it.
             else => .{ .deny = "guardLocalRead received a non-local-read action; denied" },
         };
+    }
+
+    /// Applies local-read path policy for one path/pattern argument, layered by
+    /// mode. `guarded` and `readonly` both deny known secret-bearing paths
+    /// (issue #191): the configured token file / `backend.api_key_file`, and
+    /// common credential path fragments such as `.ssh`, `.env`, or `id_rsa`.
+    /// `readonly` additionally applies its full project-directory confinement
+    /// (absolute-path and `..` bans). `unrestricted` is a deliberate, explicit
+    /// full-trust exception and is never restricted by either check.
+    fn evaluateLocalReadPath(self: *Agent, path: []const u8) policy.Decision {
+        switch (policy.evaluateSecretPath(path, self.policy_mode, self.secret_paths)) {
+            .deny => |reason| return .{ .deny = reason },
+            .allow => {},
+        }
+        return policy.evaluateReadPath(path, self.policy_mode);
     }
 
     /// Classifies http_request by method: GET/HEAD -> net_read, write methods ->
@@ -883,9 +914,9 @@ pub const Agent = struct {
             };
             if (self.audit) |lg| {
                 const line = try std.fmt.allocPrint(arena, "parallel[{d}] {s} {s}", .{ idx + 1, @tagName(action), child_input });
-                lg.log(.tool_call, line) catch {};
+                lg.log(.tool_call, self.redacted(arena, line)) catch {};
             }
-            self.traceParallelCall(idx + 1, action, child_input);
+            self.traceParallelCall(arena, idx + 1, action, child_input);
             threads[idx] = try std.Thread.spawn(.{}, runParallelWorker, .{&workers[idx]});
             spawned += 1;
         }
@@ -900,8 +931,8 @@ pub const Agent = struct {
         try buf.appendSlice(arena, try std.fmt.allocPrint(arena, "[Observation] parallel completed {d} read-only calls:\n", .{args.calls.len}));
         for (workers, 0..) |*w, idx| {
             const obs_text = w.observation;
-            if (self.audit) |lg| lg.log(.observation, obs_text) catch {};
-            self.traceParallelResult(idx + 1, obs_text);
+            if (self.audit) |lg| lg.log(.observation, self.redacted(arena, obs_text)) catch {};
+            self.traceParallelResult(arena, idx + 1, obs_text);
             try buf.appendSlice(arena, try std.fmt.allocPrint(arena, "\n[{d}] {s}\n", .{ idx + 1, @tagName(w.action) }));
             try buf.appendSlice(arena, obs_text);
             try buf.append(arena, '\n');
@@ -911,8 +942,38 @@ pub const Agent = struct {
 
     /// Runs one bash command with hard timeout and formats an arena-owned observation.
     fn runBash(self: *Agent, arena: std.mem.Allocator, command: []const u8) ![]u8 {
-        const result = try tools.bash.run(arena, self.io, command, .{ .timeout_ms = self.tool_timeout_ms });
+        const environ_map = try self.subprocessEnviron(arena);
+        const result = try tools.bash.run(arena, self.io, command, .{
+            .timeout_ms = self.tool_timeout_ms,
+            .environ_map = environ_map,
+        });
         return formatObservation(arena, result);
+    }
+
+    /// Builds the scrubbed environment passed to model-triggered bash
+    /// subprocesses (issue #190): a hard rule, not a policy-mode choice, because
+    /// ambient secret exposure is not something any mode should grant by
+    /// default. Returns null when no source env is attached, in which case
+    /// `tools.bash.run` keeps its prior full-inheritance default (used by tests
+    /// and any caller that never wires `self.env`).
+    fn subprocessEnviron(self: *Agent, arena: std.mem.Allocator) !?*const std.process.Environ.Map {
+        const source = self.env orelse return null;
+        const scrubbed = try arena.create(std.process.Environ.Map);
+        scrubbed.* = try secret.scrubEnvForSubprocess(arena, source, self.secret_env_names);
+        return scrubbed;
+    }
+
+    /// Redacts known secret substrings out of `text` before it reaches any
+    /// persisted/observable channel: the audit log, structured events, human
+    /// trace output, or the PostToolUse hook payload (issue #189). Only these
+    /// recording channels are routed through this; the live conversation
+    /// history the model continues to reason over is never touched, so a tool
+    /// legitimately reading a secret value still works, it just is never
+    /// durably recorded in plaintext. Returns `text` unchanged, with no
+    /// allocation, when no secret values are configured or none match.
+    fn redacted(self: *const Agent, arena: std.mem.Allocator, text: []const u8) []const u8 {
+        if (self.redact_secret_values.len == 0) return text;
+        return secret.redactSecretsInText(arena, text, self.redact_secret_values) catch text;
     }
 
     /// Forwards a structured event to the optional sink (issue #156). No-op when
@@ -938,8 +999,8 @@ pub const Agent = struct {
             .kind = kind,
             .session_id = session_id,
             .action = @tagName(action),
-            .input = input,
-            .observation = observation,
+            .input = self.redacted(arena, input),
+            .observation = self.redacted(arena, observation),
             .mode = @tagName(self.policy_mode),
         });
     }
@@ -962,11 +1023,12 @@ pub const Agent = struct {
         w.flush() catch {};
     }
 
-    fn traceMalformed(self: *Agent, turn: u32, parse_err: anyerror, content: []const u8) void {
-        self.emitEvent(.{ .malformed = .{ .turn = turn, .err = parse_err, .raw = content } });
+    fn traceMalformed(self: *Agent, arena: std.mem.Allocator, turn: u32, parse_err: anyerror, content: []const u8) void {
+        const content_r = self.redacted(arena, content);
+        self.emitEvent(.{ .malformed = .{ .turn = turn, .err = parse_err, .raw = content_r } });
         const w = self.trace orelse return;
         w.print("[trace {d}] malformed model step ({s}); retrying. raw: ", .{ turn, @errorName(parse_err) }) catch return;
-        traceClipped(w, content, trace_malformed_cap) catch return;
+        traceClipped(w, content_r, trace_malformed_cap) catch return;
         w.writeAll("\n") catch return;
         w.flush() catch {};
     }
@@ -979,20 +1041,22 @@ pub const Agent = struct {
         w.flush() catch {};
     }
 
-    fn traceStep(self: *Agent, turn: u32, step: Step) void {
+    fn traceStep(self: *Agent, arena: std.mem.Allocator, turn: u32, step: Step) void {
+        const thought_r = self.redacted(arena, step.thought);
+        const input_r = self.redacted(arena, step.action_input);
         self.emitEvent(.{ .step = .{
             .turn = turn,
             .action = step.action,
-            .thought = step.thought,
-            .action_input = step.action_input,
+            .thought = thought_r,
+            .action_input = input_r,
         } });
         const w = self.trace orelse return;
         w.print("[trace {d}] reason: ", .{turn}) catch return;
-        traceClipped(w, step.thought, trace_reason_cap) catch return;
+        traceClipped(w, thought_r, trace_reason_cap) catch return;
         w.print("\n[trace {d}] action: {s}", .{ turn, @tagName(step.action) }) catch return;
-        if (step.action != .final and step.action_input.len > 0) {
+        if (step.action != .final and input_r.len > 0) {
             w.writeAll(" ") catch return;
-            traceClipped(w, step.action_input, trace_action_input_cap) catch return;
+            traceClipped(w, input_r, trace_action_input_cap) catch return;
         }
         w.writeAll("\n") catch return;
         w.flush() catch {};
@@ -1004,45 +1068,48 @@ pub const Agent = struct {
         w.flush() catch {};
     }
 
-    fn tracePolicyDeny(self: *Agent, turn: u32, action: Action, reason: []const u8) void {
-        self.emitEvent(.{ .policy_deny = .{ .turn = turn, .action = action, .reason = reason } });
+    fn tracePolicyDeny(self: *Agent, arena: std.mem.Allocator, turn: u32, action: Action, reason: []const u8) void {
+        const reason_r = self.redacted(arena, reason);
+        self.emitEvent(.{ .policy_deny = .{ .turn = turn, .action = action, .reason = reason_r } });
         const w = self.trace orelse return;
         w.print("[trace {d}] policy: deny ({s}) ", .{ turn, @tagName(self.policy_mode) }) catch return;
-        traceClipped(w, reason, trace_reason_cap) catch return;
+        traceClipped(w, reason_r, trace_reason_cap) catch return;
         w.writeAll("\n") catch return;
         w.flush() catch {};
     }
 
-    fn traceObservation(self: *Agent, turn: u32, action: Action, observation: []const u8) void {
-        self.emitEvent(.{ .observation = .{ .turn = turn, .action = action, .observation = observation } });
+    fn traceObservation(self: *Agent, arena: std.mem.Allocator, turn: u32, action: Action, observation: []const u8) void {
+        const observation_r = self.redacted(arena, observation);
+        self.emitEvent(.{ .observation = .{ .turn = turn, .action = action, .observation = observation_r } });
         const w = self.trace orelse return;
         w.print("[trace {d}] observe: ", .{turn}) catch return;
-        traceClipped(w, observation, trace_observation_cap) catch return;
+        traceClipped(w, observation_r, trace_observation_cap) catch return;
         w.writeAll("\n") catch return;
         w.flush() catch {};
     }
 
-    fn traceParallelCall(self: *Agent, idx: usize, action: Action, input: []const u8) void {
+    fn traceParallelCall(self: *Agent, arena: std.mem.Allocator, idx: usize, action: Action, input: []const u8) void {
         const w = self.trace orelse return;
         w.print("[trace parallel {d}] action: {s} ", .{ idx, @tagName(action) }) catch return;
-        traceClipped(w, input, trace_action_input_cap) catch return;
+        traceClipped(w, self.redacted(arena, input), trace_action_input_cap) catch return;
         w.writeAll("\n") catch return;
         w.flush() catch {};
     }
 
-    fn traceParallelResult(self: *Agent, idx: usize, observation: []const u8) void {
+    fn traceParallelResult(self: *Agent, arena: std.mem.Allocator, idx: usize, observation: []const u8) void {
         const w = self.trace orelse return;
         w.print("[trace parallel {d}] observe: ", .{idx}) catch return;
-        traceClipped(w, observation, trace_observation_cap) catch return;
+        traceClipped(w, self.redacted(arena, observation), trace_observation_cap) catch return;
         w.writeAll("\n") catch return;
         w.flush() catch {};
     }
 
-    fn traceFinal(self: *Agent, turn: u32, reply: []const u8) void {
-        self.emitEvent(.{ .final = .{ .turn = turn, .reply = reply } });
+    fn traceFinal(self: *Agent, arena: std.mem.Allocator, turn: u32, reply: []const u8) void {
+        const reply_r = self.redacted(arena, reply);
+        self.emitEvent(.{ .final = .{ .turn = turn, .reply = reply_r } });
         const w = self.trace orelse return;
         w.print("[trace {d}] final: ", .{turn}) catch return;
-        traceClipped(w, reply, trace_final_cap) catch return;
+        traceClipped(w, reply_r, trace_final_cap) catch return;
         w.writeAll("\n") catch return;
         w.flush() catch {};
     }
@@ -2622,6 +2689,42 @@ test "run: ReACT can use bash before final answer" {
     try std.testing.expect(saw_untrusted_boundary);
 }
 
+test "runBash: scrubs secret-bearing env vars from the bash subprocess by default (issue #190)" {
+    const gpa = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var brain = ScriptedBrain{ .steps = &.{} };
+    var ag = testAgent(&brain, 16);
+
+    var env: std.process.Environ.Map = .init(gpa);
+    defer env.deinit();
+    try env.put("OPENAI_API_KEY", "sk-should-not-leak");
+    try env.put("MY_OPAQUE_HANDLE", "should-not-leak-either");
+    try env.put("SCOOT_KEEP_ME", "kept");
+    ag.env = &env;
+    const extra_names = [_][]const u8{"MY_OPAQUE_HANDLE"};
+    ag.secret_env_names = &extra_names;
+
+    const observation = try ag.execTool(arena, .bash, "printf \"[$OPENAI_API_KEY][$MY_OPAQUE_HANDLE][$SCOOT_KEEP_ME]\"");
+    try std.testing.expect(std.mem.indexOf(u8, observation, "sk-should-not-leak") == null);
+    try std.testing.expect(std.mem.indexOf(u8, observation, "should-not-leak-either") == null);
+    try std.testing.expect(std.mem.indexOf(u8, observation, "[][][kept]") != null);
+}
+
+test "runBash: falls back to full inheritance when no env is attached" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var brain = ScriptedBrain{ .steps = &.{} };
+    var ag = testAgent(&brain, 16); // ag.env stays null: prior full-inheritance behavior.
+
+    const observation = try ag.execTool(arena, .bash, "printf OK");
+    try std.testing.expect(std.mem.indexOf(u8, observation, "OK") != null);
+}
+
 test "wrapUntrustedToolOutput escapes nested boundary markers" {
     var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_state.deinit();
@@ -2962,6 +3065,11 @@ const CapturingSink = struct {
     count: usize = 0,
     deny_action: ?Action = null,
     final_turn: u32 = 0,
+    // `Event` slices are turn-arena lifetime (see the `Event` doc comment) and
+    // dangle once `run` returns, so the final reply is copied into a bounded
+    // buffer here rather than retaining the slice itself.
+    final_reply_buf: [256]u8 = undefined,
+    final_reply_len: usize = 0,
 
     fn record(ctx: *anyopaque, ev: Event) void {
         const self: *CapturingSink = @ptrCast(@alignCast(ctx));
@@ -2971,13 +3079,21 @@ const CapturingSink = struct {
         }
         switch (ev) {
             .policy_deny => |d| self.deny_action = d.action,
-            .final => |f| self.final_turn = f.turn,
+            .final => |f| {
+                self.final_turn = f.turn;
+                self.final_reply_len = @min(f.reply.len, self.final_reply_buf.len);
+                @memcpy(self.final_reply_buf[0..self.final_reply_len], f.reply[0..self.final_reply_len]);
+            },
             else => {},
         }
     }
 
     fn sink(self: *CapturingSink) EventSink {
         return .{ .ctx = self, .emitFn = record };
+    }
+
+    fn finalReply(self: *const CapturingSink) []const u8 {
+        return self.final_reply_buf[0..self.final_reply_len];
     }
 };
 
@@ -3058,6 +3174,61 @@ test "run: audit logs thought/tool_call/observation/final events" {
         const v = try std.json.parseFromSlice(std.json.Value, gpa, line, .{});
         v.deinit();
     }
+}
+
+test "run: redacts known secret values from audit log, trace, and events but keeps live session history intact (issue #189)" {
+    const gpa = std.testing.allocator;
+    const secret_value = "sk-live-abcdef1234567890";
+    var brain = ScriptedBrain{ .steps = &.{
+        "{\"thought\":\"reading token\",\"action\":\"bash\",\"action_input\":\"printf sk-live-abcdef1234567890\"}",
+        "{\"thought\":\"done\",\"action\":\"final\",\"action_input\":\"the token is sk-live-abcdef1234567890\"}",
+    } };
+    var ag = testAgent(&brain, 16);
+    ag.redact_secret_values = &.{secret_value};
+
+    var logbuf: [4096]u8 = undefined;
+    var lw = std.Io.Writer.fixed(&logbuf);
+    var logger = audit.Logger.init(&lw, std.testing.io);
+    ag.audit = &logger;
+
+    var tracebuf: [4096]u8 = undefined;
+    var tw = std.Io.Writer.fixed(&tracebuf);
+    ag.trace = &tw;
+
+    var capture = CapturingSink{};
+    ag.events = &capture.sink();
+
+    var sess = session.Session.init("t");
+    defer sess.deinit(gpa);
+    try sess.append(gpa, .user, "reveal the token");
+    const reply = try ag.run(gpa, &sess);
+    defer gpa.free(reply);
+
+    // The agent's own final answer still carries the real value: redaction
+    // protects persisted/observable channels, not the agent's own output.
+    try std.testing.expect(std.mem.indexOf(u8, reply, secret_value) != null);
+
+    const log = lw.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, log, secret_value) == null);
+    try std.testing.expect(std.mem.indexOf(u8, log, "[REDACTED]") != null);
+
+    const trace_out = tw.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, trace_out, secret_value) == null);
+    try std.testing.expect(std.mem.indexOf(u8, trace_out, "[REDACTED]") != null);
+
+    // The structured event sink (issue #156) is an observability channel too
+    // and must never carry the plaintext secret either.
+    try std.testing.expect(capture.final_turn != 0);
+    try std.testing.expect(std.mem.indexOf(u8, capture.finalReply(), secret_value) == null);
+
+    // Live conversation history sent back to the model keeps the real
+    // observation so the agent can still act on legitimate tool output; only
+    // recording/observability channels are scrubbed.
+    var saw_secret_in_history = false;
+    for (sess.items()) |m| {
+        if (std.mem.indexOf(u8, m.content, secret_value) != null) saw_secret_in_history = true;
+    }
+    try std.testing.expect(saw_secret_in_history);
 }
 
 test "run: trace writes reason/action/policy/observation/final to injected writer" {

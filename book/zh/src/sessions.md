@@ -89,12 +89,13 @@ scoot audit show <session-id>
 
 ## 详细程度
 
-用 `[audit] level` 控制记录量 —— `debug`、`info`（默认）、`warn` 或 `error`。设 `to_file = false` 可完全关闭文件日志。
+用 `[audit] level` 控制记录量 —— `debug`、`info`（默认）、`warn` 或 `error`。设 `to_file = false` 可完全关闭文件日志。`max_retained_generations`（默认 `8`）限定已轮转的审计代最多保留多少个，超出后淘汰最旧的一个；见[留存](#留存)。
 
 ```toml
 [audit]
 level = "info"
 to_file = true
+max_retained_generations = 8
 ```
 
 ## 密钥绝不入日志
@@ -103,4 +104,6 @@ to_file = true
 
 ## 留存
 
-会话与审计文件是追加式 JSONL。单个 JSONL 文件达到内置大小上限后，Scoot 会在追加前把它轮转为 `.1`，避免 daemon 长跑时单文件无界增长。
+会话记录是追加式 JSONL 文件。单个会话文件达到内置大小上限后，Scoot 会在追加前把它轮转为 `.1`，避免 daemon 长跑时单文件无界增长；只保留最新一份备份。
+
+审计日志采用了更稳健的方案，让未来的 `scoot-edge` audit 搬运器永远不会静默丢失某一段（issue #187）：`logs/audit.jsonl` 达到大小上限后，会被退休为一个单调编号的 `logs/audit.jsonl.<gen>`，而不是覆盖式的单一 `.1` 备份。代数计数器持久记录在 `logs/audit.jsonl.gen` sidecar 里，因此能在进程重启后存活。最多在磁盘上保留 `[audit] max_retained_generations`（默认 `8`）个已退休代；只有超过这个上限时才会淘汰最旧的一个，且每一次淘汰都会以 `{gap_from, gap_to, ts}` 的形式持久记录进 `logs/audit.jsonl.gaps.jsonl`，而不是悄悄消失。若曾记录过任何 gap，`scoot doctor` 会把 `audit.retention` 报告为 `WARN`，因此一个有界的保留上限永远不会变成一次看不见的丢失。

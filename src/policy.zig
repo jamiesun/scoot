@@ -230,6 +230,42 @@ fn isSensitivePathPart(part: []const u8) bool {
     return false;
 }
 
+/// Denies known secret-bearing paths for local read tools (`file_read`, `grep`,
+/// `glob`, `outline`) in both `guarded` and `readonly` (issue #191). `guarded`
+/// is documented as a broad-access interactive tripwire, not a sandbox, so this
+/// deliberately does not add readonly's full project-directory confinement
+/// (absolute-path / `..` bans) to guarded; it only closes the specific
+/// credential-exposure gap. `unrestricted` is an explicit, user-chosen
+/// full-trust exception and is never restricted here.
+///
+/// Two independent checks, either one denies:
+///   - `secret_paths`: exact match (after trimming) against configured secret
+///     file paths, such as the resolved token file and `backend.api_key_file`.
+///     These are already-resolved absolute paths, not `~`-prefixed strings, so
+///     comparison is a plain string match, not filesystem resolution.
+///   - the same common credential/secret path-name fragments readonly already
+///     rejects (`.env`, `.ssh`, `id_rsa`, `secret`, `token`, `credentials`,
+///     ...), checked against every path component so both `/abs/token` and
+///     `./nested/token` are caught.
+pub fn evaluateSecretPath(path: []const u8, mode: Mode, secret_paths: []const []const u8) Decision {
+    if (mode == .unrestricted) return .allow;
+    const p = std.mem.trim(u8, path, " \t\r\n");
+    if (p.len == 0) return .allow; // Nothing to compare; base read capability already applies.
+
+    for (secret_paths) |secret_path| {
+        if (secret_path.len == 0) continue;
+        if (std.mem.eql(u8, p, secret_path))
+            return .{ .deny = "path matches a configured Scoot secret file; denied to prevent credential exposure" };
+    }
+
+    var it = std.mem.tokenizeAny(u8, p, "/\\");
+    while (it.next()) |part| {
+        if (isSensitivePathPart(part))
+            return .{ .deny = "path matches a common credential/secret file pattern; denied to prevent credential exposure" };
+    }
+    return .allow;
+}
+
 /// Project-root write constraint, opt-in, default off, active only in `guarded`.
 /// Threat: an untrusted model in guarded could file_write/file_edit outside the
 /// project, e.g. `$HOME/.ssh/authorized_keys`. When enabled, this bans absolute
@@ -646,6 +682,58 @@ test "evaluateReadPath:readonly only allows project-relative non-sensitive paths
 test "evaluateReadPath:guarded / unrestricted does not restrict paths; outer audit handles it" {
     try testing.expectEqual(Decision.allow, evaluateReadPath("/etc/passwd", .guarded));
     try testing.expectEqual(Decision.allow, evaluateReadPath("../outside.txt", .unrestricted));
+}
+
+test "evaluateSecretPath: guarded denies known secret path fragments but allows ordinary absolute paths (issue #191)" {
+    // Matches issue #191's reproduction: guarded previously allowed this.
+    switch (evaluateSecretPath("/tmp/demo-token", .guarded, &.{})) {
+        .deny => {},
+        .allow => return error.ShouldHaveDenied,
+    }
+    const denied = [_][]const u8{
+        ".ssh/id_rsa",
+        "$HOME/.ssh/id_rsa",
+        ".env",
+        "credentials.json",
+        "secret.toml",
+        "/root/.gnupg/secring.gpg",
+    };
+    for (denied) |p| {
+        switch (evaluateSecretPath(p, .guarded, &.{})) {
+            .deny => {},
+            .allow => {
+                std.debug.print("guarded secret path should deny but allowed: {s}\n", .{p});
+                return error.ShouldHaveDenied;
+            },
+        }
+    }
+    // guarded is a tripwire, not a sandbox: ordinary absolute reads that are not
+    // secret-like stay allowed, unlike readonly's blanket absolute-path ban.
+    try testing.expectEqual(Decision.allow, evaluateSecretPath("/etc/hostname", .guarded, &.{}));
+    try testing.expectEqual(Decision.allow, evaluateSecretPath("/tmp/notes.txt", .guarded, &.{}));
+}
+
+test "evaluateSecretPath: denies an exact configured secret path regardless of its name" {
+    const secret_paths = [_][]const u8{"/home/user/.config/myapp/auth.dat"};
+    switch (evaluateSecretPath("/home/user/.config/myapp/auth.dat", .guarded, &secret_paths)) {
+        .deny => {},
+        .allow => return error.ShouldHaveDenied,
+    }
+    // A different, unrelated path is unaffected.
+    try testing.expectEqual(Decision.allow, evaluateSecretPath("/home/user/.config/myapp/settings.json", .guarded, &secret_paths));
+}
+
+test "evaluateSecretPath: unrestricted always allows, even against an exact configured secret path" {
+    try testing.expectEqual(Decision.allow, evaluateSecretPath("/tmp/demo-token", .unrestricted, &.{}));
+    const secret_paths = [_][]const u8{"/tmp/demo-token"};
+    try testing.expectEqual(Decision.allow, evaluateSecretPath("/tmp/demo-token", .unrestricted, &secret_paths));
+}
+
+test "evaluateSecretPath: readonly also denies known secret paths" {
+    switch (evaluateSecretPath("/tmp/demo-token", .readonly, &.{})) {
+        .deny => {},
+        .allow => return error.ShouldHaveDenied,
+    }
 }
 
 test "evaluateWritePath:rejects escaping writes when project-root confinement is enabled(issue #32)" {

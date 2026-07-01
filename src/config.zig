@@ -13,6 +13,7 @@ const wasm_runner = @import("tools/wasm.zig");
 const compressor = @import("compressor.zig");
 const policy_hook_mod = @import("policy_hook.zig");
 const audit_hook_mod = @import("audit_hook.zig");
+const audit_mod = @import("audit.zig");
 
 pub const default_context_budget_bytes: usize = 80_000;
 
@@ -150,6 +151,12 @@ pub const Audit = struct {
     level: []const u8 = "info",
     /// Whether to write audit logs under ~/.scoot/logs.
     to_file: bool = true,
+    /// How many retired (rotated) generations of `logs/audit.jsonl` are kept
+    /// on disk before the oldest is evicted. Bounds disk usage while giving a
+    /// future edge shipper multiple rotations of slack to catch up before any
+    /// data is permanently lost; an eviction past this cap is durably
+    /// recorded in `logs/audit.jsonl.gaps.jsonl` (issue #187).
+    max_retained_generations: u32 = audit_mod.default_max_retained_generations,
     /// Optional PostToolUse-style audit/observability hook (issue #137).
     /// Default-off: when `hook.package` is set, a structured event is delivered
     /// to the hook after each tool action completes (executed or policy-denied),
@@ -232,7 +239,7 @@ pub const Schedule = struct {
 };
 
 /// Edge / unattended-job configuration. The local ceiling for any unattended
-/// one-shot (`scoot -e --unattended`) or future edge-dispatched job. This is a
+/// one-shot (`scoot --unattended -e "<goal>"`) or future edge-dispatched job. This is a
 /// deliberately separate knob from `tools.policy` (the interactive default) so
 /// that raising the interactive policy never silently raises the unattended
 /// ceiling. It is enforced in-child against local config, so a command line or
@@ -626,6 +633,7 @@ pub const Config = struct {
         // Audit.
         try overrideEnvEnumString(env, "SCOOT_AUDIT_LEVEL", &self.audit.level, &.{ "debug", "info", "warn", "error" }, &warnings, arena);
         try overrideEnvBool(env, "SCOOT_AUDIT_TO_FILE", &self.audit.to_file, &warnings, arena);
+        try overrideEnvInt(u32, env, "SCOOT_AUDIT_MAX_RETAINED_GENERATIONS", &self.audit.max_retained_generations, &warnings, arena);
 
         // Edge: the unattended-job policy ceiling. Same accepted values as tools.policy.
         try overrideEnvEnumString(env, "SCOOT_EDGE_MAX_JOB_POLICY", &self.edge.max_job_policy, &.{ "guarded", "readonly", "unrestricted", "yolo" }, &warnings, arena);
@@ -646,6 +654,47 @@ pub const Config = struct {
         try srcs.append(arena, .{ .file = self.backend.api_key_file orelse self.dirs.token_file });
         if (self.backend.api_key_cmd) |cmd| try srcs.append(arena, .{ .command = cmd });
         return secret.resolve(arena, io, env, srcs.items);
+    }
+
+    /// Env var names that must be scrubbed from model-triggered bash subprocess
+    /// environments in addition to generic secret-name patterns (issue #190).
+    /// Currently just the configured backend token env var name, in case it
+    /// does not match a generic KEY/TOKEN/SECRET pattern.
+    pub fn secretEnvNames(self: Config, arena: std.mem.Allocator) ![]const []const u8 {
+        const names = try arena.alloc([]const u8, 1);
+        names[0] = self.backend.api_key_env;
+        return names;
+    }
+
+    /// Known secret-bearing file paths that guarded/readonly local reads must
+    /// never expose (issue #191): the resolved token file and, if configured, a
+    /// distinct `backend.api_key_file`.
+    pub fn secretPaths(self: Config, arena: std.mem.Allocator) ![]const []const u8 {
+        var list: std.ArrayList([]const u8) = .empty;
+        try list.append(arena, self.dirs.token_file);
+        if (self.backend.api_key_file) |f| {
+            if (!std.mem.eql(u8, f, self.dirs.token_file)) try list.append(arena, f);
+        }
+        return list.items;
+    }
+
+    /// Plaintext secret values that must never reach a persisted audit record,
+    /// trace line, structured event, or PostToolUse hook payload (issue #189):
+    /// `token` (the already-resolved backend credential; pass what the caller
+    /// resolved once so this never re-invokes a slow/side-effecting
+    /// `api_key_cmd` a second time) plus the value of every ambient
+    /// environment variable whose name looks secret-bearing.
+    pub fn redactSecretValues(
+        self: Config,
+        arena: std.mem.Allocator,
+        env: *const Environ.Map,
+        token: []const u8,
+    ) ![]const []const u8 {
+        var list: std.ArrayList([]const u8) = .empty;
+        if (token.len != 0) try list.append(arena, token);
+        const names = try self.secretEnvNames(arena);
+        try list.appendSlice(arena, try secret.collectSecretEnvValues(arena, env, names));
+        return list.items;
     }
 
     /// All skill search paths in priority order. First wins because
@@ -777,6 +826,73 @@ test "skillPaths: project and ~/.agents skills are opt-in" {
     try std.testing.expectEqual(@as(usize, 2), got2.len);
     try std.testing.expectEqualStrings(".agents/skills", got2[0]);
     try std.testing.expectEqualStrings("/home/u/.scoot/skills", got2[1]);
+}
+
+test "secretEnvNames: returns the configured backend token env var name (issue #190)" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const cfg: Config = .{ .dirs = try paths.Paths.fromHome(arena, "/home/u/.scoot"), .backend = .{ .api_key_env = "WJT_AZURE_OPENAI_API_KEY" } };
+    const got = try cfg.secretEnvNames(arena);
+    try std.testing.expectEqual(@as(usize, 1), got.len);
+    try std.testing.expectEqualStrings("WJT_AZURE_OPENAI_API_KEY", got[0]);
+}
+
+test "secretPaths: includes the token file and a distinct configured api_key_file (issue #191)" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const dirs = try paths.Paths.fromHome(arena, "/home/u/.scoot");
+
+    // Default: only the resolved token file.
+    const cfg_default: Config = .{ .dirs = dirs };
+    const got_default = try cfg_default.secretPaths(arena);
+    try std.testing.expectEqual(@as(usize, 1), got_default.len);
+    try std.testing.expectEqualStrings("/home/u/.scoot/token", got_default[0]);
+
+    // Distinct api_key_file: both paths are protected.
+    const cfg_custom: Config = .{ .dirs = dirs, .backend = .{ .api_key_file = "/etc/scoot/azure.key" } };
+    const got_custom = try cfg_custom.secretPaths(arena);
+    try std.testing.expectEqual(@as(usize, 2), got_custom.len);
+    try std.testing.expectEqualStrings("/home/u/.scoot/token", got_custom[0]);
+    try std.testing.expectEqualStrings("/etc/scoot/azure.key", got_custom[1]);
+
+    // api_key_file equal to the token file: no duplicate entry.
+    const cfg_same: Config = .{ .dirs = dirs, .backend = .{ .api_key_file = "/home/u/.scoot/token" } };
+    const got_same = try cfg_same.secretPaths(arena);
+    try std.testing.expectEqual(@as(usize, 1), got_same.len);
+}
+
+test "redactSecretValues: combines the resolved token with secret-named ambient env values (issue #189)" {
+    var arena_state: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var env: std.process.Environ.Map = .init(std.testing.allocator);
+    defer env.deinit();
+    try env.put("PATH", "/usr/bin");
+    try env.put("WJT_AZURE_OPENAI_API_KEY", "azure-secret-value-1");
+    try env.put("SOME_OTHER_TOKEN", "other-secret-value-2");
+
+    const cfg: Config = .{ .dirs = try paths.Paths.fromHome(arena, "/home/u/.scoot"), .backend = .{ .api_key_env = "WJT_AZURE_OPENAI_API_KEY" } };
+    const got = try cfg.redactSecretValues(arena, &env, "already-resolved-token-value");
+    var saw_token = false;
+    var saw_azure_key = false;
+    var saw_other_token = false;
+    for (got) |v| {
+        if (std.mem.eql(u8, v, "already-resolved-token-value")) saw_token = true;
+        if (std.mem.eql(u8, v, "azure-secret-value-1")) saw_azure_key = true;
+        if (std.mem.eql(u8, v, "other-secret-value-2")) saw_other_token = true;
+    }
+    try std.testing.expect(saw_token);
+    try std.testing.expect(saw_azure_key);
+    try std.testing.expect(saw_other_token);
+
+    // Empty token (no backend auth configured) contributes nothing extra.
+    const got_no_token = try cfg.redactSecretValues(arena, &env, "");
+    try std.testing.expectEqual(@as(usize, 2), got_no_token.len);
 }
 
 test "parseTomlConfig: TOML to FileConfig with extra_body passthrough and per-section merge" {

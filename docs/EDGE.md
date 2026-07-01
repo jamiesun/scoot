@@ -184,12 +184,15 @@ surface, and **advisory, never authority**.
 Source: read-only `logs/*.jsonl`.
 
 **Shipping audit off-box is a data-movement decision, not a no-op.** Constraint 7
-guarantees that Scoot's *own* backend secret is never written to audit; it does
-**not** guarantee that audit `msg` bodies are free of sensitive content. `observation`
-and `tool_call` events carry tool output verbatim: `file_read` file contents, `bash`
-command output, and `http_request` response bodies. So `audit_batch` relocates
-whatever a run observed to the center. The edge therefore treats audit shipping as
-fail-closed:
+is enforced for *known* secret values: the resolved backend token and the value of
+any ambient env var whose name looks secret-bearing are redacted out of `msg`
+bodies before they are ever written to `logs/audit.jsonl` (issue #189). It does
+**not** guarantee that audit `msg` bodies are free of *all* sensitive content.
+`observation` and `tool_call` events still carry tool output verbatim beyond known
+secret values: `file_read` file contents, `bash` command output, and
+`http_request` response bodies may hold sensitive data Scoot has no way to
+recognize as a secret. So `audit_batch` relocates whatever a run observed to the
+center. The edge therefore treats audit shipping as fail-closed:
 
 - `edge.ship_audit` defaults to **off**. Without it, telemetry is the `status`
   heartbeat only (counts, never bodies).
@@ -212,19 +215,32 @@ fail-closed:
   generation plus byte offset), with `seq` as a secondary correlation. The center
   stores append-only; replaying the same range is a no-op. This yields at-least-once
   delivery with idempotent apply.
-- **`file_gen` does not exist in core today; it is a hard E1 prerequisite, not a
-  convenience.** Current rotation (`audit.jsonl → audit.jsonl.1` in `src/audit.zig`)
-  keeps a *single* backup and deletes the prior `.1`, with no generation counter. As
-  written, a node that rotates twice between edge polls **permanently loses** the
-  middle range from the center's view, so E1 must not ship audit on this base while
-  promising no loss. The accepted fix is **shipping-aware retention**: core gains a
-  monotonic rotation generation and retains rotated audit segments until the edge
-  acks them (bounded by a configurable cap). If the cap is exceeded the edge emits an
-  explicit `audit_gap` marker upward rather than silently skipping — a visible gap is
-  safer than an invisible one.
-- **Until shipping-aware retention lands, audit shipping stays disabled by design**
-  (`status` heartbeat only). This keeps E1's delivery promise honest instead of
-  advertising at-least-once on a lossy base.
+- **`file_gen` now exists in core** (issue #187), closing the hard E1
+  prerequisite this section used to block on. `src/audit.zig`'s
+  `rotateGenerational` replaces the old single-backup `audit.jsonl → audit.jsonl.1`
+  (which deleted the prior `.1` on every rotation, permanently losing the middle
+  range if a node rotated twice between edge polls). Each rotation now retires
+  the active file to a monotonically numbered `audit.jsonl.<gen>`, with the
+  generation counter persisted in a `audit.jsonl.gen` sidecar so it survives
+  process restarts. Up to `[audit].max_retained_generations` (default 8) retired
+  generations are kept; only once that cap is exceeded is the oldest evicted —
+  and the eviction is durably recorded as `{gap_from, gap_to, ts}` in
+  `audit.jsonl.gaps.jsonl` (readable via `scoot doctor`, which warns if any gap
+  was ever recorded) rather than silently disappearing.
+- **This is a core retention prerequisite, not audit shipping itself.** The
+  byte-offset side of the cursor (`byte_from`/`byte_to`/`seq_to` above) and the
+  wire-level `audit_gap` marker are still E1 shipping work that does not exist
+  yet — `edge.ship_audit` / `edge.audit_ship_kinds` / `edge.audit_redact` are
+  aspirational config keys with no implementation in `src/edge_main.zig` today.
+  What #187 removes is the *reason* shipping could never be at-least-once: core
+  no longer destroys a rotated generation before something had a chance to read
+  it, and any generation that is eventually evicted by the cap leaves a durable
+  trail instead of a silent hole.
+- **Audit shipping itself stays unimplemented and therefore off.** Landing the
+  retention prerequisite does not turn `audit_batch` on; there is still no
+  `edge.ship_audit` config, dial-out path, or ack protocol in `src/edge_main.zig`.
+  This keeps E1's eventual delivery promise honest instead of advertising
+  at-least-once before the shipping code itself exists.
 - In a VPC deployment, E1 may stay as simple periodic `POST /telemetry`. The edge
   does not need long-polling until E2 introduces job dispatch.
 
@@ -261,7 +277,7 @@ The entire security model lives in these rules:
 | Full provenance | Each dispatched job is recorded in an edge-side `logs/edge-audit.jsonl` (who dispatched it, `idem_key`, `effective_policy`, correlated `session_id`), joined to Scoot's own run audit via `session_id`. | Full provenance auditing |
 | Confined working directory | The edge launches the child with cwd pinned to `edge.job_root` (a dedicated, empty-by-default directory), never the host root or `$HOME`. Because `readonly` read confinement is **cwd-relative** (`evaluateReadPath`), this is what makes `readonly` mean *this directory* instead of *the whole filesystem*. | Local config/policy is the ceiling |
 
-**The clamp is now a real primitive — `scoot -e --unattended`.** Previously
+**The clamp is now a real primitive — `scoot --unattended -e "<goal>"`.** Previously
 `scoot -e` ran at the *local config* policy (`cfg.tools.policy`) and, unlike a
 scheduled job, got **no** unattended `guarded → readonly` correction (that lives in
 `schedule.zig`'s `effectiveMode`, which the plain one-shot path never called). So a
@@ -272,7 +288,7 @@ shell, write, and network allowed — not `readonly`. That gap is now closed: pa
 **inside the child against local config**, so argv can only ever *lower* policy. A
 buggy or center-influenced edge passing `--policy unrestricted` on the command line
 is clamped down to the local ceiling and ignored. The edge launches E2 jobs through
-this clamp (`scoot -e --unattended`); the shared `correctUnattended` lattice in
+this clamp (`scoot --unattended -e "<goal>"`); the shared `correctUnattended` lattice in
 `policy.zig` is the single source of truth for both the scheduler and the one-shot.
 
 Job lifecycle is reported back over the same append-only telemetry channel:
@@ -289,7 +305,7 @@ Job lifecycle is reported back over the same append-only telemetry channel:
 
 | Phase | What the center can do | Risk | Recommendation |
 | --- | --- | --- | --- |
-| E1 report-only | `status` heartbeat by default; audit-log shipping only when explicitly enabled | lower, but audit shipping moves observation data (file contents, command output) off-box | ship `status` first; keep audit shipping off until rotation is shipping-aware |
+| E1 report-only | `status` heartbeat by default; audit-log shipping only when explicitly enabled | lower, but audit shipping moves observation data (file contents, command output) off-box | ship `status` first; core rotation is now shipping-aware (#187), but keep audit shipping off until the E1 dial-out/ack path itself is built |
 | E2 job-dispatch | dispatch tasks the edge launches via Scoot | confused deputy (the edge could be used as someone else's tool) | only behind explicit config + policy ceiling |
 
 **Signed-off defaults:**
@@ -297,7 +313,7 @@ Job lifecycle is reported back over the same append-only telemetry channel:
 - **Edge-dispatched jobs default to `readonly`, enforced by the clamp — not
   inherited automatically.** The scheduler's `guarded → readonly` correction lives in
   `schedule.zig` and does *not* apply to a plain `scoot -e`. The in-child unattended
-  clamp now exists in core as `scoot -e --unattended` (it reads the local
+  clamp now exists in core as `scoot --unattended -e "<goal>"` (it reads the local
   `edge.max_job_policy` ceiling, default `readonly`), so the readonly default is
   backed; E2 job dispatch wires through it.
 - **Raising the ceiling requires explicit local opt-in, and the only meaningful
@@ -342,16 +358,24 @@ separate, independently-useful core changes, but E1/E2 are gated on them.
    human-readable text.
 2. **(E2 prerequisite — the keystone) ✅ Done.** An unattended one-shot policy
    clamp so an edge-launched `scoot -e` is provably at or below the `readonly`
-   ceiling, enforced in-child against local config. Shipped as `scoot -e
-   --unattended` (with an optional `--policy <mode>` that can only *lower*), reading
-   the local `edge.max_job_policy` ceiling (default `readonly`). The shared
-   `correctUnattended`/`privilegeMin` lattice in `policy.zig` is the single source of
-   truth for both the scheduler and the one-shot. This unblocks E2 job dispatch.
-3. **(E1 prerequisite)** Shipping-aware, rotation-stable audit: a monotonic rotation
-   generation plus byte offset, retaining rotated segments until acked (bounded, with
-   an explicit `audit_gap` marker when the bound is exceeded). The current
-   single-backup destructive rotation cannot carry an at-least-once promise. Audit
-   shipping stays disabled until this lands.
+   ceiling, enforced in-child against local config. Shipped as
+   `scoot --unattended -e "<goal>"` (with an optional `--policy <mode>` that can
+   only *lower*), reading the local `edge.max_job_policy` ceiling (default
+   `readonly`). The shared `correctUnattended`/`privilegeMin` lattice in
+   `policy.zig` is the single source of truth for both the scheduler and the
+   one-shot. This unblocks E2 job dispatch.
+3. **(E1 prerequisite) ✅ Core retention done.** Shipping-aware, rotation-stable
+   audit: a monotonic rotation generation, retaining rotated segments up to a
+   bounded cap with an explicit gap record when the cap is exceeded. Landed as
+   `rotateGenerational` in `src/audit.zig` (#187): the destructive single-backup
+   `.1` rotation is gone from the real audit log, replaced by numbered
+   `audit.jsonl.<gen>` segments tracked in a durable `.gen` sidecar, up to
+   `[audit].max_retained_generations` (default `8`) kept, with any eviction
+   durably recorded in `.gaps.jsonl` and surfaced by `scoot doctor`. Still
+   missing before audit shipping itself can start: the byte-offset half of the
+   cursor (`byte_from`/`byte_to`/`seq_to`), the wire-level `audit_gap` marker,
+   and the `edge.ship_audit` dial-out path — none of which exist in
+   `src/edge_main.zig` yet. Audit shipping stays disabled until those land.
 4. **(Contract)** Keep the `serve` NDJSON method set stable as a contract;
    `scoot-edge` reuses its framing, not the channel.
 
@@ -393,16 +417,20 @@ separate, independently-useful core changes, but E1/E2 are gated on them.
   loopback HTTP center testing). `run` shuts down cleanly (exit `0`) on SIGINT/SIGTERM
   after finishing the in-flight heartbeat, so a systemd/launchd stop is graceful rather
   than a hard kill; one-shot commands use stable exit codes (`0` ok, `1` dial-out POST
-  failed, `2` config/usage error, `3` local-status collection failed). Audit-log shipping
-  is **deferred within E1** until
-  prerequisite #3 (shipping-aware rotation) lands; until then E1 ships counts, not
-  bodies, and `edge.ship_audit` is off by default. The opt-in `node` capability
-  descriptor (`--report-capabilities`, off by default; `--label` / `--skill` and the
+  failed, `2` config/usage error, `3` local-status collection failed). **Prerequisite
+  #3 (core-side shipping-aware rotation) is done** — `src/audit.zig`'s
+  `rotateGenerational` retains numbered `audit.jsonl.<gen>` segments bounded by
+  `[audit].max_retained_generations`, with evictions past the cap durably recorded
+  in `audit.jsonl.gaps.jsonl` (#187) — but audit-log **shipping itself remains
+  unimplemented**, so it stays deferred within E1: there is still no dial-out path,
+  ack protocol, or `edge.ship_audit` wiring in `src/edge_main.zig`. Until that lands,
+  E1 ships counts, not bodies, and `edge.ship_audit` is off by default. The opt-in `node`
+  capability descriptor (`--report-capabilities`, off by default; `--label` / `--skill` and the
   `SCOOT_EDGE_LABELS` / `SCOOT_EDGE_SKILLS` env vars feed it) may ride the heartbeat
   for later capability-aware routing — advisory only, never authority.
 - **E2:** schema'd, idempotent job dispatch behind explicit config + policy ceiling +
   provenance auditing. **Prerequisite #2 (the in-child unattended policy clamp) is
-  done** — `scoot -e --unattended` — so E2 now gates only on cwd confinement
+  done** — `scoot --unattended -e "<goal>"` — so E2 now gates only on cwd confinement
   (`edge.job_root`). Edge jobs default `readonly`; the only raise is local
   `edge.max_job_policy = unrestricted`. Capability-aware routing consumes the E1
   `node` descriptor; a job a node cannot satisfy rejects with `no_matching_capability`.

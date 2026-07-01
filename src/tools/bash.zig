@@ -18,6 +18,12 @@ pub const Options = struct {
     stderr_limit: usize = 1 << 20,
     /// Working directory; null inherits the current process cwd.
     cwd: ?[]const u8 = null,
+    /// Replaces the child environment when set (issue #190). Null keeps the
+    /// prior default of full inheritance from the parent process, which
+    /// callers such as `secret.zig`'s credential-command source rely on. Callers
+    /// that execute model-triggered commands should pass a scrubbed map so
+    /// ambient secrets are not handed to the subprocess by default.
+    environ_map: ?*const std.process.Environ.Map = null,
 };
 
 /// Runs one shell command and returns a unified result. On success, `stdout` and
@@ -45,6 +51,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, command: []const u8, opts: Option
         .stdout_limit = .limited(opts.stdout_limit),
         .stderr_limit = .limited(opts.stderr_limit),
         .cwd = cwd,
+        .environ_map = opts.environ_map,
     }) catch |err| switch (err) {
         error.Timeout => return .{ .timed_out = true },
         error.StreamTooLong => return .{ .exit_code = -1, .stderr = "[scoot] command output exceeded the limit and was terminated" },
@@ -97,6 +104,28 @@ test "bash: hard timeout force-terminates and returns quickly" {
     try std.testing.expect(r.timed_out);
     try std.testing.expect(elapsed_ms < 3000); // Much earlier than sleep's 5s.
     // Timeout results return string literals, so there is no ownership to free.
+}
+
+test "bash: environ_map is forwarded to the child process" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+
+    var env: std.process.Environ.Map = .init(gpa);
+    defer env.deinit();
+    try env.put("SCOOT_BASH_ENV_TEST", "visible");
+
+    // Note: this only proves the explicit map reaches the child. It does not
+    // assert that ambient parent-process vars such as PATH are absent, because
+    // /bin/sh on some platforms (e.g. macOS) synthesizes its own default PATH
+    // when none is inherited, independent of std.process.RunOptions.environ_map
+    // semantics. The replace-not-merge contract itself is documented and owned
+    // by std.process.RunOptions; issue #190's scrub relies on it at the
+    // agent.zig / secret.zig layer, covered by dedicated tests there.
+    const r = try run(gpa, io, "printf \"$SCOOT_BASH_ENV_TEST\"", .{ .environ_map = &env });
+    defer gpa.free(r.stdout);
+    defer gpa.free(r.stderr);
+    try std.testing.expectEqualStrings("visible", r.stdout);
+    try std.testing.expectEqual(@as(i32, 0), r.exit_code);
 }
 
 test {

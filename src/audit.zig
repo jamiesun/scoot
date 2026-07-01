@@ -192,6 +192,193 @@ pub fn rotateFileIfTooLarge(io: std.Io, arena: std.mem.Allocator, path: []const 
     return true;
 }
 
+/// Default cap on how many retired (non-active) audit generations are kept on
+/// disk before the oldest is evicted. Bounds disk usage while still giving a
+/// future edge shipper multiple rotations of slack to catch up before any
+/// data is permanently lost (issue #187).
+pub const default_max_retained_generations: u32 = 8;
+
+/// One durably recorded eviction: the inclusive `[gap_from, gap_to]` range of
+/// generation numbers that were deleted by the retention cap before ever
+/// being acknowledged, and when. A future edge shipper reads these to emit an
+/// explicit `audit_gap` marker for any range it never got to ship, instead of
+/// silently missing it.
+pub const GapRecord = struct {
+    gap_from: u64,
+    gap_to: u64,
+    ts: i64,
+};
+
+/// Outcome of one `rotateGenerational` call.
+pub const RotateResult = struct {
+    /// Whether the active file was rotated out because it grew past `max_bytes`.
+    rotated: bool = false,
+    /// The generation that is now active (the fresh, empty file the caller
+    /// should create next). Meaningful only when `rotated` is true.
+    file_gen: u64 = 0,
+    /// Set when the retention cap forced eviction of one or more generations
+    /// during this call. Also durably appended to `<path>.gaps.jsonl`
+    /// regardless of whether the caller inspects this field.
+    gap: ?struct { from: u64, to: u64 } = null,
+};
+
+/// Durable rotation cursor for `rotateGenerational`, persisted as a small JSON
+/// object in a `<path>.gen` sidecar so it survives process restarts (Scoot is
+/// invoked fresh on every run). Always fully rewritten, never appended, so a
+/// torn write can only lose the latest rotation's bookkeeping, never corrupt
+/// history.
+const GenState = struct {
+    /// Monotonic generation of the current active (unrotated) file. 0 means
+    /// "never rotated / no sidecar yet" and is never a real generation number.
+    file_gen: u64 = 0,
+    /// Lowest generation number still retained on disk as `<path>.<gen>`.
+    /// Anything below this has been evicted by the retention cap and is
+    /// recorded in `<path>.gaps.jsonl` instead.
+    oldest_retained_gen: u64 = 0,
+};
+
+fn genStatePath(arena: std.mem.Allocator, path: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(arena, "{s}.gen", .{path});
+}
+
+fn gapLogPath(arena: std.mem.Allocator, path: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(arena, "{s}.gaps.jsonl", .{path});
+}
+
+fn readGenState(io: std.Io, arena: std.mem.Allocator, path: []const u8) !GenState {
+    const cwd = std.Io.Dir.cwd();
+    const state_path = try genStatePath(arena, path);
+    const content = cwd.readFileAlloc(io, state_path, arena, .limited(1024)) catch |err| switch (err) {
+        error.FileNotFound => return .{},
+        else => return err,
+    };
+    const parsed = std.json.parseFromSlice(GenState, arena, content, .{ .ignore_unknown_fields = true }) catch return .{};
+    var state = parsed.value;
+    // Defend against a hand-edited or otherwise inconsistent sidecar: the
+    // retention math below assumes oldest_retained_gen <= file_gen, and a
+    // u64 underflow there would be a safety panic, not a silent bug.
+    if (state.file_gen != 0 and state.oldest_retained_gen > state.file_gen) {
+        state.oldest_retained_gen = state.file_gen;
+    }
+    return state;
+}
+
+fn writeGenState(io: std.Io, arena: std.mem.Allocator, path: []const u8, state: GenState) !void {
+    const cwd = std.Io.Dir.cwd();
+    const state_path = try genStatePath(arena, path);
+    const data = try std.fmt.allocPrint(arena, "{{\"file_gen\":{d},\"oldest_retained_gen\":{d}}}\n", .{ state.file_gen, state.oldest_retained_gen });
+    try cwd.writeFile(io, .{ .sub_path = state_path, .data = data });
+}
+
+fn appendGapRecord(io: std.Io, arena: std.mem.Allocator, path: []const u8, from: u64, to: u64) !void {
+    const cwd = std.Io.Dir.cwd();
+    const gap_path = try gapLogPath(arena, path);
+    const f = try cwd.createFile(io, gap_path, .{ .truncate = false });
+    defer f.close(io);
+    const st = try f.stat(io);
+    var buf: [256]u8 = undefined;
+    var fw = f.writer(io, &buf);
+    try fw.seekTo(st.size);
+    const ts_ms = std.Io.Timestamp.now(io, .real).toMilliseconds();
+    try fw.interface.print("{{\"gap_from\":{d},\"gap_to\":{d},\"ts\":{d}}}\n", .{ from, to, ts_ms });
+    try fw.interface.flush();
+}
+
+/// Rotates `<path>` to `<path>.<gen>` once it grows past `max_bytes`, tracking
+/// a monotonic generation counter durably in a `<path>.gen` sidecar so the
+/// cursor survives process restarts. Up to `max_retained_generations` retired
+/// segments are kept on disk; once the cap is exceeded, the oldest is deleted
+/// and the drop is durably recorded in `<path>.gaps.jsonl` so a future edge
+/// shipper can emit an explicit `audit_gap` for any range it never got to
+/// ship, rather than silently missing it (issue #187).
+///
+/// Unlike `rotateFileIfTooLarge` (still used for non-shipped files such as
+/// per-session transcripts), this never clobbers a retired segment that has
+/// not yet been counted against the retention cap: every rotation gets its
+/// own numbered file, so two rotations between shipper polls no longer
+/// silently destroys the middle range.
+pub fn rotateGenerational(
+    io: std.Io,
+    arena: std.mem.Allocator,
+    path: []const u8,
+    max_bytes: u64,
+    max_retained_generations: u32,
+) !RotateResult {
+    const cwd = std.Io.Dir.cwd();
+    const st = cwd.statFile(io, path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return .{},
+        else => return err,
+    };
+    if (st.size < max_bytes) return .{};
+
+    var state = try readGenState(io, arena, path);
+    if (state.file_gen == 0) {
+        // First-ever rotation for this path (or the sidecar was lost): the
+        // file that has been accumulating on disk so far is implicitly
+        // generation 1.
+        state.file_gen = 1;
+    }
+    // Guard against clobbering an existing retired segment if the sidecar was
+    // lost or reset while numbered segments still exist on disk: probe
+    // forward to a generation number confirmed free before renaming, rather
+    // than trusting a possibly-stale counter.
+    while (fileExists(io, try std.fmt.allocPrint(arena, "{s}.{d}", .{ path, state.file_gen }))) {
+        state.file_gen += 1;
+    }
+    if (state.oldest_retained_gen == 0 or state.oldest_retained_gen > state.file_gen) {
+        state.oldest_retained_gen = state.file_gen;
+    }
+
+    const retiring_gen = state.file_gen;
+    const retired_path = try std.fmt.allocPrint(arena, "{s}.{d}", .{ path, retiring_gen });
+    try cwd.rename(path, cwd, retired_path, io);
+    state.file_gen = retiring_gen + 1;
+
+    var result: RotateResult = .{ .rotated = true, .file_gen = state.file_gen };
+
+    // Retained (frozen) segments now on disk span [oldest_retained_gen, retiring_gen].
+    const retained_count = state.file_gen - state.oldest_retained_gen;
+    if (retained_count > max_retained_generations) {
+        const evict_from = state.oldest_retained_gen;
+        var evict_to = evict_from;
+        while (state.file_gen - state.oldest_retained_gen > max_retained_generations) {
+            const victim = try std.fmt.allocPrint(arena, "{s}.{d}", .{ path, state.oldest_retained_gen });
+            cwd.deleteFile(io, victim) catch {};
+            evict_to = state.oldest_retained_gen;
+            state.oldest_retained_gen += 1;
+        }
+        try appendGapRecord(io, arena, path, evict_from, evict_to);
+        result.gap = .{ .from = evict_from, .to = evict_to };
+    }
+
+    try writeGenState(io, arena, path, state);
+    return result;
+}
+
+/// Reads every durably recorded gap event for `<path>.gaps.jsonl`, in the
+/// order they were appended. Returns an empty slice if no gaps have ever
+/// occurred, including when the log does not exist yet — the common case.
+pub fn readGapLog(arena: std.mem.Allocator, io: std.Io, path: []const u8) ![]GapRecord {
+    const cwd = std.Io.Dir.cwd();
+    const gap_path = try gapLogPath(arena, path);
+    var file = cwd.openFile(io, gap_path, .{}) catch |err| switch (err) {
+        error.FileNotFound => return &.{},
+        else => return err,
+    };
+    defer file.close(io);
+    const buf = try arena.alloc(u8, jsonl_line_buffer_bytes);
+    var fr = file.reader(io, buf);
+
+    var records: std.ArrayList(GapRecord) = .empty;
+    while (try readJsonLine(&fr.interface)) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r\n");
+        if (line.len == 0) continue;
+        const parsed = std.json.parseFromSlice(GapRecord, arena, line, .{ .ignore_unknown_fields = true }) catch continue;
+        try records.append(arena, parsed.value);
+    }
+    return records.items;
+}
+
 test "log writes parseable JSONL with seq ts and escaping" {
     var buf: [256]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
@@ -246,6 +433,149 @@ test "rotateFileIfTooLarge rotates bounded JSONL files" {
     try std.testing.expect(try rotateFileIfTooLarge(io, arena_state.allocator(), path, 10));
     try std.testing.expect(!fileExists(io, path));
     try std.testing.expect(fileExists(io, path ++ ".1"));
+}
+
+test "rotateGenerational rotates into monotonic numbered generations without clobbering history" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const path = "/tmp/scoot_audit_rotate_gen_basic.jsonl";
+    const suffixes = [_][]const u8{ "", ".1", ".2", ".3", ".gen", ".gaps.jsonl" };
+    for (suffixes) |suf| {
+        const p = try std.fmt.allocPrint(gpa, "{s}{s}", .{ path, suf });
+        defer gpa.free(p);
+        cwd.deleteFile(io, p) catch {};
+    }
+    defer for (suffixes) |suf| {
+        const p = std.fmt.allocPrint(gpa, "{s}{s}", .{ path, suf }) catch continue;
+        defer gpa.free(p);
+        cwd.deleteFile(io, p) catch {};
+    };
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // First rotation: generation 1 retires to `.1`, generation 2 becomes active.
+    try cwd.writeFile(io, .{ .sub_path = path, .data = "1234567890" });
+    const r1 = try rotateGenerational(io, arena, path, 10, default_max_retained_generations);
+    try std.testing.expect(r1.rotated);
+    try std.testing.expectEqual(@as(u64, 2), r1.file_gen);
+    try std.testing.expect(r1.gap == null);
+    try std.testing.expect(fileExists(io, path ++ ".1"));
+    try std.testing.expect(!fileExists(io, path));
+
+    // Second rotation: generation 2 retires to `.2`, `.1` must survive untouched.
+    try cwd.writeFile(io, .{ .sub_path = path, .data = "abcdefghij" });
+    const r2 = try rotateGenerational(io, arena, path, 10, default_max_retained_generations);
+    try std.testing.expect(r2.rotated);
+    try std.testing.expectEqual(@as(u64, 3), r2.file_gen);
+    try std.testing.expect(fileExists(io, path ++ ".1"));
+    try std.testing.expect(fileExists(io, path ++ ".2"));
+
+    const c1 = try cwd.readFileAlloc(io, path ++ ".1", gpa, .limited(64));
+    defer gpa.free(c1);
+    try std.testing.expectEqualStrings("1234567890", c1);
+    const c2 = try cwd.readFileAlloc(io, path ++ ".2", gpa, .limited(64));
+    defer gpa.free(c2);
+    try std.testing.expectEqualStrings("abcdefghij", c2);
+
+    // A file still under the size threshold is left completely alone.
+    try cwd.writeFile(io, .{ .sub_path = path, .data = "small" });
+    const r3 = try rotateGenerational(io, arena, path, 10, default_max_retained_generations);
+    try std.testing.expect(!r3.rotated);
+    try std.testing.expect(fileExists(io, path));
+}
+
+test "rotateGenerational evicts past the retention cap and durably records the gap" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const path = "/tmp/scoot_audit_rotate_gen_cap.jsonl";
+    const suffixes = [_][]const u8{ "", ".1", ".2", ".3", ".4", ".gen", ".gaps.jsonl" };
+    for (suffixes) |suf| {
+        const p = try std.fmt.allocPrint(gpa, "{s}{s}", .{ path, suf });
+        defer gpa.free(p);
+        cwd.deleteFile(io, p) catch {};
+    }
+    defer for (suffixes) |suf| {
+        const p = std.fmt.allocPrint(gpa, "{s}{s}", .{ path, suf }) catch continue;
+        defer gpa.free(p);
+        cwd.deleteFile(io, p) catch {};
+    };
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Cap retention at 2 retired generations: the 3rd rotation must evict gen 1.
+    try cwd.writeFile(io, .{ .sub_path = path, .data = "1234567890" });
+    const r1 = try rotateGenerational(io, arena, path, 10, 2);
+    try std.testing.expect(r1.gap == null);
+    try cwd.writeFile(io, .{ .sub_path = path, .data = "1234567890" });
+    const r2 = try rotateGenerational(io, arena, path, 10, 2);
+    try std.testing.expect(r2.gap == null);
+    try std.testing.expect(fileExists(io, path ++ ".1"));
+    try std.testing.expect(fileExists(io, path ++ ".2"));
+
+    try cwd.writeFile(io, .{ .sub_path = path, .data = "1234567890" });
+    const r3 = try rotateGenerational(io, arena, path, 10, 2);
+    try std.testing.expect(r3.rotated);
+    try std.testing.expect(r3.gap != null);
+    try std.testing.expectEqual(@as(u64, 1), r3.gap.?.from);
+    try std.testing.expectEqual(@as(u64, 1), r3.gap.?.to);
+    try std.testing.expect(!fileExists(io, path ++ ".1")); // Evicted.
+    try std.testing.expect(fileExists(io, path ++ ".2")); // Retained.
+    try std.testing.expect(fileExists(io, path ++ ".3")); // Just retired.
+
+    const gaps = try readGapLog(arena, io, path);
+    try std.testing.expectEqual(@as(usize, 1), gaps.len);
+    try std.testing.expectEqual(@as(u64, 1), gaps[0].gap_from);
+    try std.testing.expectEqual(@as(u64, 1), gaps[0].gap_to);
+    try std.testing.expect(gaps[0].ts >= 0);
+}
+
+test "rotateGenerational never clobbers an existing retired segment after a lost sidecar" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    const cwd = std.Io.Dir.cwd();
+    const path = "/tmp/scoot_audit_rotate_gen_clobber_guard.jsonl";
+    const suffixes = [_][]const u8{ "", ".1", ".2", ".gen", ".gaps.jsonl" };
+    for (suffixes) |suf| {
+        const p = try std.fmt.allocPrint(gpa, "{s}{s}", .{ path, suf });
+        defer gpa.free(p);
+        cwd.deleteFile(io, p) catch {};
+    }
+    defer for (suffixes) |suf| {
+        const p = std.fmt.allocPrint(gpa, "{s}{s}", .{ path, suf }) catch continue;
+        defer gpa.free(p);
+        cwd.deleteFile(io, p) catch {};
+    };
+
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Simulate a prior retained generation 1 with no `.gen` sidecar (as if the
+    // sidecar were lost): rotateGenerational must not silently overwrite it.
+    try cwd.writeFile(io, .{ .sub_path = path ++ ".1", .data = "PRECIOUS-PRIOR-GENERATION" });
+    try cwd.writeFile(io, .{ .sub_path = path, .data = "1234567890" });
+
+    const r = try rotateGenerational(io, arena, path, 10, default_max_retained_generations);
+    try std.testing.expect(r.rotated);
+    const preserved = try cwd.readFileAlloc(io, path ++ ".1", gpa, .limited(64));
+    defer gpa.free(preserved);
+    try std.testing.expectEqualStrings("PRECIOUS-PRIOR-GENERATION", preserved);
+    try std.testing.expect(fileExists(io, path ++ ".2"));
+}
+
+test "readGapLog returns an empty slice when no gap sidecar exists" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const gaps = try readGapLog(arena_state.allocator(), io, "/tmp/scoot_audit_no_such_gap_log.jsonl");
+    try std.testing.expectEqual(@as(usize, 0), gaps.len);
 }
 
 test "querySession filters session-correlated audit events and rewrites JSONL" {
