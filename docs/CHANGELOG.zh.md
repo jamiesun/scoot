@@ -15,6 +15,8 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 ## [未发布]
 
+## [0.9.0] - 2026-07-01
+
 ### 新增
 
 - `apt` release job 现在除了已有的 `scoot-edge` 包，还会为核心 `scoot` 二进制
@@ -362,7 +364,8 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 - 完善首页/许可证元数据、信息图与双语用户指南（#6、#19、#36）
 
-[未发布]: https://github.com/jamiesun/scoot/compare/v0.8.0...HEAD
+[未发布]: https://github.com/jamiesun/scoot/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/jamiesun/scoot/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/jamiesun/scoot/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/jamiesun/scoot/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/jamiesun/scoot/compare/v0.5.0...v0.6.0
