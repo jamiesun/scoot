@@ -68,7 +68,7 @@ macOS 也可以用 Homebrew：
 brew install jamiesun/tap/scoot
 ```
 
-想用 Docker、apt（仅 edge 舰队代理）、可选的 Wasm host，或从源码编译更小的构建？见
+想用 Docker、apt（scoot、scoot-wasm、scoot-edge 都已发布）、可选的 Wasm host，或从源码编译更小的构建？见
 [安装](../book/zh/src/installation.md)。
 
 **2. 配置。** 向导会创建 `~/.scoot` 并写好配置：

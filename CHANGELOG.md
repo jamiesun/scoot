@@ -16,6 +16,17 @@ heading when cutting a release.
 
 ## [Unreleased]
 
+### Added
+
+- The `apt` release job now packages the core `scoot` binary and the
+  optional `scoot-wasm` host as `.deb`s alongside the existing `scoot-edge`
+  package, all pushed to the shared
+  [`jamiesun/apt-tap`](https://github.com/jamiesun/apt-tap) repository.
+  `scoot-wasm` and `scoot-edge` now declare an apt `Depends: scoot`
+  (matching the dependency already expressed by their Homebrew formulae),
+  so `apt install scoot-wasm`/`scoot-edge` pulls in the core agent
+  automatically.
+
 ## [0.8.0] - 2026-07-01
 
 ### Security

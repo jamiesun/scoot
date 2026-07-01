@@ -79,23 +79,44 @@ in either optional companion, keeping the default install minimal.
 
 ## Install via apt (Debian/Ubuntu)
 
-The optional `scoot-edge` fleet companion is also published to a shared apt
-repository, [`jamiesun/apt-tap`](https://github.com/jamiesun/apt-tap), for the
-`amd64`, `arm64`, and `armhf` architectures:
+`scoot`, the optional `scoot-wasm` host, and the optional `scoot-edge` fleet
+companion are all published to a shared apt repository,
+[`jamiesun/apt-tap`](https://github.com/jamiesun/apt-tap), for the `amd64`,
+`arm64`, and `armhf` architectures. Add the repository once:
 
 ```sh
 curl -fsSL https://jamiesun.github.io/apt-tap/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/jamiesun-apt-tap.gpg
 echo "deb [signed-by=/usr/share/keyrings/jamiesun-apt-tap.gpg] https://jamiesun.github.io/apt-tap stable main" | sudo tee /etc/apt/sources.list.d/jamiesun-apt-tap.list
 sudo apt update
+```
+
+Then install the agent:
+
+```sh
+sudo apt install scoot
+```
+
+To also run compute-only Wasm tool packages (the `wasm_tool` action), install
+the optional standalone host. Its package depends on `scoot`, so this single
+command installs both the agent and the host:
+
+```sh
+sudo apt install scoot-wasm
+```
+
+To also observe/dispatch to this Scoot from a management center, install the
+optional standalone fleet companion. Its package likewise depends on `scoot`,
+since `scoot-edge` launches the agent as a subprocess:
+
+```sh
 sudo apt install scoot-edge
 ```
 
-Only `scoot-edge` is packaged for apt today, not the core `scoot` binary —
-install `scoot` with the script or Homebrew above first, then use apt for
-`scoot-edge` if you prefer it over the install script's `SCOOT_INSTALL_EDGE=1`
-flag or the Homebrew formula. `jamiesun/apt-tap` is a repository shared across
-several unrelated tools, the same shared-tap model `homebrew-tap` already uses
-above.
+Unlike the Homebrew formulae above, apt resolves the `Depends: scoot` line
+itself, so installing `scoot-wasm` or `scoot-edge` pulls in `scoot`
+automatically without a separate command. `jamiesun/apt-tap` is a repository
+shared across several unrelated tools, the same shared-tap model
+`homebrew-tap` already uses above.
 
 ## Release Build Flavor
 
