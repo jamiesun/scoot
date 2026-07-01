@@ -353,7 +353,7 @@ public package root (`src/root.zig`) stays the contract.
 
 | Wire op | Public surface used |
 | --- | --- |
-| `status` | `daemon status` (and a future `--json` form), config read, skill discovery (names / descriptions only) |
+| `status` | `daemon status --json` (machine-readable snapshot; `doctor --json` does not exist yet), config read, skill discovery (names / descriptions only) |
 | `audit_batch` | read-only `logs/*.jsonl` |
 | `job kind=run` | child process `scoot --unattended -e "<goal>"` launched **through the unattended one-shot clamp** (ceiling enforced in-child against local `edge.max_job_policy`), with cwd pinned to `edge.job_root` |
 | job result | child exit code + stdout + the resulting session / audit |
@@ -364,9 +364,9 @@ Three of these are **blocking prerequisites**, not optional polish: the edge can
 meet its own safety and delivery promises without them. They are still built as
 separate, independently-useful core changes, but E1/E2 are gated on them.
 
-1. **(E1 prerequisite)** Machine-readable status: `daemon status --json` /
-   `doctor --json`. The `status` heartbeat must not depend on scraping
-   human-readable text.
+1. **(E1 prerequisite) Partially done.** Machine-readable status: `daemon status --json`
+   already ships a full JSON status snapshot; `doctor --json` does not exist yet. The
+   `status` heartbeat must not depend on scraping human-readable text.
 2. **(E2 prerequisite — the keystone) ✅ Done.** An unattended one-shot policy
    clamp so an edge-launched `scoot -e` is provably at or below the `readonly`
    ceiling, enforced in-child against local config. Shipped as
