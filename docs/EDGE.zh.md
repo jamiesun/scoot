@@ -2,7 +2,7 @@
 
 English version: [EDGE.md](EDGE.md)
 
-状态：**E1 已基本实现；E2 任务派发已实现；E3 打包部分实现。** E0 边界已经签字，当前已有一个独立、显式 opt-in 的 `scoot-edge` 伴生程序，需通过 `zig build -Dedge=true` 构建。它可以在本地生成一次仅报告态的 status 心跳，用逐节点 bearer token 把该心跳 `post-once` 到 HTTPS endpoint，并能以 **`run` 持续心跳循环**按固定间隔向外拨出上报：遇到瞬时失败时采用有界的抖动退避（绝不让循环崩溃，也绝不开启监听端口）。心跳还可携带一个**显式 opt-in、仅作建议的 `node` 能力描述符**（`--report-capabilities`），供能力感知路由使用。一个刻意命名的 `--allow-insecure-http` 开关只用于本地 / dev loopback 环境对接纯 HTTP center；即便带上该开关，非 loopback 的 `http://` URL 也会被拒绝，生产仍保持 HTTPS-only。`scoot-edge dispatch`（也可通过 `run --enable-jobs` 达到同样效果）现在会轮询一次 `GET` 任务 lease，通过 `scoot --unattended -e "<goal>"` 执行 0..N 个任务、cwd 被限制在 `edge.job_root` 内，并把 `job_event` 上报回去——全程带有有界、幂等、可追溯的落地记录（#186）。它现在与 `scoot-wasm` 用同样的方式发布：独立的 `scoot-edge-<target>.tar.gz` release 压缩包、一个 Homebrew formula，以及 `install.sh` 里 opt-in 的 `SCOOT_INSTALL_EDGE` 开关——默认永远不安装。audit 正文搬运仍然刻意未实现，并继续受下方前置条件门控。
+状态：**E1 已基本实现；E2 任务派发已实现；E3 打包已实现。** E0 边界已经签字，当前已有一个独立、显式 opt-in 的 `scoot-edge` 伴生程序，需通过 `zig build -Dedge=true` 构建。它可以在本地生成一次仅报告态的 status 心跳，用逐节点 bearer token 把该心跳 `post-once` 到 HTTPS endpoint，并能以 **`run` 持续心跳循环**按固定间隔向外拨出上报：遇到瞬时失败时采用有界的抖动退避（绝不让循环崩溃，也绝不开启监听端口）。心跳还可携带一个**显式 opt-in、仅作建议的 `node` 能力描述符**（`--report-capabilities`），供能力感知路由使用。一个刻意命名的 `--allow-insecure-http` 开关只用于本地 / dev loopback 环境对接纯 HTTP center；即便带上该开关，非 loopback 的 `http://` URL 也会被拒绝，生产仍保持 HTTPS-only。`scoot-edge dispatch`（也可通过 `run --enable-jobs` 达到同样效果）现在会轮询一次 `GET` 任务 lease，通过 `scoot --unattended -e "<goal>"` 执行 0..N 个任务、cwd 被限制在 `edge.job_root` 内，并把 `job_event` 上报回去——全程带有有界、幂等、可追溯的落地记录（#186）。它现在与 `scoot-wasm` 用同样的方式发布：独立的 `scoot-edge-<target>.tar.gz` release 压缩包、一个 Homebrew formula、`install.sh` 里 opt-in 的 `SCOOT_INSTALL_EDGE` 开关，以及共享 apt 仓库 [`jamiesun/apt-tap`](https://github.com/jamiesun/apt-tap) 上的一个 `.deb` 包——默认永远不安装。audit 正文搬运仍然刻意未实现，并继续受下方前置条件门控。
 
 ## 一句话讲明白
 
@@ -230,12 +230,20 @@ edge **只经公共发射接口与只读日志**驱动 Scoot。它不得 import 
 - **E0：** 本边界文档（双语）+ ROADMAP 修订 + 授权模型签字。**已在写代码前完成。**
 - **E1：** `scoot-edge` 骨架（独立构建目标，默认关闭）+ 经 HTTPS 的 `status` 心跳。已实现为 `zig build -Dedge=true`：`scoot-edge status` 通过 `scoot daemon status --json` 采集状态并打印一条 NDJSON status envelope；`scoot-edge post-once` 使用环境变量中的 bearer token，把该 envelope 发到调用者提供的 HTTPS endpoint；`scoot-edge run` 则按 `--interval-ms` 周期重复该 POST 直到被停止，遇到瞬时失败时采用有界的抖动指数退避，并提供可选的 `--max-posts` 上限用于受监管 / 有界运行（`--allow-insecure-http` 仅用于本地 / dev loopback HTTP center 测试）。`run` 在收到 SIGINT/SIGTERM 时会先把进行中的心跳跑完，再干净退出（退出码 `0`），因此 systemd/launchd 停止是优雅停机而非硬杀；一次性命令使用稳定的退出码（`0` 成功，`1` 拨出 POST 失败，`2` 配置 / 用法错误，`3` 本地状态采集失败）。**前置 #3（核心侧对 shipping 感知的轮转）已完成**——`src/audit.zig` 的 `rotateGenerational` 把 `audit.jsonl.<gen>` 编号段保留在 `[audit].max_retained_generations` 上限之内，超出上限的淘汰会持久记录进 `audit.jsonl.gaps.jsonl`（#187）——但 audit 日志**搬运本身仍未实现**，因此仍在 E1 内部延后：`src/edge_main.zig` 里仍然没有拨出路径、ack 协议或 `edge.ship_audit` 接线。在其落地之前，E1 只搬运计数、不搬正文，且 `edge.ship_audit` 默认关闭。显式 opt-in 的 `node` 能力描述符（`--report-capabilities`，默认关闭；由 `--label` / `--skill` 及 `SCOOT_EDGE_LABELS` / `SCOOT_EDGE_SKILLS` 环境变量填充）可搭车心跳上报，供日后能力感知路由使用——仅作建议，绝不构成授权。
 - **E2：✅ 已实现（#186）。** 在显式 config + 策略天花板 + provenance 审计之后的 schema 化、幂等任务派发。`scoot-edge dispatch`（一次性）与 `scoot-edge run --enable-jobs`（并入心跳循环）都要求 `--job-root` 与 `--lease-url`；两者缺一，或 `--lease-url` 不是 HTTPS（且未显式带上 loopback 专用的 `--allow-insecure-http`），都会以退出码 `2` 终止——与 `--center-url`/token 相同的 fail-closed config 门控。每个循环会：`GET` 该 lease、对每条 envelope 做 schema 校验（`validateJobEnvelope`；解析失败或校验失败的任务会被上报为 `rejected`/`bad_schema`，绝不执行）、把超出 `--lease-capacity` 的多余任务裁剪为 `at_capacity`、查询有界的 `idem.jsonl` 存储中是否已有该任务的终态结果（重复投递的 `idem_key` 会重放已存的结果而不是重新执行），否则通过 `scoot --unattended -e "<goal>" --session-id job-<job_id>` 执行、cwd 被限制在 `--job-root` 之内。每一次阶段迁移（`accepted` → `done`/`failed`/`rejected`）都会同时以 `job_event` 上报，并追加进 `logs/edge-audit.jsonl`，通过 `session_id` 与 Scoot 自身的运行审计相关联。edge 任务默认 `readonly`；唯一的抬高是本地 `edge.max_job_policy = unrestricted`。能力感知路由消费 E1 的 `node` 描述符；节点无法满足的任务以 `no_matching_capability` 被拒——这是中心侧的决策，因为能力匹配发生在任务被派发到本节点之前。
-- **E3：部分实现。** 打包：`install.sh` 新增了 opt-in 的 `SCOOT_INSTALL_EDGE`
-  变量（默认仍然不安装），release workflow 现在会为每个 tag 版本构建、打包
+- **E3：✅ 已实现。** 打包：`install.sh` 新增了 opt-in 的 `SCOOT_INSTALL_EDGE`
+  变量（默认仍然不安装），release workflow 会为每个 tag 版本构建、打包
   （`scoot-edge-<target>.tar.gz`）并发布一个 `scoot-edge` Homebrew formula
   （`brew install jamiesun/tap/scoot-edge`，依赖 `scoot`），与既有的
-  `scoot-wasm` 打包方式一致。apt 包尚未构建——这个仓库里目前没有任何一个
-  Scoot 二进制有 apt 打包，因此它仍作为待开放范围记录，而不是照搬一个已有模式。
+  `scoot-wasm` 打包方式一致。apt 包补上了最后一块拼图：release workflow 里的
+  `apt` job（受可选的 `APT_TAP_TOKEN` 密钥门控，与 Homebrew job 的
+  `HOMEBREW_TAP_TOKEN` 是同一种模式）会为每个 Linux 架构（`amd64`、`arm64`、
+  `armhf`）构建一个 `.deb`，推送到共享仓库
+  [`jamiesun/apt-tap`](https://github.com/jamiesun/apt-tap) 的 `pool/` 目录。
+  该仓库——一个 apt suite 由多个不相关工具共享，与 `homebrew-tap` 的
+  “一个仓库、多个 formula”模型一致——拥有 GPG 签名密钥；它自己的 workflow
+  会在每次收到推送后重新生成并发布签名后的 `dists/` 索引到 GitHub Pages，
+  因此 `scoot` 自己的 release workflow 从不接触签名密钥。apt 安装片段见
+  [安装](../book/zh/src/installation.md)。
   重连 / 反压加固已完成：`run` 的有界抖动指数退避已经同时覆盖心跳*与*派发循环的
   失败（lease / 遥测错误只影响那一次迭代，绝不会让循环崩溃），且 `--lease-capacity`
   提供了派发侧的反压（`at_capacity`），与心跳循环本已具备的瞬时失败退避是同一种

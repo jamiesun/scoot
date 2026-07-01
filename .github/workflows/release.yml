@@ -320,6 +320,107 @@ jobs:
             git push
           fi
 
+  apt:
+    name: Publish apt package (scoot-edge)
+    runs-on: ubuntu-latest
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/')
+    env:
+      # Set APT_TAP_TOKEN (a PAT with push access to the apt-tap repo) to
+      # enable this job. Without it the job no-ops, mirroring the optional
+      # Homebrew tap / Docker Hub publish paths. APT_TAP_REPO is the shared
+      # apt repository (jamiesun/apt-tap, one suite shared across unrelated
+      # projects, mirroring homebrew-tap) that backs `apt install scoot-edge`
+      # once a user has added its Pages URL as an apt source (see
+      # docs/EDGE.md). This job never touches the apt-tap signing key --
+      # that repository's own workflow signs and republishes the index
+      # whenever pool/ changes, keeping the GPG private key's blast radius
+      # confined to a single repo.
+      APT_TAP_TOKEN: ${{ secrets.APT_TAP_TOKEN }}
+      APT_TAP_REPO: jamiesun/apt-tap
+    steps:
+      - name: Download release artifacts
+        if: ${{ env.APT_TAP_TOKEN != '' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: dist-artifacts
+
+      - name: Build .deb packages and push to apt-tap
+        if: ${{ env.APT_TAP_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"           # e.g. v0.7.1
+          VERSION="${TAG#v}"               # e.g. 0.7.1
+          WORKDIR="$(mktemp -d)"
+
+          git clone --depth 1 \
+            "https://x-access-token:${APT_TAP_TOKEN}@github.com/${APT_TAP_REPO}.git" "$WORKDIR/tap"
+          dest="$WORKDIR/tap/pool/main/s/scoot-edge"
+          mkdir -p "$dest"
+
+          # $1 = this repo's release asset name, $2 = Debian architecture name.
+          build_one() {
+            local asset="$1" deb_arch="$2"
+            local archive extract_dir pkgdir deb_name
+            archive="$(find dist-artifacts -name "scoot-edge-${TAG}-${asset}.tar.gz" -print -quit)"
+            [ -n "$archive" ] || { echo "missing archive for ${asset}" >&2; exit 1; }
+
+            extract_dir="$WORKDIR/${asset}"
+            mkdir -p "$extract_dir"
+            tar -C "$extract_dir" -xzf "$archive"
+
+            pkgdir="$WORKDIR/${asset}-pkg"
+            mkdir -p "$pkgdir/DEBIAN" "$pkgdir/usr/bin" "$pkgdir/usr/share/doc/scoot-edge"
+            install -m 0755 "$extract_dir/scoot-edge/scoot-edge" "$pkgdir/usr/bin/scoot-edge"
+            cp "$extract_dir/scoot-edge/README.md" "$extract_dir/scoot-edge/EDGE.md" \
+              "$extract_dir/scoot-edge/EDGE.zh.md" "$pkgdir/usr/share/doc/scoot-edge/"
+
+            {
+              printf 'Package: scoot-edge\n'
+              printf 'Version: %s\n' "$VERSION"
+              printf 'Section: utils\n'
+              printf 'Priority: optional\n'
+              printf 'Architecture: %s\n' "$deb_arch"
+              printf 'Maintainer: Jett Wang <jamiesun.net@gmail.com>\n'
+              printf 'Homepage: https://github.com/jamiesun/scoot\n'
+              printf 'Description: Optional fleet companion (status heartbeat + job dispatch) for scoot\n'
+              printf ' scoot-edge is a standalone, opt-in companion binary that lets a remote\n'
+              printf ' management center observe and, opt-in, dispatch tasks to a local scoot\n'
+              printf ' agent. Statically linked (musl); no runtime dependencies.\n'
+            } > "$pkgdir/DEBIAN/control"
+
+            deb_name="scoot-edge_${VERSION}_${deb_arch}.deb"
+            dpkg-deb --build --root-owner-group "$pkgdir" "$dest/${deb_name}"
+          }
+
+          build_one linux-amd64 amd64
+          build_one linux-arm64 arm64
+          build_one linux-armv7 armhf
+
+          cd "$WORKDIR/tap"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pool/main/s/scoot-edge/
+          if git diff --cached --quiet; then
+            echo "scoot-edge ${VERSION} .deb packages already up to date"
+            exit 0
+          fi
+          git commit -m "scoot-edge ${VERSION} (amd64, arm64, armhf)"
+
+          # apt-tap is a shared repo that other projects may push to as well,
+          # so retry on a rejected push instead of failing outright.
+          for attempt in 1 2 3 4 5; do
+            if git push origin main; then
+              echo "pushed on attempt ${attempt}"
+              exit 0
+            fi
+            [ "$attempt" -eq 5 ] && { echo "push failed after 5 attempts" >&2; exit 1; }
+            echo "push rejected (attempt ${attempt}), fetching + rebasing..." >&2
+            sleep $(( attempt * 5 ))
+            git fetch origin main
+            git rebase origin/main
+          done
+
   docker:
     name: Build and publish Docker image (${{ matrix.flavor }})
     runs-on: ubuntu-latest

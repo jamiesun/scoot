@@ -17,6 +17,14 @@ brew install jamiesun/tap/scoot-wasm      # optional Wasm compute-unit host (pul
 brew install jamiesun/tap/scoot-edge      # optional fleet companion (pulls in scoot)
 ```
 
+Debian/Ubuntu (apt, `scoot-edge` only, amd64/arm64/armhf):
+
+```sh
+curl -fsSL https://jamiesun.github.io/apt-tap/pubkey.gpg | sudo gpg --dearmor -o /usr/share/keyrings/jamiesun-apt-tap.gpg
+echo "deb [signed-by=/usr/share/keyrings/jamiesun-apt-tap.gpg] https://jamiesun.github.io/apt-tap stable main" | sudo tee /etc/apt/sources.list.d/jamiesun-apt-tap.list
+sudo apt update && sudo apt install scoot-edge
+```
+
 ### Build flavors
 
 Prebuilt archives are **`ReleaseSafe`** only (runtime safety checks on). If you
