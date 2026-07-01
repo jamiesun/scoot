@@ -15,6 +15,16 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 ## [未发布]
 
+## [0.9.1] - 2026-07-01
+
+### 修复
+
+- GitHub release 的发布说明页脚（`.github/release-footer.md`）之前还写着
+  apt 只有 `scoot-edge`，且只给了 `apt install scoot-edge` 这一个例子。
+  现在已与上方的 Homebrew 那一段保持一致，列出了全部三个包
+  （`scoot`、`scoot-wasm`、`scoot-edge`），与 `v0.9.0` 已经上线的 apt 覆盖
+  范围保持一致。
+
 ## [0.9.0] - 2026-07-01
 
 ### 新增
@@ -364,7 +374,8 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 - 完善首页/许可证元数据、信息图与双语用户指南（#6、#19、#36）
 
-[未发布]: https://github.com/jamiesun/scoot/compare/v0.9.0...HEAD
+[未发布]: https://github.com/jamiesun/scoot/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/jamiesun/scoot/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/jamiesun/scoot/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/jamiesun/scoot/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/jamiesun/scoot/compare/v0.6.0...v0.7.0

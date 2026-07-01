@@ -16,6 +16,16 @@ heading when cutting a release.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-07-01
+
+### Fixed
+
+- The GitHub release notes footer (`.github/release-footer.md`) still said
+  apt packaging was `scoot-edge` only and only showed an `apt install
+  scoot-edge` example. It now matches the Homebrew block above it and lists
+  all three packages (`scoot`, `scoot-wasm`, `scoot-edge`), reflecting the
+  apt coverage shipped in `v0.9.0`.
+
 ## [0.9.0] - 2026-07-01
 
 ### Added
@@ -457,7 +467,8 @@ First feature release since `v0.0.2` (which only carried release-workflow plumbi
 
 - Polished homepage/license metadata, infographic, bilingual user guide (#6, #19, #36)
 
-[Unreleased]: https://github.com/jamiesun/scoot/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/jamiesun/scoot/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/jamiesun/scoot/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/jamiesun/scoot/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/jamiesun/scoot/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/jamiesun/scoot/compare/v0.6.0...v0.7.0
