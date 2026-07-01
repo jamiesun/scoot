@@ -45,6 +45,7 @@ Supported installer environment variables:
 | `SCOOT_INSTALL_VERSION` | `latest` | Release tag to install, with or without leading `v`. |
 | `SCOOT_INSTALL_BINARY` | `scoot` | Installed binary name. |
 | `SCOOT_INSTALL_REPO` | `jamiesun/scoot` | GitHub repository to download from. |
+| `SCOOT_INSTALL_EDGE` | unset (opt-in) | Set to any non-empty value to also download and install the optional `scoot-edge` fleet companion as `$SCOOT_INSTALL_DIR/scoot-edge`. Never installed unless explicitly requested. |
 
 ## Install With Homebrew (macOS)
 
@@ -62,10 +63,19 @@ installs both the agent and the host:
 brew install jamiesun/tap/scoot-wasm
 ```
 
-Both land on Homebrew's `bin` (on your `PATH`), so the default
+To also observe/dispatch to this Scoot from a management center, install the
+optional standalone fleet companion. Its formula likewise depends on `scoot`,
+since `scoot-edge` launches the agent as a subprocess:
+
+```sh
+brew install jamiesun/tap/scoot-edge
+```
+
+All three land on Homebrew's `bin` (on your `PATH`), so the default
 `wasm_host = ["scoot-wasm", "wasi", "{component}"]` resolves `scoot-wasm` from
-`PATH` with no extra configuration. The core `scoot` formula never pulls in the
-Wasm host, keeping the default install minimal.
+`PATH` with no extra configuration, and `scoot-edge` finds `scoot` on `PATH` by
+default too (override with `--scoot-bin`). The core `scoot` formula never pulls
+in either optional companion, keeping the default install minimal.
 
 ## Release Build Flavor
 
@@ -74,7 +84,8 @@ runtime safety checks and clear fail-fast diagnostics. If you need a smaller
 binary for probes, edge devices, or minimal containers, compile from source with
 `ReleaseSmall` (see [Build From Source](#build-from-source)). Each target also
 publishes a separate `scoot-wasm-*` archive containing only the optional Wasm
-compute-unit host.
+compute-unit host, and a separate `scoot-edge-*` archive containing only the
+optional fleet companion.
 
 ## Build From Source
 
@@ -104,8 +115,9 @@ install -m 0755 zig-out/bin/scoot /usr/local/bin/scoot
 ## Install A Release Artifact
 
 Each tagged release publishes a `scoot-<target>.tar.gz` per target plus a
-separate `scoot-wasm-<target>.tar.gz` (the optional Wasm host) and `.sha256`
-checksums.
+separate `scoot-wasm-<target>.tar.gz` (the optional Wasm host), a separate
+`scoot-edge-<target>.tar.gz` (the optional fleet companion), and `.sha256`
+checksums for each.
 
 ```sh
 # Pick the archive for your platform from the Releases page, then:

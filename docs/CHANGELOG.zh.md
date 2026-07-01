@@ -57,6 +57,12 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
   进 edge 侧的溯源日志（`logs/edge-audit.jsonl`），通过 `session_id` 与 Scoot 自身
   的运行审计相关联。核心新增的 `--session-id <id>` 参数让调用方可以指定 session
   文件名而非默认的 UUID，这正是 `job_id` 与 `session_id` 得以关联的基础（#186）。
+- **`scoot-edge` E3 打包（部分）**：release workflow 现在会为每个 tag 版本构建、
+  打包（`scoot-edge-<target>.tar.gz` + `.sha256`）并发布一个 `scoot-edge`
+  Homebrew formula（`brew install jamiesun/tap/scoot-edge`，依赖 `scoot`），
+  与既有的 `scoot-wasm` 打包方式一致。`install.sh` 新增了 opt-in 的
+  `SCOOT_INSTALL_EDGE` 变量，设置后会额外下载并安装 `scoot-edge`（与核心
+  `scoot` 一起）；除非显式要求，否则永不安装。apt 包目前仍不在范围内（#171）。
 
 ### 文档
 

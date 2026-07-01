@@ -68,6 +68,14 @@ heading when cutting a release.
   audit. A new core `--session-id <id>` flag on `scoot -e` lets a caller pin
   the session file name instead of the default UUID, which is what makes this
   `job_id` ↔ `session_id` correlation possible (#186).
+- **`scoot-edge` E3 packaging (partial)**: the release workflow now builds,
+  archives (`scoot-edge-<target>.tar.gz` + `.sha256`), and publishes a
+  `scoot-edge` Homebrew formula (`brew install jamiesun/tap/scoot-edge`,
+  depending on `scoot`) for every tagged release, mirroring the existing
+  `scoot-wasm` packaging. `install.sh` gained an opt-in `SCOOT_INSTALL_EDGE`
+  variable that additionally downloads and installs `scoot-edge` alongside
+  core `scoot`; it is never installed unless explicitly requested. An apt
+  package remains out of scope for now (#171).
 
 ### Documentation
 

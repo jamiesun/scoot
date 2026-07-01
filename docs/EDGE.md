@@ -2,13 +2,14 @@
 
 Chinese version: [EDGE.zh.md](EDGE.zh.md)
 
-Status: **E1 substantially implemented; E2 job dispatch implemented.** The E0
-boundary has been signed off and a standalone, opt-in `scoot-edge` companion now
-exists behind `zig build -Dedge=true`. It can emit one report-only status heartbeat
-locally, `post-once` that heartbeat to an HTTPS endpoint with a per-node bearer
-token, and **`run` a continuous heartbeat loop** that dials out on a fixed interval
-with bounded jittered backoff on transient failure (never crashing the loop, never
-opening a listener). The heartbeat can carry an **opt-in, advisory `node` capability
+Status: **E1 substantially implemented; E2 job dispatch implemented; E3
+packaging partially implemented.** The E0 boundary has been signed off and a
+standalone, opt-in `scoot-edge` companion now exists behind `zig build
+-Dedge=true`. It can emit one report-only status heartbeat locally, `post-once`
+that heartbeat to an HTTPS endpoint with a per-node bearer token, and **`run` a
+continuous heartbeat loop** that dials out on a fixed interval with bounded
+jittered backoff on transient failure (never crashing the loop, never opening a
+listener). The heartbeat can carry an **opt-in, advisory `node` capability
 descriptor** (`--report-capabilities`) for capability-aware routing. A deliberately
 named `--allow-insecure-http` switch exists only for local/dev loopback testing
 against a plain-HTTP center; non-loopback HTTP is rejected even with the switch, and
@@ -16,8 +17,10 @@ production remains HTTPS-only. `scoot-edge dispatch` (also reachable via `run
 --enable-jobs`) now polls a `GET` job lease, executes 0..N jobs through
 `scoot --unattended -e "<goal>"` with cwd confined to `edge.job_root`, and reports
 `job_event`s back with a bounded, idempotent, provenance-logged apply (#186).
-Audit-body shipping remains intentionally unimplemented and gated by the
-prerequisites below.
+It is published like `scoot-wasm`: a separate `scoot-edge-<target>.tar.gz`
+release archive, a Homebrew formula, and an opt-in `SCOOT_INSTALL_EDGE` flag
+for `install.sh` — never installed by default. Audit-body shipping remains
+intentionally unimplemented and gated by the prerequisites below.
 
 ## The idea in plain terms
 
@@ -455,5 +458,17 @@ separate, independently-useful core changes, but E1/E2 are gated on them.
   the E1 `node` descriptor; a job a node cannot satisfy rejects with
   `no_matching_capability` — a center-side decision, since capability matching
   happens before a job is ever dispatched to this node.
-- **E3:** packaging (install-script opt-in, Homebrew, apt) and
-  reconnect/backpressure hardening.
+- **E3: partially implemented.** Packaging: `install.sh` gained an opt-in
+  `SCOOT_INSTALL_EDGE` variable (still never installed by default), and the
+  release workflow now builds, archives (`scoot-edge-<target>.tar.gz`), and
+  publishes a `scoot-edge` Homebrew formula (`brew install
+  jamiesun/tap/scoot-edge`, depending on `scoot`) alongside every tagged
+  release, mirroring the existing `scoot-wasm` packaging. An apt package is
+  not yet built — there is no apt packaging for any Scoot binary in this repo
+  today, so it remains tracked as open scope rather than mirrored from an
+  existing pattern. Reconnect/backpressure hardening is done: `run`'s bounded
+  jittered exponential backoff already covers heartbeat *and* dispatch-cycle
+  failures (a lease/telemetry error only affects that iteration, never
+  crashes the loop), and `--lease-capacity` provides dispatch-side
+  backpressure (`at_capacity`) the same way the heartbeat loop already
+  backs off on transient failure.

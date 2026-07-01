@@ -50,7 +50,7 @@ jobs:
           echo "$PWD/zig-x86_64-linux-${version}" >> "$GITHUB_PATH"
           "$PWD/zig-x86_64-linux-${version}/zig" version
 
-      - name: Build ReleaseSafe (scoot + scoot-wasm)
+      - name: Build ReleaseSafe (scoot + scoot-wasm + scoot-edge)
         run: |
           # Embed the exact tag as the binary version (single source of truth at release time).
           # On a tag push GITHUB_REF_NAME is like "v0.0.3" → strip the leading "v".
@@ -59,12 +59,13 @@ jobs:
             v*) version_arg="-Dversion=${GITHUB_REF_NAME#v}" ;;
             *)  version_arg="" ;;
           esac
-          # `-Dwasm-host=true` builds both the core `scoot` binary and the
-          # optional `scoot-wasm` compute-unit host in one pass.
+          # `-Dwasm-host=true` and `-Dedge=true` build the core `scoot` binary
+          # plus the optional `scoot-wasm` compute-unit host and `scoot-edge`
+          # fleet companion in one pass.
           if [ -n "${{ matrix.cpu }}" ]; then
-            zig build -Doptimize=ReleaseSafe -Dwasm-host=true -Dtarget=${{ matrix.target }} -Dcpu=${{ matrix.cpu }} $version_arg
+            zig build -Doptimize=ReleaseSafe -Dwasm-host=true -Dedge=true -Dtarget=${{ matrix.target }} -Dcpu=${{ matrix.cpu }} $version_arg
           else
-            zig build -Doptimize=ReleaseSafe -Dwasm-host=true -Dtarget=${{ matrix.target }} $version_arg
+            zig build -Doptimize=ReleaseSafe -Dwasm-host=true -Dedge=true -Dtarget=${{ matrix.target }} $version_arg
           fi
 
       - name: Create archives
@@ -89,10 +90,20 @@ jobs:
           tar -C dist -czf "${wasm}.tar.gz" scoot-wasm
           sha256sum "${wasm}.tar.gz" > "${wasm}.tar.gz.sha256"
 
+          # Optional `scoot-edge` fleet companion archive (layout: scoot-edge/scoot-edge).
+          edge="scoot-edge-${version}-${{ matrix.asset }}"
+          mkdir -p dist/scoot-edge
+          cp zig-out/bin/scoot-edge dist/scoot-edge/
+          cp README.md docs/EDGE.md docs/EDGE.zh.md dist/scoot-edge/
+          tar -C dist -czf "${edge}.tar.gz" scoot-edge
+          sha256sum "${edge}.tar.gz" > "${edge}.tar.gz.sha256"
+
           echo "core=${core}.tar.gz" >> "$GITHUB_OUTPUT"
           echo "core_checksum=${core}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
           echo "wasm=${wasm}.tar.gz" >> "$GITHUB_OUTPUT"
           echo "wasm_checksum=${wasm}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+          echo "edge=${edge}.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "edge_checksum=${edge}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -103,6 +114,8 @@ jobs:
             ${{ steps.package.outputs.core_checksum }}
             ${{ steps.package.outputs.wasm }}
             ${{ steps.package.outputs.wasm_checksum }}
+            ${{ steps.package.outputs.edge }}
+            ${{ steps.package.outputs.edge_checksum }}
 
   publish:
     name: Publish GitHub release
@@ -201,6 +214,8 @@ jobs:
           SCOOT_AMD_SHA="$(sha "scoot-${TAG}-macos-amd64.tar.gz")"
           WASM_ARM_SHA="$(sha "scoot-wasm-${TAG}-macos-arm64.tar.gz")"
           WASM_AMD_SHA="$(sha "scoot-wasm-${TAG}-macos-amd64.tar.gz")"
+          EDGE_ARM_SHA="$(sha "scoot-edge-${TAG}-macos-arm64.tar.gz")"
+          EDGE_AMD_SHA="$(sha "scoot-edge-${TAG}-macos-amd64.tar.gz")"
 
           git clone --depth 1 \
             "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${HOMEBREW_TAP_REPO}.git" tap
@@ -263,10 +278,41 @@ jobs:
           end
           EOF
 
+          cat > tap/Formula/scoot-edge.rb <<EOF
+          class ScootEdge < Formula
+            desc "Optional standalone fleet companion (status heartbeat + job dispatch) for scoot"
+            homepage "https://github.com/jamiesun/scoot"
+            version "${VERSION}"
+            license "MIT"
+
+            # scoot-edge launches the agent as a subprocess, so installing it
+            # pulls in scoot for a working end-to-end setup.
+            depends_on "jamiesun/tap/scoot"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "${base}/scoot-edge-${TAG}-macos-arm64.tar.gz"
+                sha256 "${EDGE_ARM_SHA}"
+              else
+                url "${base}/scoot-edge-${TAG}-macos-amd64.tar.gz"
+                sha256 "${EDGE_AMD_SHA}"
+              end
+            end
+
+            def install
+              bin.install "scoot-edge"
+            end
+
+            test do
+              assert_path_exists bin/"scoot-edge"
+            end
+          end
+          EOF
+
           cd tap
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Formula/scoot.rb Formula/scoot-wasm.rb
+          git add Formula/scoot.rb Formula/scoot-wasm.rb Formula/scoot-edge.rb
           if git diff --cached --quiet; then
             echo "Formulae already up to date for ${VERSION}"
           else
