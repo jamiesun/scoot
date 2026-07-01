@@ -2,18 +2,22 @@
 
 Chinese version: [EDGE.zh.md](EDGE.zh.md)
 
-Status: **E1 substantially implemented.** The E0 boundary has been signed off and a
-standalone, opt-in `scoot-edge` companion now exists behind `zig build -Dedge=true`.
-It can emit one report-only status heartbeat locally, `post-once` that heartbeat to
-an HTTPS endpoint with a per-node bearer token, and **`run` a continuous heartbeat
-loop** that dials out on a fixed interval with bounded jittered backoff on transient
-failure (never crashing the loop, never opening a listener). The heartbeat can carry
-an **opt-in, advisory `node` capability descriptor** (`--report-capabilities`) for
-capability-aware routing. A deliberately named `--allow-insecure-http` switch exists
-only for local/dev loopback testing against a plain-HTTP center; non-loopback HTTP is
-rejected even with the switch, and production remains HTTPS-only. Audit-body shipping
-and E2 job dispatch remain intentionally unimplemented and gated by the prerequisites
-below.
+Status: **E1 substantially implemented; E2 job dispatch implemented.** The E0
+boundary has been signed off and a standalone, opt-in `scoot-edge` companion now
+exists behind `zig build -Dedge=true`. It can emit one report-only status heartbeat
+locally, `post-once` that heartbeat to an HTTPS endpoint with a per-node bearer
+token, and **`run` a continuous heartbeat loop** that dials out on a fixed interval
+with bounded jittered backoff on transient failure (never crashing the loop, never
+opening a listener). The heartbeat can carry an **opt-in, advisory `node` capability
+descriptor** (`--report-capabilities`) for capability-aware routing. A deliberately
+named `--allow-insecure-http` switch exists only for local/dev loopback testing
+against a plain-HTTP center; non-loopback HTTP is rejected even with the switch, and
+production remains HTTPS-only. `scoot-edge dispatch` (also reachable via `run
+--enable-jobs`) now polls a `GET` job lease, executes 0..N jobs through
+`scoot --unattended -e "<goal>"` with cwd confined to `edge.job_root`, and reports
+`job_event`s back with a bounded, idempotent, provenance-logged apply (#186).
+Audit-body shipping remains intentionally unimplemented and gated by the
+prerequisites below.
 
 ## The idea in plain terms
 
@@ -246,7 +250,11 @@ center. The edge therefore treats audit shipping as fail-closed:
 
 ## Phase E2 — schema'd, idempotent job dispatch
 
-The center dispatches jobs over a long-poll lease the edge requests outbound:
+**Implemented (#186).** `scoot-edge dispatch` runs one lease-poll-and-execute cycle;
+`scoot-edge run --enable-jobs` folds the same cycle into the heartbeat loop. Both
+require `--job-root` and `--lease-url` (validated by the same config gate as
+`--center-url`/token: missing or insecure values die with exit `2`, never silently
+no-op). The center dispatches jobs over a `GET` lease the edge requests outbound:
 
 ```
 GET /jobs/lease?node=n-7a3&capacity=2
@@ -428,11 +436,24 @@ separate, independently-useful core changes, but E1/E2 are gated on them.
   capability descriptor (`--report-capabilities`, off by default; `--label` / `--skill` and the
   `SCOOT_EDGE_LABELS` / `SCOOT_EDGE_SKILLS` env vars feed it) may ride the heartbeat
   for later capability-aware routing — advisory only, never authority.
-- **E2:** schema'd, idempotent job dispatch behind explicit config + policy ceiling +
-  provenance auditing. **Prerequisite #2 (the in-child unattended policy clamp) is
-  done** — `scoot --unattended -e "<goal>"` — so E2 now gates only on cwd confinement
-  (`edge.job_root`). Edge jobs default `readonly`; the only raise is local
-  `edge.max_job_policy = unrestricted`. Capability-aware routing consumes the E1
-  `node` descriptor; a job a node cannot satisfy rejects with `no_matching_capability`.
+- **E2: ✅ Implemented (#186).** Schema'd, idempotent job dispatch behind explicit
+  config + policy ceiling + provenance auditing. `scoot-edge dispatch` (one-shot) and
+  `scoot-edge run --enable-jobs` (folded into the heartbeat loop) both require
+  `--job-root` and `--lease-url`; either missing, or `--lease-url` not HTTPS (absent
+  `--allow-insecure-http` for loopback dev), dies with exit `2` — the same
+  fail-closed config gate as `--center-url`/token. Each cycle: `GET`s the lease,
+  schema-validates every envelope (`validateJobEnvelope`; a job that fails to parse
+  or fails validation is reported `rejected`/`bad_schema` with no execution),
+  trims any excess beyond `--lease-capacity` to `at_capacity`, checks the bounded
+  `idem.jsonl` store for a prior final outcome (a redelivered `idem_key` re-acks the
+  stored result instead of re-running), and otherwise executes via
+  `scoot --unattended -e "<goal>" --session-id job-<job_id>` with cwd confined to
+  `--job-root`. Every phase transition (`accepted` → `done`/`failed`/`rejected`) is
+  both POSTed as a `job_event` and appended to `logs/edge-audit.jsonl`, correlated by
+  `session_id` to Scoot's own run audit. Edge jobs default `readonly`; the only raise
+  is local `edge.max_job_policy = unrestricted`. Capability-aware routing consumes
+  the E1 `node` descriptor; a job a node cannot satisfy rejects with
+  `no_matching_capability` — a center-side decision, since capability matching
+  happens before a job is ever dispatched to this node.
 - **E3:** packaging (install-script opt-in, Homebrew, apt) and
   reconnect/backpressure hardening.

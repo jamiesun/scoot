@@ -52,6 +52,22 @@ heading when cutting a release.
   doctor` now reports `audit.retention` as `WARN` if any gap was ever
   recorded. This removes the audit-history data-loss blocker that a future
   `scoot-edge` audit shipper would otherwise hit (#187).
+- **`scoot-edge` E2 job dispatch**: `scoot-edge dispatch` (one-shot) and
+  `scoot-edge run --enable-jobs` (folded into the heartbeat loop) poll a `GET`
+  job lease, schema-validate each envelope, and execute accepted jobs as
+  `scoot --unattended -e "<goal>" --session-id job-<job_id>` with cwd confined
+  to a required `--job-root` (never `$HOME` or `/`). Both require `--job-root`
+  and `--lease-url`; either missing, or `--lease-url` not HTTPS without
+  `--allow-insecure-http`, is a config error (exit `2`), matching the existing
+  `--center-url`/token gate. A bounded, persistent idempotency store
+  (`edge/idem.jsonl`, capped by `--idem-cap`, default `500`) re-acks a
+  redelivered `idem_key`'s prior outcome instead of re-running the job, and
+  every phase transition (`accepted` → `done`/`failed`/`rejected`) is both
+  POSTed as a `job_event` and appended to an edge-side provenance log
+  (`logs/edge-audit.jsonl`), correlated by `session_id` to Scoot's own run
+  audit. A new core `--session-id <id>` flag on `scoot -e` lets a caller pin
+  the session file name instead of the default UUID, which is what makes this
+  `job_id` ↔ `session_id` correlation possible (#186).
 
 ### Documentation
 
@@ -65,7 +81,7 @@ heading when cutting a release.
 
 ### Added
 
-- **Unattended one-shot policy clamp** (`scoot -e --unattended`): the E2 keystone
+- **Unattended one-shot policy clamp** (`scoot --unattended -e`): the E2 keystone
   prerequisite for `scoot-edge` job dispatch. An unattended `-e` run now computes
   its effective policy **in-child** as
   `correctUnattended(privilegeMin(requested, edge.max_job_policy))`, so argv (and a
