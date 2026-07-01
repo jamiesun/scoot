@@ -16,6 +16,51 @@ heading when cutting a release.
 
 ## [Unreleased]
 
+### Security
+
+- Model-triggered `bash` calls now run with a scrubbed subprocess environment:
+  ambient variables whose name matches `KEY`/`TOKEN`/`SECRET`/`PASSWORD`/
+  `PASSWD`/`CREDENTIAL`, plus the configured `backend.api_key_env`, are dropped
+  before the child process starts. Previously bash subprocesses inherited the
+  full parent environment, so a shell command could read out the backend API
+  token or other ambient credentials it was never granted (#190).
+- `guarded` mode's local-read guard now also denies known secret-bearing paths
+  — the resolved token file, a distinct configured `backend.api_key_file`, and
+  common credential fragments such as `.ssh`, `.env`, `id_rsa`, `token`,
+  `secret`, `credentials` — the same check `readonly` already enforced.
+  Previously this path check only ran in `readonly`, so the default `guarded`
+  mode could `file_read` a secret file straight through (#191).
+- Tool call input, tool observation, thought, final replies, and PostToolUse
+  audit-hook payloads are now scanned for known secret values (the resolved
+  backend token and the value of any ambient secret-named env var) and
+  redacted to `[REDACTED]` before they reach the audit log, trace output, or
+  structured event sink. Previously these channels recorded raw text
+  verbatim, so a secret surfaced by any tool call could be durably persisted
+  in `logs/audit.jsonl`. The live conversation history sent back to the model
+  is unaffected — only recording/observability channels are redacted (#189).
+
+### Added
+
+- The audit log (`logs/audit.jsonl`) now rotates into a bounded, gap-tracked
+  chain of numbered generations (`logs/audit.jsonl.<gen>`) instead of a single
+  destructively-overwritten `.1` backup. A durable `logs/audit.jsonl.gen`
+  sidecar tracks the current generation across process restarts; up to
+  `[audit].max_retained_generations` (default `8`, override
+  `SCOOT_AUDIT_MAX_RETAINED_GENERATIONS`) retired generations are kept, and any
+  eviction beyond that cap is durably recorded in
+  `logs/audit.jsonl.gaps.jsonl` rather than silently disappearing. `scoot
+  doctor` now reports `audit.retention` as `WARN` if any gap was ever
+  recorded. This removes the audit-history data-loss blocker that a future
+  `scoot-edge` audit shipper would otherwise hit (#187).
+
+### Documentation
+
+- Fixed docs, README, and book examples that showed the unattended one-shot
+  clamp as `scoot -e --unattended <goal>` — a rejected argv order, since
+  `-e`/`--eval` greedily consumes the very next token as the goal string.
+  Examples and prose now consistently show the accepted
+  `scoot --unattended -e "<goal>"` order (#192).
+
 ## [0.7.0] - 2026-07-01
 
 ### Added

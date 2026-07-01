@@ -60,6 +60,8 @@ const RuntimeState = struct {
     dirs: paths.Paths,
     skill_paths: []const []const u8,
     run_seq: usize = 0,
+    /// Retention cap for rotated `logs/audit.jsonl` generations (issue #187).
+    audit_max_retained_generations: u32 = audit.default_max_retained_generations,
 };
 
 /// Start a Scoot runtime from opaque configuration sources.
@@ -112,6 +114,16 @@ pub fn start(gpa: std.mem.Allocator, io: std.Io, options: Options) !*Runtime {
     state.agent_template.policy_mode = policy.Mode.fromString(cfg.tools.policy);
     state.agent_template.ca_file = cfg.backend.ca_file;
     state.agent_template.env = options.env;
+    // Removed from bash subprocess env in addition to generic KEY/TOKEN/SECRET
+    // patterns (issue #190), in case a custom name does not match one.
+    state.agent_template.secret_env_names = try cfg.secretEnvNames(arena);
+    // Known secret-bearing paths guarded/readonly local reads must never
+    // expose (issue #191).
+    state.agent_template.secret_paths = try cfg.secretPaths(arena);
+    // Plaintext secret values scrubbed out of audit/trace/event/hook text
+    // before they are persisted (issue #189). Reuses the token already
+    // resolved above instead of resolving it again.
+    state.agent_template.redact_secret_values = try cfg.redactSecretValues(arena, options.env, token);
     state.agent_template.context_budget_bytes = cfg.agent.context_budget_bytes;
     state.agent_template.compactor = try cfg.resolveCompressor(arena);
     state.agent_template.confine_writes = cfg.tools.confine_writes;
@@ -120,6 +132,7 @@ pub fn start(gpa: std.mem.Allocator, io: std.Io, options: Options) !*Runtime {
     state.agent_template.wasm_host = try cfg.resolveWasmHost(arena, io);
     state.dirs = cfg.dirs;
     state.skill_paths = if (cfg.skills.enabled) try cfg.skillPaths(arena) else &.{};
+    state.audit_max_retained_generations = cfg.audit.max_retained_generations;
 
     return @ptrCast(state);
 }
@@ -165,7 +178,7 @@ pub fn runDetailedWithOptions(rt: *Runtime, goal: []const u8, options: RunOption
     ag.skills = refs;
     ag.events = options.event_sink;
     var sink: ApiAuditSink = .{};
-    sink.open(arena, state.io, state.dirs.logs_dir, sess.id);
+    sink.open(arena, state.io, state.dirs.logs_dir, sess.id, state.audit_max_retained_generations);
     defer sink.close(state.io);
     ag.audit = sink.loggerPtr();
 
@@ -283,9 +296,9 @@ const ApiAuditSink = struct {
     logger: audit.Logger = undefined,
     buf: [4096]u8 = undefined,
 
-    fn open(self: *ApiAuditSink, arena: std.mem.Allocator, io: std.Io, logs_dir: []const u8, session_id: []const u8) void {
+    fn open(self: *ApiAuditSink, arena: std.mem.Allocator, io: std.Io, logs_dir: []const u8, session_id: []const u8, max_retained_generations: u32) void {
         const path = std.fmt.allocPrint(arena, "{s}/audit.jsonl", .{logs_dir}) catch return;
-        _ = audit.rotateFileIfTooLarge(io, arena, path, audit.default_max_jsonl_bytes) catch false;
+        _ = audit.rotateGenerational(io, arena, path, audit.default_max_jsonl_bytes, max_retained_generations) catch .{};
         const f = std.Io.Dir.cwd().createFile(io, path, .{ .truncate = false }) catch return;
         self.file = f;
         f.setPermissions(io, std.Io.File.Permissions.fromMode(0o600)) catch {};

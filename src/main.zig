@@ -750,6 +750,7 @@ fn runPolicyCheck(out: *Io.Writer, arena: std.mem.Allocator, io: std.Io, cfg: sc
     ag.confine_writes = cfg.tools.confine_writes;
     ag.block_internal_http = cfg.tools.block_internal_http;
     ag.mcp_servers = cfg.mcp.servers;
+    ag.secret_paths = try cfg.secretPaths(arena);
     ag.policy_hook_config = try cfg.resolvePolicyHook(arena, io);
     const decision = ag.guard(arena, action, pc.input);
 
@@ -812,6 +813,7 @@ fn runDoctor(
     try checkTokenSource(&d, arena, io, env, cfg);
     try checkSkillsConfig(&d, arena, io, cfg);
     try checkScheduleConfig(&d, cfg);
+    try checkAuditRetention(&d, arena, io, cfg);
 
     try d.info("backend.reachability", "skipped; doctor first version does not actively probe the network");
     try out.print("summary\tfailures={d}\twarnings={d}\n", .{ d.failures, d.warnings });
@@ -968,6 +970,28 @@ fn checkScheduleConfig(d: *Doctor, cfg: scoot.config.Config) !void {
     } else {
         try d.warn("schedule.jobs", "invalid job triggers exist and will be skipped at runtime");
     }
+}
+
+/// Surfaces any durably recorded audit-rotation gaps (issue #187): generations
+/// of `logs/audit.jsonl` that the retention cap evicted before a future edge
+/// shipper could ever acknowledge them. A visible gap is safer than an
+/// invisible one, so doctor reports this even though nothing consumes it yet.
+fn checkAuditRetention(d: *Doctor, arena: std.mem.Allocator, io: std.Io, cfg: scoot.config.Config) !void {
+    const path = try std.fmt.allocPrint(arena, "{s}/audit.jsonl", .{cfg.dirs.logs_dir});
+    const gaps = scoot.audit.readGapLog(arena, io, path) catch |err| {
+        try d.warn("audit.retention", try std.fmt.allocPrint(arena, "could not read gap log: {s}", .{@errorName(err)}));
+        return;
+    };
+    if (gaps.len == 0) {
+        try d.ok("audit.retention", "no rotation gaps recorded");
+        return;
+    }
+    const last = gaps[gaps.len - 1];
+    try d.warn("audit.retention", try std.fmt.allocPrint(
+        arena,
+        "{d} rotation gap(s) recorded; most recent evicted generations {d}..{d} (never shipped)",
+        .{ gaps.len, last.gap_from, last.gap_to },
+    ));
 }
 
 // --- scoot setup: interactive config directory generator -------------------
@@ -2537,6 +2561,16 @@ fn setupRun(
     ag.policy_mode = policy_mode;
     ag.ca_file = cfg.backend.ca_file;
     ag.env = env;
+    // Removed from bash subprocess env in addition to generic KEY/TOKEN/SECRET
+    // patterns (issue #190), in case a custom name does not match one.
+    ag.secret_env_names = try cfg.secretEnvNames(arena);
+    // Known secret-bearing paths guarded/readonly local reads must never
+    // expose (issue #191).
+    ag.secret_paths = try cfg.secretPaths(arena);
+    // Plaintext secret values scrubbed out of audit/trace/event/hook text
+    // before they are persisted (issue #189). Reuses the token the client
+    // already resolved instead of resolving it again.
+    ag.redact_secret_values = try cfg.redactSecretValues(arena, env, client.api_key);
     ag.context_budget_bytes = cfg.agent.context_budget_bytes;
     ag.compactor = try cfg.resolveCompressor(arena);
     ag.confine_writes = cfg.tools.confine_writes;
@@ -2553,7 +2587,7 @@ fn setupRun(
         sink.audit_hook_sink = hook_sink;
     }
 
-    sink.open(warn, arena, io, cfg.dirs.logs_dir);
+    sink.open(warn, arena, io, cfg.dirs.logs_dir, cfg.audit.max_retained_generations);
     sink.setContext(session_id, null);
     ag.audit = sink.loggerPtr();
 
@@ -2676,9 +2710,9 @@ const AuditSink = struct {
 
     /// Opens audit log at EOF. If open fails, degrades to explicit warning and no
     /// trace, neither silently black-boxing nor blocking the task on log failure.
-    fn open(self: *AuditSink, warn: *Io.Writer, arena: std.mem.Allocator, io: std.Io, logs_dir: []const u8) void {
+    fn open(self: *AuditSink, warn: *Io.Writer, arena: std.mem.Allocator, io: std.Io, logs_dir: []const u8, max_retained_generations: u32) void {
         const path = std.fmt.allocPrint(arena, "{s}/audit.jsonl", .{logs_dir}) catch return;
-        _ = scoot.audit.rotateFileIfTooLarge(io, arena, path, scoot.audit.default_max_jsonl_bytes) catch false;
+        _ = scoot.audit.rotateGenerational(io, arena, path, scoot.audit.default_max_jsonl_bytes, max_retained_generations) catch .{};
         const f = Io.Dir.cwd().createFile(io, path, .{ .truncate = false }) catch |err| {
             warn.print("[scoot] warning: audit log cannot be written ({s}: {s}); this run will not be audited\n", .{ path, @errorName(err) }) catch {};
             return;
@@ -3206,7 +3240,7 @@ test "AuditSink: audit file is created owner-only" {
     var warn_buf: [512]u8 = undefined;
     var warn = Io.Writer.fixed(&warn_buf);
     var sink: AuditSink = .{};
-    sink.open(&warn, arena, io, dir);
+    sink.open(&warn, arena, io, dir, scoot.audit.default_max_retained_generations);
     if (sink.loggerPtr()) |lg| try lg.log(.run, "mode-test");
     sink.close(io);
 

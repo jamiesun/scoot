@@ -203,6 +203,12 @@ level = "info"
 # Write audit logs under ~/.scoot/logs.
 to_file = true
 
+# How many rotated audit-log generations (logs/audit.jsonl.<gen>) to retain on
+# disk before the oldest is evicted. Every eviction is durably recorded in
+# logs/audit.jsonl.gaps.jsonl and surfaced by `scoot doctor` (issue #187), so a
+# bounded cap never becomes an invisible loss.
+max_retained_generations = 8
+
 # Optional PostToolUse-style audit/observability hook (issue #137). Default-off:
 # when `package` is set, a structured event is delivered to the hook AFTER each
 # tool action completes (executed) or is denied by the policy gate, for an
@@ -253,7 +259,7 @@ poll_ms = 1000
 # mode = "readonly"
 
 [edge]
-# Policy ceiling for UNATTENDED one-shot runs (`scoot -e --unattended`) and future
+# Policy ceiling for UNATTENDED one-shot runs (`scoot --unattended -e "<goal>"`) and future
 # edge-dispatched jobs. This is deliberately separate from tools.policy (the
 # interactive default) so that raising the interactive policy never silently raises
 # the unattended ceiling. It is enforced IN-CHILD against this local config, so a

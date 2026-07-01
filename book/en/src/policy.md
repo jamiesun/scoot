@@ -198,7 +198,8 @@ one lattice (`correctUnattended`/`privilegeMin` in `policy.zig`):
 
 - **Scheduled / daemon jobs** coerce per-job `mode` via `effectiveMode`. See
   [Scheduling & Daemon](scheduling.md).
-- **One-shot `scoot -e --unattended`** computes its effective policy in-child as
+- **One-shot `scoot --unattended -e "<goal>"`** computes its effective policy
+  in-child as
   `correctUnattended(privilegeMin(requested, edge.max_job_policy))`. The local
   `[edge].max_job_policy` ceiling (default `readonly`) is read from config, so the
   command line can only ever *lower* policy, never raise it above the ceiling — an

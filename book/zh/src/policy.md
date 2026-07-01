@@ -127,7 +127,7 @@ timeout_ms = 5000                          # 默认取 tools.timeout_ms
 无人值守任务在结构上强制安全：配置为 `guarded` 的任务在执行时会被**矫正为等效 `readonly`**。若你接受风险，必须显式写 `unrestricted`。这一矫正发生在两处，且共用同一个格（`policy.zig` 中的 `correctUnattended`/`privilegeMin`）：
 
 - **调度 / 守护进程任务**通过 `effectiveMode` 矫正逐任务的 `mode`。见[调度与守护进程](scheduling.md)。
-- **一次性 `scoot -e --unattended`** 会**在子进程内**把有效策略计算为 `correctUnattended(privilegeMin(requested, edge.max_job_policy))`。本地的 `[edge].max_job_policy` 天花板（默认 `readonly`）从 config 读取，因此命令行永远只能把策略*降*下来，绝不能抬到天花板之上 —— 可选的 `--policy <mode>` 会被钳制回去。这是可选的 `scoot-edge` fleet 伴生程序启动任务所经的拱心石原语，因此一个有 bug 或受中心影响的 edge 永远无法越权。不带 `--unattended` 时，有人值守的 `scoot -e` 仍使用交互式的 `tools.policy` 默认值，且 `--policy` 覆盖可以抬高它。
+- **一次性 `scoot --unattended -e "<goal>"`** 会**在子进程内**把有效策略计算为 `correctUnattended(privilegeMin(requested, edge.max_job_policy))`。本地的 `[edge].max_job_policy` 天花板（默认 `readonly`）从 config 读取，因此命令行永远只能把策略*降*下来，绝不能抬到天花板之上 —— 可选的 `--policy <mode>` 会被钳制回去。这是可选的 `scoot-edge` fleet 伴生程序启动任务所经的拱心石原语，因此一个有 bug 或受中心影响的 edge 永远无法越权。不带 `--unattended` 时，有人值守的 `scoot -e` 仍使用交互式的 `tools.policy` 默认值，且 `--policy` 覆盖可以抬高它。
 
 特权序是显式格 `readonly ⊑ guarded ⊑ unrestricted`（从最小到最大权限）—— 刻意**不是** `Mode` 枚举的声明序，所以钳制绝不会意外反转而挑中更危险的 mode。
 

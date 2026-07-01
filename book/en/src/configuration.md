@@ -61,6 +61,7 @@ ephemeral, run-once-then-discard execution.
 | `SCOOT_SKILLS_INCLUDE_AGENTS_SKILLS` | `skills.include_agents_skills` | bool |
 | `SCOOT_AUDIT_LEVEL` | `audit.level` | string |
 | `SCOOT_AUDIT_TO_FILE` | `audit.to_file` | bool |
+| `SCOOT_AUDIT_MAX_RETAINED_GENERATIONS` | `audit.max_retained_generations` | integer |
 | `SCOOT_EDGE_MAX_JOB_POLICY` | `edge.max_job_policy` | string (`guarded`/`readonly`/`unrestricted`) |
 
 Notes:
@@ -494,8 +495,9 @@ mode = "readonly"
 
 ## `[edge]`
 
-The policy ceiling for **unattended** runs: the one-shot `scoot -e --unattended`
-clamp and future `scoot-edge`-dispatched jobs. It is deliberately separate from
+The policy ceiling for **unattended** runs: the one-shot
+`scoot --unattended -e "<goal>"` clamp and future `scoot-edge`-dispatched jobs.
+It is deliberately separate from
 `tools.policy` (the interactive default) so that raising the interactive policy
 never silently raises the unattended ceiling.
 
@@ -505,7 +507,7 @@ never silently raises the unattended ceiling.
 
 The ceiling is enforced **in-child against this local config**, so a command line
 or wire request can only ever *lower* policy below it, never raise it. With
-`scoot -e --unattended`, the effective policy is
+`scoot --unattended -e "<goal>"`, the effective policy is
 `correctUnattended(privilegeMin(requested, edge.max_job_policy))`; an optional
 `--policy <mode>` is clamped down to this ceiling. Override per-process with
 `SCOOT_EDGE_MAX_JOB_POLICY`.

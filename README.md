@@ -106,10 +106,10 @@ task:
 
 `guarded` is a convenience tripwire, not a sandbox. For unattended jobs Scoot
 automatically drops to `readonly` — scheduled/daemon jobs coerce their `mode`, and
-a one-shot `scoot -e --unattended` clamps in-child to the local `edge.max_job_policy`
-ceiling (default `readonly`) so the command line can only lower policy, never raise
-it. Pair it with OS-level isolation when you need strong containment. Full threat
-model: [Execution Policy & Security](book/en/src/policy.md).
+a one-shot `scoot --unattended -e "<goal>"` clamps in-child to the local
+`edge.max_job_policy` ceiling (default `readonly`) so the command line can only
+lower policy, never raise it. Pair it with OS-level isolation when you need strong
+containment. Full threat model: [Execution Policy & Security](book/en/src/policy.md).
 
 ## Run it unattended
 

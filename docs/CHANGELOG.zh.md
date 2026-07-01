@@ -15,6 +15,44 @@ English version: [CHANGELOG.md](../CHANGELOG.md)。
 
 ## [未发布]
 
+### 安全
+
+- 由模型触发的 `bash` 调用现在使用经过脱敏的子进程环境：名字匹配
+  `KEY`/`TOKEN`/`SECRET`/`PASSWORD`/`PASSWD`/`CREDENTIAL` 的环境变量，以及配置的
+  `backend.api_key_env`，在子进程启动前就会被剔除。此前 bash 子进程会继承父进程
+  的完整环境，导致 shell 命令能读出后端 API token 或其他从未被授予的环境态密钥
+  （#190）。
+- `guarded` 模式下的本地读取护栏现在也会拒绝已知的密钥路径 —— 解析出的 token
+  文件、另行配置且不同的 `backend.api_key_file`，以及 `.ssh`、`.env`、
+  `id_rsa`、`token`、`secret`、`credentials` 等常见凭据片段 —— 与 `readonly`
+  已有的检查一致。此前该路径检查只在 `readonly` 下生效，导致默认的 `guarded`
+  模式可以直接把密钥文件 `file_read` 出来（#191）。
+- 工具调用输入、工具观测结果、thought、最终回复，以及 PostToolUse 审计钩子
+  payload，现在都会先扫描已知密钥值（解析出的后端 token，以及任何名字像密钥的
+  环境变量的值），在写入审计日志、trace 输出或结构化事件接收器之前替换为
+  `[REDACTED]`。此前这些通道会原样记录文本，导致任意工具调用暴露的密钥都可能被
+  持久化进 `logs/audit.jsonl`。发回给模型的实时会话历史不受影响 —— 只有
+  记录/可观测通道会被脱敏（#189）。
+
+### 新增
+
+- 审计日志（`logs/audit.jsonl`）现在会轮转为一条有上限、可追踪缺口的编号代
+  链（`logs/audit.jsonl.<gen>`），而不再是覆盖式的单一 `.1` 备份。一个持久的
+  `logs/audit.jsonl.gen` sidecar 会跨进程重启追踪当前代号；最多保留
+  `[audit].max_retained_generations`（默认 `8`，可用
+  `SCOOT_AUDIT_MAX_RETAINED_GENERATIONS` 覆盖）个已退休代，超出该上限的每一次
+  淘汰都会持久记录进 `logs/audit.jsonl.gaps.jsonl`，而不是悄悄消失。若曾记录
+  过任何 gap，`scoot doctor` 现在会把 `audit.retention` 报告为 `WARN`。这消除
+  了未来 `scoot-edge` audit 搬运器本会遇到的审计历史数据丢失阻塞点（#187）。
+
+### 文档
+
+- 修复了文档、README 与 book 示例中把无人值守一次性钳制写成
+  `scoot -e --unattended <goal>` 的问题 —— 这是一种会被拒绝的 argv 顺序，
+  因为 `-e`/`--eval` 会贪婪地把紧随其后的 token 当作 goal 字符串消费掉。
+  示例与正文现在统一改为可被接受的 `scoot --unattended -e "<goal>"`
+  顺序（#192）。
+
 ## [0.7.0] - 2026-07-01
 
 ### 新增
