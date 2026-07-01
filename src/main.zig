@@ -40,6 +40,7 @@ const usage =
     \\  --retries <N>        retry count for transient backend errors in -e mode (default 2, 0 disables retries)
     \\  --unattended         -e one-shot runs with no human present: clamps policy to edge.max_job_policy (default readonly) and corrects guarded to readonly
     \\  --policy <mode>      -e one-shot policy override (guarded/readonly/unrestricted); with --unattended it can only lower below the edge.max_job_policy ceiling
+    \\  --session-id <id>    -e one-shot: use this session id instead of an auto-generated cli-<ts>-<pid> id, for external correlation (e.g. scoot-edge job dispatch, issue #186). Alphanumeric plus '.', '_', '-' only, max 128 chars.
     \\  --scoot-home <dir>   override runtime directory (takes precedence over SCOOT_HOME; useful for test isolation)
     \\  --trace              print execution trace to stderr (-e/--eval and interactive REPL are supported)
     \\  --ticks <N>          schedule run / daemon run exits after N ticks (default 0 means run continuously)
@@ -72,6 +73,7 @@ pub fn main(init: std.process.Init) !void {
     var eval_retries_set = false;
     var eval_unattended = false;
     var eval_policy_override: ?[]const u8 = null;
+    var eval_session_id_override: ?[]const u8 = null;
     var scoot_home_override: ?[]const u8 = null;
     var trace = false;
     var cmd_config = false;
@@ -137,6 +139,13 @@ pub fn main(init: std.process.Init) !void {
                 die(out, 2);
             }
             eval_policy_override = args[i];
+        } else if (eql(arg, "--session-id")) {
+            i += 1;
+            if (i >= args.len or args[i].len == 0) {
+                try out.writeAll("error: --session-id requires a non-empty id argument\n");
+                die(out, 2);
+            }
+            eval_session_id_override = args[i];
         } else if (eql(arg, "--scoot-home")) {
             i += 1;
             if (i >= args.len or args[i].len == 0) {
@@ -294,6 +303,21 @@ pub fn main(init: std.process.Init) !void {
     if (eval_policy_override) |pm| {
         if (parsePolicyModeStrict(pm) == null) {
             try out.print("error: unknown policy mode '{s}' (expected: guarded / readonly / unrestricted)\n", .{pm});
+            die(out, 2);
+        }
+    }
+    if (eval_session_id_override != null and eval_prompt == null) {
+        try out.writeAll("error: --session-id currently only supports -e/--eval one-shot mode\n");
+        die(out, 2);
+    }
+    if (eval_session_id_override) |sid| {
+        // Fail-closed charset check (issue #186): session_id flows unsanitized
+        // into session/audit file paths (e.g. session.zig's `<dir>/<id>.jsonl`),
+        // so an externally-influenced id (e.g. scoot-edge deriving it from a
+        // wire-delivered job_id) must never carry '/', '..', or other path
+        // metacharacters through to disk.
+        if (!isSafeSessionId(sid)) {
+            try out.writeAll("error: --session-id must be 1-128 chars of [A-Za-z0-9._-] only\n");
             die(out, 2);
         }
     }
@@ -486,7 +510,7 @@ pub fn main(init: std.process.Init) !void {
         // Audit trace. If unavailable, degrade to an explicit stderr warning and
         // no trace rather than blocking the run.
         var sink: AuditSink = .{};
-        const session_id = try interactiveSessionId(arena, io, "cli");
+        const session_id = eval_session_id_override orelse try interactiveSessionId(arena, io, "cli");
 
         // Effective one-shot policy. Attended runs (a human is present) let
         // --policy raise above the interactive default. Unattended runs clamp the
@@ -2601,6 +2625,20 @@ fn interactiveSessionId(arena: std.mem.Allocator, io: std.Io, prefix: []const u8
     return formatInteractiveSessionId(arena, prefix, ts_ms, currentPid());
 }
 
+/// Whether `id` is safe to interpolate into a `<dir>/<id>.jsonl` file path:
+/// non-empty, at most 128 bytes, and restricted to `[A-Za-z0-9._-]`. Rejects
+/// path separators and any `..` so an externally-influenced `--session-id`
+/// (issue #186: scoot-edge deriving one from a wire-delivered job_id) can
+/// never traverse outside the sessions/logs directories it is joined into.
+fn isSafeSessionId(id: []const u8) bool {
+    if (id.len == 0 or id.len > 128) return false;
+    for (id) |c| {
+        const ok = std.ascii.isAlphanumeric(c) or c == '.' or c == '_' or c == '-';
+        if (!ok) return false;
+    }
+    return std.mem.indexOf(u8, id, "..") == null;
+}
+
 fn formatInteractiveSessionId(arena: std.mem.Allocator, prefix: []const u8, ts_ms: i64, pid: i64) ![]const u8 {
     return std.fmt.allocPrint(arena, "{s}-{d}-{d}", .{ prefix, ts_ms, pid });
 }
@@ -2893,6 +2931,23 @@ test "formatInteractiveSessionId: cli/repl ids are per-run and file-safe" {
 
     try std.testing.expectEqualStrings("cli-1718600000123-4242", cli);
     try std.testing.expectEqualStrings("repl-1718600000123-4242", repl);
+}
+
+test "isSafeSessionId accepts alphanumeric/./_/- and rejects path metacharacters (issue #186)" {
+    try std.testing.expect(isSafeSessionId("cli-1718600000123-4242"));
+    try std.testing.expect(isSafeSessionId("job-abc_123.456"));
+    try std.testing.expect(isSafeSessionId("A"));
+    try std.testing.expect(!isSafeSessionId(""));
+    try std.testing.expect(!isSafeSessionId("../etc/passwd"));
+    try std.testing.expect(!isSafeSessionId("a/b"));
+    try std.testing.expect(!isSafeSessionId("a\\b"));
+    try std.testing.expect(!isSafeSessionId("has space"));
+    try std.testing.expect(!isSafeSessionId("semi;colon"));
+    try std.testing.expect(!isSafeSessionId("dotdot..here"));
+    const too_long = "a" ** 129;
+    try std.testing.expect(!isSafeSessionId(too_long));
+    const max_len = "a" ** 128;
+    try std.testing.expect(isSafeSessionId(max_len));
 }
 
 test "readLine: with newline/without trailing newline/empty input" {
